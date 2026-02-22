@@ -304,19 +304,27 @@ export class TurquoiseNetwork {
       if (s === 'failed' || s === 'closed') this._teardown(fp);
     };
 
-    // ── THE KEY FIX FOR CALLS ─────────────────────────────────────────────
-    // When addTrack() is called (on an existing connection), this fires.
-    // We send a renegotiate-offer (not offer) so remote knows to keep existing channels.
+    // ── RENEGOTIATION FOR CALLS ───────────────────────────────────────────
+    // onnegotiationneeded fires when:
+    //   (a) createDataChannel() is called during initial setup — IGNORE
+    //   (b) addTrack() is called after connection established — HANDLE
+    //
+    // Guard: only renegotiate when connectionState === 'connected'.
+    // During initial handshake, connectionState is 'new'/'connecting' — safe to skip.
+    // After connection, addTrack() for voice/video triggers proper renegotiation.
     let negotiating = false;
     pc.onnegotiationneeded = async () => {
+      // Skip during initial setup — let _createOffer handle the first offer
+      if (pc.connectionState !== 'connected') return;
       if (negotiating || pc.signalingState !== 'stable') return;
       negotiating = true;
       try {
         const offer = await pc.createOffer();
+        if (pc.signalingState !== 'stable') return; // state may have changed
         await pc.setLocalDescription(offer);
         this._signal({ type:'renegotiate-offer', from:this.identity.fingerprint, to:fp, sdp:offer.sdp });
       } catch (e) {
-        this._log(`⚠ onnegotiationneeded: ${e.message}`);
+        this._log(`⚠ renegotiation: ${e.message}`);
       } finally {
         negotiating = false;
       }
