@@ -1,12 +1,15 @@
 {
   "name": "turquoise",
-  "version": "3.0.0",
+  "version": "5.0.0",
   "type": "module",
-  "description": "WebRTC signaling relay",
+  "description": "Local-first cryptographic peer-to-peer communication",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "ws": "^8.19.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

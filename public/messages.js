@@ -1,12 +1,11 @@
 /**
- * messages.js — Turquoise Phase 3
+ * messages.js — Turquoise
  *
- * Persistent storage for:
- *   - Chat messages (indexed by session/peer fingerprint)
- *   - Known peers (fingerprint → shortId, last seen)
+ * Persistent storage for chat messages and known peers.
+ * Append-only message log. Peer registry updated on connect.
  *
- * Append-only for messages — nothing is ever deleted unless the user clears.
- * Murphy's Law: every DB operation has explicit error handling.
+ * Murphy's Law: every operation has explicit error paths.
+ *               Empty results return [] — never throw for missing data.
  */
 
 const DB_NAME    = 'turquoise_messages';
@@ -17,125 +16,90 @@ function openDB() {
     if (!window.indexedDB) {
       reject(new Error('IndexedDB not supported.')); return;
     }
-
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-
     req.onupgradeneeded = (ev) => {
       const db = ev.target.result;
-      try {
-        // messages store: indexed by sessionId for fast session loading
-        if (!db.objectStoreNames.contains('messages')) {
-          const ms = db.createObjectStore('messages', { keyPath: 'id' });
-          ms.createIndex('bySession', 'sessionId', { unique: false });
-          ms.createIndex('byTs',      'ts',        { unique: false });
-        }
-        // peers store: keyed by fingerprint
-        if (!db.objectStoreNames.contains('peers')) {
-          db.createObjectStore('peers', { keyPath: 'fingerprint' });
-        }
-      } catch (e) {
-        reject(new Error('DB upgrade failed: ' + e.message));
+      if (!db.objectStoreNames.contains('messages')) {
+        const ms = db.createObjectStore('messages', { keyPath: 'id' });
+        ms.createIndex('bySession', 'sessionId', { unique: false });
+        ms.createIndex('byTs',      'ts',        { unique: false });
+      }
+      if (!db.objectStoreNames.contains('peers')) {
+        db.createObjectStore('peers', { keyPath: 'fingerprint' });
       }
     };
-
     req.onsuccess = () => resolve(req.result);
     req.onerror   = () => reject(new Error('Messages DB failed: ' + req.error?.message));
-    req.onblocked = () => reject(new Error('Messages DB blocked — close other tabs.'));
+    req.onblocked = () => reject(new Error('Messages DB blocked.'));
   });
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-/**
- * Save one message record.
- * @param {object} msg  Must have: id, sessionId, from, fromShort, text, ts, type, own
- */
 export async function saveMessage(msg) {
   if (!msg?.id)        throw new Error('saveMessage: msg.id required.');
   if (!msg?.sessionId) throw new Error('saveMessage: msg.sessionId required.');
-  if (!msg?.ts)        throw new Error('saveMessage: msg.ts required.');
-
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('messages', 'readwrite');
-      tx.objectStore('messages').put(msg);
-      tx.oncomplete = () => resolve();
-      tx.onerror    = () => reject(new Error('saveMessage failed: ' + tx.error?.message));
-    } catch (e) {
-      reject(new Error('saveMessage tx error: ' + e.message));
-    }
+    const tx = db.transaction('messages', 'readwrite');
+    tx.objectStore('messages').put(msg);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(new Error('saveMessage failed: ' + tx.error?.message));
   });
 }
 
-/**
- * Load all messages for a session (peer fingerprint), sorted by timestamp.
- * Returns [] if none found — never throws for empty result.
- */
 export async function loadMessages(sessionId) {
   if (!sessionId) throw new Error('loadMessages: sessionId required.');
-
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    try {
-      const tx    = db.transaction('messages', 'readonly');
-      const idx   = tx.objectStore('messages').index('bySession');
-      const req   = idx.getAll(IDBKeyRange.only(sessionId));
-
-      req.onsuccess = () => {
-        const msgs = (req.result || []).sort((a, b) => a.ts - b.ts);
-        resolve(msgs);
-      };
-      req.onerror = () => reject(new Error('loadMessages failed: ' + req.error?.message));
-    } catch (e) {
-      reject(new Error('loadMessages tx error: ' + e.message));
-    }
+    const idx = db.transaction('messages', 'readonly')
+                  .objectStore('messages').index('bySession');
+    const req = idx.getAll(IDBKeyRange.only(sessionId));
+    req.onsuccess = () => resolve((req.result || []).sort((a, b) => a.ts - b.ts));
+    req.onerror   = () => reject(new Error('loadMessages failed: ' + req.error?.message));
   });
 }
 
 // ── Peers ─────────────────────────────────────────────────────────────────────
 
-/**
- * Save or update a known peer.
- * @param {object} peer  Must have: fingerprint, shortId
- */
 export async function savePeer(peer) {
   if (!peer?.fingerprint) throw new Error('savePeer: fingerprint required.');
-  if (!peer?.shortId)     throw new Error('savePeer: shortId required.');
-
-  const record = {
-    fingerprint: peer.fingerprint,
-    shortId:     peer.shortId,
-    name:        peer.name || peer.shortId,
-    lastSeen:    Date.now(),
-  };
-
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction('peers', 'readwrite');
-      tx.objectStore('peers').put(record);
-      tx.oncomplete = () => resolve();
-      tx.onerror    = () => reject(new Error('savePeer failed: ' + tx.error?.message));
-    } catch (e) {
-      reject(new Error('savePeer tx error: ' + e.message));
-    }
+    const tx = db.transaction('peers', 'readwrite');
+    tx.objectStore('peers').put({
+      fingerprint: peer.fingerprint,
+      shortId:     peer.shortId || peer.fingerprint.slice(0, 8),
+      nickname:    peer.nickname || null,
+      lastSeen:    Date.now(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(new Error('savePeer failed: ' + tx.error?.message));
   });
 }
 
-/**
- * Load all known peers.
- * Returns [] if none — never throws for empty result.
- */
 export async function loadPeers() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    try {
-      const req = db.transaction('peers', 'readonly').objectStore('peers').getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror   = () => reject(new Error('loadPeers failed: ' + req.error?.message));
-    } catch (e) {
-      reject(new Error('loadPeers tx error: ' + e.message));
-    }
+    const req = db.transaction('peers', 'readonly').objectStore('peers').getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror   = () => reject(new Error('loadPeers failed: ' + req.error?.message));
+  });
+}
+
+export async function updatePeerNickname(fingerprint, nickname) {
+  if (!fingerprint) return;
+  const db    = await openDB();
+  const store = db.transaction('peers', 'readwrite').objectStore('peers');
+  return new Promise((resolve) => {
+    const req = store.get(fingerprint);
+    req.onsuccess = () => {
+      const record = req.result;
+      if (!record) { resolve(); return; }
+      record.nickname = nickname;
+      store.put(record);
+      resolve();
+    };
+    req.onerror = () => resolve(); // non-fatal
   });
 }
