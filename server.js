@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
 
 // IMPORTANT: Render injects PORT automatically
-const PORT = process.env.PORT || 3443;
+const PORT = process.env.PORT || 3000;
 
 if (!fs.existsSync(PUBLIC)) {
   console.error(`❌ /public folder not found at: ${PUBLIC}`);
