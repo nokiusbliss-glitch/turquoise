@@ -1,17 +1,15 @@
 /**
- * main.js — Turquoise Phase 3 + 4
+ * main.js — Turquoise Phase 3 + 4 (Render-safe version)
  *
  * Boot sequence:
  *   1. Check browser APIs
  *   2. Get cryptographic identity
  *   3. Create network (WebRTC + signaling)
  *   4. Mount app UI
- *   5. Connect to signaling server
- *
- * The app takes over from here — main.js hands off and stays quiet.
+ *   5. Connect to signaling server (auto-detect host + protocol)
  */
 
-import { getIdentity }     from './identity.js';
+import { getIdentity }      from './identity.js';
 import { TurquoiseNetwork } from './webrtc.js';
 import { TurquoiseApp }     from './app.js';
 
@@ -39,7 +37,7 @@ async function boot() {
         <div>Missing APIs:</div>
         ${missing.map(m => `<div style="margin-top:.5rem;opacity:.7;">  · ${m}</div>`).join('')}
         <div style="margin-top:1.5rem;opacity:.5;font-size:.8rem;">
-          Open this page via https://localhost:3443
+          Open this page via HTTPS
         </div>
       </div>
     `;
@@ -60,7 +58,6 @@ async function boot() {
   let network;
   try {
     network = new TurquoiseNetwork(identity, () => {});
-    // onEvent will be replaced by app.js in mount()
   } catch (e) {
     document.getElementById('app').innerHTML =
       `<div style="padding:2rem;font-family:monospace;color:#e05040;">Network init failed: ${e.message}</div>`;
@@ -79,12 +76,16 @@ async function boot() {
     return;
   }
 
-  // 5. Connect to signaling server
-  // Server runs on same host as the page, port 3443
+  // 5. Connect to signaling server (FIXED FOR RENDER)
+
   try {
-    const host = window.location.hostname;
-    const url  = `wss://${host}:3443`;
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const url = `${protocol}://${window.location.host}`;
+
+    console.log("Connecting to signaling server:", url);
+
     network.connect(url);
+
   } catch (e) {
     console.error('Network connect failed:', e.message);
   }
