@@ -1,43 +1,27 @@
 /**
- * webrtc.js — Turquoise v7 (LAN-First Engine)
+ * webrtc.js — Turquoise v8
  *
- * ── LAN-First Transfer ───────────────────────────────────────────────────────
- * iceTransportPolicy: 'all' — allows ALL candidate types.
- * ICE priority order (built into WebRTC spec):
- *   1. host candidates     (LAN direct — fastest, zero relay)
- *   2. srflx candidates    (STUN, same NAT)
- *   3. relay candidates    (TURN, internet relay — slowest)
+ * KEY CHANGE FROM v7:
+ * Removed onnegotiationneeded handler entirely.
+ * It fired during createDataChannel() in initial setup, creating a
+ * conflicting offer — "m-lines order mismatch" error.
  *
- * When both devices are on same WiFi/hotspot:
- *   ICE ALWAYS selects the host candidate.
- *   Data flows directly over LAN at full 5GHz speed.
- *   No server involved. No TURN used.
+ * Instead: renegotiation for calls is triggered MANUALLY from startCall()
+ * by calling _renegotiate(fp) after addTrack(). This is more predictable,
+ * fires only when we explicitly want it, and never conflicts with setup.
  *
- * When devices are on different networks (mobile data vs WiFi):
- *   TURN is used as fallback.
- *   Still works, just slower.
+ * LAN-FIRST: iceTransportPolicy:'all' lets WebRTC pick host candidates
+ * (direct LAN IP) when both devices are on same WiFi. TURN only used
+ * as last resort for cross-network connections.
  *
- * No manual mode toggle needed — WebRTC handles it automatically.
- *
- * ── Two DataChannels per peer ────────────────────────────────────────────────
+ * TWO DataChannels per peer:
  *   'ctrl' — ordered, reliable  → chat, signals, call events
- *   'ft'   — unordered, unreliable → file chunks (app-level reliability)
+ *   'ft'   — unordered, no retransmits → file chunks (app-level CRC)
  *
- * Unordered/unreliable for file transfer = UDP-like SCTP.
- * We handle ordering and integrity at app layer (chunk index + CRC).
- * This eliminates head-of-line blocking — much faster on LAN.
- *
- * ── Call Renegotiation ───────────────────────────────────────────────────────
- * onnegotiationneeded fires when addTrack() is called.
- * We send 'renegotiate-offer' (distinct from initial 'offer').
- * Remote answers with 'renegotiate-answer'.
- * This keeps the DataChannel alive while adding media.
- *
- * Murphy's Law: ICE failure → restartIce(). Connection failure → teardown.
- *               Every async is try/catched. Dead peers removed from registry.
+ * Murphy's Law: ICE fail → restartIce. Connection fail → teardown.
+ *               Every async try/catched. Nothing crashes silently.
  */
 
-// ── ICE config: LAN-first, TURN as last resort ────────────────────────────────
 const ICE = [
   { urls: 'stun:stun.l.google.com:19302'  },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -68,28 +52,26 @@ export class TurquoiseNetwork {
     this.reconnectTimer   = null;
     this.intentionalClose = false;
 
-    // Per-peer state
-    this.pcs         = new Map(); // fp → RTCPeerConnection
-    this.ctrlCh      = new Map(); // fp → RTCDataChannel (ordered, reliable)
-    this.ftCh        = new Map(); // fp → RTCDataChannel (unordered, unreliable)
-    this.pendingICE  = new Map(); // fp → ICECandidate[]
+    this.pcs        = new Map(); // fp → RTCPeerConnection
+    this.ctrlCh     = new Map(); // fp → RTCDataChannel (ordered)
+    this.ftCh       = new Map(); // fp → RTCDataChannel (unordered)
+    this.pendingICE = new Map(); // fp → candidate[]
 
-    // Media
-    this.localStream  = null;
-    this.remoteStreams = new Map(); // fp → MediaStream
+    this.localStream   = null;
+    this.remoteStreams  = new Map();
 
-    // ── Callbacks ─────────────────────────────────────────────────────────────
-    this.onCtrlMessage     = null; // (fp, object) → void
-    this.onBinaryChunk     = null; // (fp, ArrayBuffer) → void
-    this.onPeerConnected   = null; // (fp) → void
-    this.onPeerDisconnected= null; // (fp) → void
-    this.onStatusChange    = null; // ('connecting'|'connected'|'disconnected') → void
-    this.onRemoteStream    = null; // (fp, MediaStream|null) → void
+    // Callbacks
+    this.onCtrlMessage      = null; // (fp, object) → void
+    this.onBinaryChunk      = null; // (fp, ArrayBuffer) → void
+    this.onPeerConnected    = null; // (fp) → void
+    this.onPeerDisconnected = null; // (fp) → void
+    this.onStatusChange     = null; // ('connecting'|'connected'|'disconnected') → void
+    this.onRemoteStream     = null; // (fp, MediaStream|null) → void
 
     this.logFn = t => console.log('[Net]', t);
   }
 
-  // ── Connect to signaling ──────────────────────────────────────────────────
+  // ── Connect ───────────────────────────────────────────────────────────────
 
   connect(url) {
     this.wsUrl = url;
@@ -122,10 +104,10 @@ export class TurquoiseNetwork {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
       try { await this._onSignal(msg); }
-      catch (e) { this._log('⚠ signal handler: ' + e.message); }
+      catch (e) { this._log('⚠ signal: ' + e.message); }
     };
 
-    this.ws.onclose  = ev => {
+    this.ws.onclose = ev => {
       this._log(`Signaling closed (${ev.code}).`);
       this._status('disconnected');
       if (!this.intentionalClose) this._scheduleReconnect();
@@ -136,26 +118,22 @@ export class TurquoiseNetwork {
 
   _scheduleReconnect() {
     clearTimeout(this.reconnectTimer);
-    const jitter = 1 + (Math.random() - 0.5) * 0.4; // ±20%
-    const delay  = Math.min(this.reconnectDelay * jitter, RECONNECT_MAX);
+    const j = 1 + (Math.random() - 0.5) * 0.4;
+    const d = Math.min(this.reconnectDelay * j, RECONNECT_MAX);
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX);
-    this._log(`Reconnecting in ${(delay / 1000).toFixed(1)}s…`);
-    this.reconnectTimer = setTimeout(() => this._openWS(), delay);
+    this._log(`Reconnecting in ${(d / 1000).toFixed(1)}s…`);
+    this.reconnectTimer = setTimeout(() => this._openWS(), d);
   }
 
   _announce() {
-    this._signal({
-      type:     'announce',
-      from:     this.identity.fingerprint,
-      nickname: this.identity.nickname || null,
-    });
+    this._signal({ type:'announce', from:this.identity.fingerprint, nickname:this.identity.nickname||null });
   }
 
   broadcastNick(nick) {
-    this._signal({ type: 'nick', fingerprint: this.identity.fingerprint, nickname: nick });
+    this._signal({ type:'nick', fingerprint:this.identity.fingerprint, nickname:nick });
   }
 
-  // ── Send via ctrl channel ─────────────────────────────────────────────────
+  // ── Send ─────────────────────────────────────────────────────────────────
 
   sendCtrl(fp, payload) {
     const ch = this.ctrlCh.get(fp);
@@ -173,8 +151,6 @@ export class TurquoiseNetwork {
     return n;
   }
 
-  // ── Send binary via ft channel ────────────────────────────────────────────
-
   sendBinary(fp, buffer) {
     const ch = this.ftCh.get(fp);
     if (!ch || ch.readyState !== 'open') return false;
@@ -182,43 +158,57 @@ export class TurquoiseNetwork {
     catch (e) { this._log(`⚠ sendBinary ${fp.slice(0,8)}: ${e.message}`); return false; }
   }
 
-  getCtrlChannel(fp)   { return this.ctrlCh.get(fp)  || null; }
-  getFtChannel(fp)     { return this.ftCh.get(fp)    || null; }
-  getConnectedPeers()  { return [...this.ctrlCh.entries()].filter(([,c])=>c.readyState==='open').map(([f])=>f); }
+  getCtrlChannel(fp)  { return this.ctrlCh.get(fp)  || null; }
+  getFtChannel(fp)    { return this.ftCh.get(fp)    || null; }
+  getConnectedPeers() {
+    return [...this.ctrlCh.entries()]
+      .filter(([, c]) => c.readyState === 'open')
+      .map(([f]) => f);
+  }
 
   // ── Media ─────────────────────────────────────────────────────────────────
 
   async startCall(fp, video = false) {
     const pc = this.pcs.get(fp);
     if (!pc) throw new Error(`No peer connection: ${fp.slice(0,8)}`);
-    const stream = await this._getMedia({ audio: true, video });
+    const stream = await this._getMedia({ audio:true, video });
     this.localStream = stream;
-    for (const t of stream.getTracks()) { try { pc.addTrack(t, stream); } catch {} }
-    // Notify peer — onnegotiationneeded will handle the SDP exchange
-    this.sendCtrl(fp, { type: 'call-offer', video, from: this.identity.fingerprint });
+    for (const t of stream.getTracks()) {
+      try { pc.addTrack(t, stream); } catch {}
+    }
+    // Notify peer UI (so they see incoming call banner)
+    this.sendCtrl(fp, { type:'call-offer', video, from:this.identity.fingerprint });
+    // Manually trigger renegotiation — safer than onnegotiationneeded
+    await this._renegotiate(fp);
     return stream;
   }
 
   async acceptCall(fp) {
-    const stream = await this._getMedia({ audio: true, video: false });
+    const stream = await this._getMedia({ audio:true, video:false });
     this.localStream = stream;
     const pc = this.pcs.get(fp);
-    if (pc) for (const t of stream.getTracks()) { try { pc.addTrack(t, stream); } catch {} }
+    if (pc) {
+      for (const t of stream.getTracks()) { try { pc.addTrack(t, stream); } catch {} }
+      await this._renegotiate(fp);
+    }
     return stream;
   }
 
   async startPTT(fp) {
-    const stream = await this._getMedia({ audio: true, video: false });
+    const stream = await this._getMedia({ audio:true, video:false });
     this.localStream = stream;
     const pc = this.pcs.get(fp);
-    if (pc) for (const t of stream.getTracks()) { try { pc.addTrack(t, stream); } catch {} }
-    this.sendCtrl(fp, { type: 'ptt-start', from: this.identity.fingerprint });
+    if (pc) {
+      for (const t of stream.getTracks()) { try { pc.addTrack(t, stream); } catch {} }
+      await this._renegotiate(fp);
+    }
+    this.sendCtrl(fp, { type:'ptt-start', from:this.identity.fingerprint });
     return stream;
   }
 
   stopPTT(fp) {
     this._stopMedia();
-    if (fp) this.sendCtrl(fp, { type: 'ptt-end', from: this.identity.fingerprint });
+    if (fp) this.sendCtrl(fp, { type:'ptt-end', from:this.identity.fingerprint });
   }
 
   hangup(fp) {
@@ -226,25 +216,41 @@ export class TurquoiseNetwork {
     if (fp) {
       this.remoteStreams.delete(fp);
       if (typeof this.onRemoteStream === 'function') this.onRemoteStream(fp, null);
-      this.sendCtrl(fp, { type: 'call-end', from: this.identity.fingerprint });
+      this.sendCtrl(fp, { type:'call-end', from:this.identity.fingerprint });
     }
   }
 
   async _getMedia(constraints) {
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('Media devices not available (HTTPS required).');
+      throw new Error('Media devices not available (requires HTTPS).');
     }
-    try {
-      return await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (e) {
-      throw new Error(`Media access denied: ${e.message}`);
-    }
+    try { return await navigator.mediaDevices.getUserMedia(constraints); }
+    catch (e) { throw new Error('Media access denied: ' + e.message); }
   }
 
   _stopMedia() {
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
       this.localStream = null;
+    }
+  }
+
+  // ── Manual renegotiation (call tracks added post-connection) ─────────────
+  // Called explicitly from startCall/acceptCall — never from onnegotiationneeded.
+
+  async _renegotiate(fp) {
+    const pc = this.pcs.get(fp);
+    if (!pc) return;
+    if (pc.signalingState !== 'stable') {
+      this._log(`⚠ renegotiate: signalingState is '${pc.signalingState}', skipping`);
+      return;
+    }
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this._signal({ type:'renegotiate-offer', from:this.identity.fingerprint, to:fp, sdp:offer.sdp });
+    } catch (e) {
+      this._log('⚠ renegotiate: ' + e.message);
     }
   }
 
@@ -266,19 +272,19 @@ export class TurquoiseNetwork {
         this.onCtrlMessage(null, { type:'nick', fingerprint:msg.fingerprint, nickname:msg.nickname });
       }
     }
-    else if (type === 'offer'               && from) { await this._handleOffer(from, msg.sdp); }
-    else if (type === 'answer'              && from) { await this._handleAnswer(from, msg.sdp); }
-    else if (type === 'ice'                 && from) { await this._handleICE(from, msg.candidate); }
-    else if (type === 'renegotiate-offer'   && from) { await this._handleReOffer(from, msg.sdp); }
-    else if (type === 'renegotiate-answer'  && from) { await this._handleReAnswer(from, msg.sdp); }
+    else if (type === 'offer'              && from) { await this._handleOffer(from, msg.sdp); }
+    else if (type === 'answer'             && from) { await this._handleAnswer(from, msg.sdp); }
+    else if (type === 'ice'                && from) { await this._handleICE(from, msg.candidate); }
+    else if (type === 'renegotiate-offer'  && from) { await this._handleReOffer(from, msg.sdp); }
+    else if (type === 'renegotiate-answer' && from) { await this._handleReAnswer(from, msg.sdp); }
   }
 
   // ── RTCPeerConnection ─────────────────────────────────────────────────────
 
   _makePC(fp) {
     const pc = new RTCPeerConnection({
-      iceServers:          ICE,
-      iceTransportPolicy: 'all',   // allow all candidates; host = LAN = fastest
+      iceServers: ICE,
+      iceTransportPolicy: 'all', // host candidate = LAN direct = fastest
     });
 
     pc.onicecandidate = ev => {
@@ -287,12 +293,11 @@ export class TurquoiseNetwork {
     };
 
     pc.onicecandidateerror = ev => {
-      if (ev.errorCode !== 701) this._log(`⚠ ICE error ${ev.errorCode}: ${ev.errorText}`);
+      if (ev.errorCode !== 701) this._log(`⚠ ICE ${ev.errorCode}: ${ev.errorText}`);
     };
 
     pc.oniceconnectionstatechange = () => {
-      const s = pc.iceConnectionState;
-      if (s === 'failed') {
+      if (pc.iceConnectionState === 'failed') {
         this._log(`ICE failed ↔ ${fp.slice(0,8)} — restarting`);
         try { pc.restartIce(); } catch {}
       }
@@ -304,33 +309,10 @@ export class TurquoiseNetwork {
       if (s === 'failed' || s === 'closed') this._teardown(fp);
     };
 
-    // ── RENEGOTIATION FOR CALLS ───────────────────────────────────────────
-    // onnegotiationneeded fires when:
-    //   (a) createDataChannel() is called during initial setup — IGNORE
-    //   (b) addTrack() is called after connection established — HANDLE
-    //
-    // Guard: only renegotiate when connectionState === 'connected'.
-    // During initial handshake, connectionState is 'new'/'connecting' — safe to skip.
-    // After connection, addTrack() for voice/video triggers proper renegotiation.
-    let negotiating = false;
-    pc.onnegotiationneeded = async () => {
-      // Skip during initial setup — let _createOffer handle the first offer
-      if (pc.connectionState !== 'connected') return;
-      if (negotiating || pc.signalingState !== 'stable') return;
-      negotiating = true;
-      try {
-        const offer = await pc.createOffer();
-        if (pc.signalingState !== 'stable') return; // state may have changed
-        await pc.setLocalDescription(offer);
-        this._signal({ type:'renegotiate-offer', from:this.identity.fingerprint, to:fp, sdp:offer.sdp });
-      } catch (e) {
-        this._log(`⚠ renegotiation: ${e.message}`);
-      } finally {
-        negotiating = false;
-      }
-    };
+    // NO onnegotiationneeded handler.
+    // Renegotiation is triggered manually via _renegotiate(fp).
 
-    // Incoming media tracks (calls accepted by remote)
+    // Incoming media tracks
     pc.ontrack = ev => {
       const stream = ev.streams[0];
       if (!stream) return;
@@ -342,21 +324,19 @@ export class TurquoiseNetwork {
     return pc;
   }
 
+  // ── Offer/Answer ──────────────────────────────────────────────────────────
+
   async _createOffer(fp) {
     if (this.pcs.has(fp)) return;
     const pc = this._makePC(fp);
 
-    // ctrl channel: ordered + reliable for chat/signals
-    let ctrl;
     try {
-      ctrl = pc.createDataChannel('ctrl', { ordered: true });
+      const ctrl = pc.createDataChannel('ctrl', { ordered:true });
       this._setupCtrl(ctrl, fp);
     } catch (e) { this._log('❌ createDataChannel(ctrl): ' + e.message); return; }
 
-    // ft channel: unordered + unreliable for file chunks (we handle reliability)
-    let ft;
     try {
-      ft = pc.createDataChannel('ft', { ordered: false, maxRetransmits: 0 });
+      const ft = pc.createDataChannel('ft', { ordered:false, maxRetransmits:0 });
       ft.binaryType = 'arraybuffer';
       this._setupFT(ft, fp);
     } catch (e) { this._log('❌ createDataChannel(ft): ' + e.message); }
@@ -393,9 +373,34 @@ export class TurquoiseNetwork {
   async _handleAnswer(fp, sdp) {
     const pc = this.pcs.get(fp);
     if (!pc) return;
-    try { await pc.setRemoteDescription({ type:'answer', sdp }); await this._flushICE(fp); }
-    catch (e) { this._log('❌ setRemoteDescription(answer): ' + e.message); }
+    try {
+      await pc.setRemoteDescription({ type:'answer', sdp });
+      await this._flushICE(fp);
+    } catch (e) { this._log('❌ setRemoteDescription(answer): ' + e.message); }
   }
+
+  // Renegotiation — only for media tracks added after initial connection
+
+  async _handleReOffer(fp, sdp) {
+    const pc = this.pcs.get(fp);
+    if (!pc) return;
+    try {
+      await pc.setRemoteDescription({ type:'offer', sdp });
+      await this._flushICE(fp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      this._signal({ type:'renegotiate-answer', from:this.identity.fingerprint, to:fp, sdp:answer.sdp });
+    } catch (e) { this._log('❌ renegotiate-offer: ' + e.message); }
+  }
+
+  async _handleReAnswer(fp, sdp) {
+    const pc = this.pcs.get(fp);
+    if (!pc) return;
+    try { await pc.setRemoteDescription({ type:'answer', sdp }); }
+    catch (e) { this._log('❌ renegotiate-answer: ' + e.message); }
+  }
+
+  // ── ICE ───────────────────────────────────────────────────────────────────
 
   async _handleICE(fp, candidate) {
     const pc = this.pcs.get(fp);
@@ -414,26 +419,6 @@ export class TurquoiseNetwork {
     const pc = this.pcs.get(fp);
     if (!pc) return;
     for (const c of list) { try { await pc.addIceCandidate(c); } catch {} }
-  }
-
-  // Renegotiation (call tracks added after initial connection)
-  async _handleReOffer(fp, sdp) {
-    const pc = this.pcs.get(fp);
-    if (!pc) return;
-    try {
-      await pc.setRemoteDescription({ type:'offer', sdp });
-      await this._flushICE(fp);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      this._signal({ type:'renegotiate-answer', from:this.identity.fingerprint, to:fp, sdp:answer.sdp });
-    } catch (e) { this._log('❌ renegotiate-offer: ' + e.message); }
-  }
-
-  async _handleReAnswer(fp, sdp) {
-    const pc = this.pcs.get(fp);
-    if (!pc) return;
-    try { await pc.setRemoteDescription({ type:'answer', sdp }); }
-    catch (e) { this._log('❌ renegotiate-answer: ' + e.message); }
   }
 
   // ── DataChannel setup ─────────────────────────────────────────────────────
@@ -477,20 +462,16 @@ export class TurquoiseNetwork {
   _setupFT(ch, fp) {
     this.ftCh.set(fp, ch);
     ch.binaryType = 'arraybuffer';
-
-    // Set low-water mark for backpressure in file transfer
-    ch.bufferedAmountLowThreshold = 4 * 1024 * 1024; // 4MB
+    ch.bufferedAmountLowThreshold = 4 * 1024 * 1024;
 
     ch.onmessage = ev => {
       const data = ev.data;
-      // Binary = file chunk
       if (data instanceof ArrayBuffer) {
         if (typeof this.onBinaryChunk === 'function') {
-          try { this.onBinaryChunk(fp, data); }
-          catch (e) { this._log('⚠ onBinaryChunk: ' + e.message); }
+          try { this.onBinaryChunk(fp, data); } catch (e) { this._log('⚠ onBinaryChunk: ' + e.message); }
         }
       } else if (data instanceof Blob) {
-        // Safari sometimes sends Blob — convert
+        // Safari sends Blob — convert
         data.arrayBuffer().then(buf => {
           if (typeof this.onBinaryChunk === 'function') {
             try { this.onBinaryChunk(fp, buf); } catch {}
@@ -499,8 +480,8 @@ export class TurquoiseNetwork {
       }
     };
 
-    ch.onclose = () => this.ftCh.delete(fp);
-    ch.onerror = e => this._log(`⚠ ft error (${fp.slice(0,8)}): ${e?.message||'?'}`);
+    ch.onclose  = () => this.ftCh.delete(fp);
+    ch.onerror  = e => this._log(`⚠ ft error (${fp.slice(0,8)}): ${e?.message||'?'}`);
   }
 
   // ── Teardown ──────────────────────────────────────────────────────────────

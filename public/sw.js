@@ -11,7 +11,7 @@
  *               If cache misses too, we serve the offline shell.
  */
 
-const CACHE_VER  = 'tq-v7';
+const CACHE_VER  = 'tq-v8';
 const SHELL = [
   '/',
   '/index.html',
