@@ -1,15 +1,17 @@
 {
   "name": "turquoise",
-  "version": "5.0.0",
+  "version": "7.0.0",
   "type": "module",
-  "description": "Local-first cryptographic peer-to-peer communication",
+  "description": "Encrypted peer-to-peer communication. LAN-first.",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.16.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   }
 }

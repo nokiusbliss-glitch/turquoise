@@ -1,114 +1,75 @@
 /**
- * identity.js — Turquoise
- *
- * ECDSA P-256 device identity.
- * Keys stored as native CryptoKey objects in IndexedDB — no Base64 conversion.
- * Fingerprint = SHA-256 of the raw public key bytes.
- *
- * Murphy's Law: every step validated, every failure surfaced clearly.
+ * identity.js — Turquoise v7
+ * ECDSA P-256 device identity. Non-exportable private key in IndexedDB.
+ * Fingerprint = SHA-256(raw public key bytes).
+ * Nickname persisted in localStorage.
  */
 
-const DB_NAME = 'turquoise_identity';
+const DB_NAME = 'tq_identity_v3';
 const STORE   = 'keys';
 
-function openIdentityDB() {
-  return new Promise((resolve, reject) => {
-    if (!window.indexedDB) {
-      reject(new Error('IndexedDB not supported in this browser.')); return;
-    }
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      try { req.result.createObjectStore(STORE); }
-      catch (e) { reject(new Error('DB upgrade failed: ' + e.message)); }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(new Error('Identity DB error: ' + req.error?.message));
-    req.onblocked = () => reject(new Error('Identity DB blocked — close other tabs.'));
+function openDB() {
+  return new Promise((res, rej) => {
+    if (!window.indexedDB) { rej(new Error('IndexedDB not supported.')); return; }
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => { try { r.result.createObjectStore(STORE); } catch {} };
+    r.onsuccess = () => res(r.result);
+    r.onerror   = () => rej(new Error('Identity DB: ' + r.error?.message));
+    r.onblocked = () => rej(new Error('Identity DB blocked — close other tabs.'));
   });
 }
 
-function dbGet(db, key) {
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(key);
-    req.onsuccess = () => resolve(req.result ?? null);
-    req.onerror   = () => reject(new Error('dbGet failed: ' + req.error?.message));
+function dbGet(db, k) {
+  return new Promise((res, rej) => {
+    const r = db.transaction(STORE, 'readonly').objectStore(STORE).get(k);
+    r.onsuccess = () => res(r.result ?? null);
+    r.onerror   = () => rej(new Error('dbGet: ' + r.error?.message));
   });
 }
 
-function dbPut(db, key, value) {
-  return new Promise((resolve, reject) => {
+function dbPut(db, k, v) {
+  return new Promise((res, rej) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror    = () => reject(new Error('dbPut failed: ' + tx.error?.message));
+    tx.objectStore(STORE).put(v, k);
+    tx.oncomplete = () => res();
+    tx.onerror    = () => rej(new Error('dbPut: ' + tx.error?.message));
   });
 }
 
 export async function getIdentity() {
   if (!window.crypto?.subtle) {
-    throw new Error(
-      'crypto.subtle unavailable. This page must be served over HTTPS or localhost.'
-    );
+    throw new Error('crypto.subtle unavailable — page must be served over HTTPS or localhost.');
   }
+  const db = await openDB();
+  let kp = await dbGet(db, 'keypair');
 
-  const db = await openIdentityDB();
-  let keypair = await dbGet(db, 'keypair');
-
-  if (!keypair) {
-    keypair = await crypto.subtle.generateKey(
+  if (!kp) {
+    kp = await crypto.subtle.generateKey(
       { name: 'ECDSA', namedCurve: 'P-256' },
-      false, // non-exportable private key
-      ['sign', 'verify']
+      false, ['sign', 'verify']
     );
-    await dbPut(db, 'keypair', keypair);
+    await dbPut(db, 'keypair', kp);
   }
 
-  if (!keypair?.publicKey || !keypair?.privateKey) {
-    throw new Error(
-      'Keypair in IndexedDB is malformed. ' +
-      'Open DevTools → Application → IndexedDB → delete turquoise_identity and reload.'
-    );
+  if (!kp?.publicKey || !kp?.privateKey) {
+    throw new Error('Keypair malformed — open DevTools > Application > IndexedDB, delete tq_identity_v3, reload.');
   }
 
-  const rawPub     = await crypto.subtle.exportKey('raw', keypair.publicKey);
-  const hashBuf    = await crypto.subtle.digest('SHA-256', rawPub);
-  const fingerprint = Array.from(new Uint8Array(hashBuf))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-
-  // Load saved nickname from localStorage
-  const nickname = localStorage.getItem('tq_nickname') || null;
+  const raw  = await crypto.subtle.exportKey('raw', kp.publicKey);
+  const hash = await crypto.subtle.digest('SHA-256', raw);
+  const fp   = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 
   return {
-    publicKey:   keypair.publicKey,
-    privateKey:  keypair.privateKey,
-    fingerprint,
-    shortId:     fingerprint.slice(0, 8),
-    nickname,
+    publicKey:   kp.publicKey,
+    privateKey:  kp.privateKey,
+    fingerprint: fp,
+    shortId:     fp.slice(0, 8),
+    nickname:    localStorage.getItem('tq_nick') || null,
   };
 }
 
-export function saveNickname(nickname) {
-  if (typeof nickname === 'string' && nickname.trim()) {
-    localStorage.setItem('tq_nickname', nickname.trim().slice(0, 32));
+export function saveNickname(n) {
+  if (typeof n === 'string' && n.trim()) {
+    localStorage.setItem('tq_nick', n.trim().slice(0, 32));
   }
-}
-
-export async function signMessage(identity, text) {
-  if (!identity?.privateKey) throw new Error('signMessage: no privateKey in identity.');
-  const sig = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    identity.privateKey,
-    new TextEncoder().encode(text)
-  );
-  return new Uint8Array(sig);
-}
-
-export async function verifyMessage(identity, text, signature) {
-  if (!identity?.publicKey) throw new Error('verifyMessage: no publicKey in identity.');
-  return crypto.subtle.verify(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    identity.publicKey,
-    signature,
-    new TextEncoder().encode(text)
-  );
 }

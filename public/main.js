@@ -1,57 +1,66 @@
 /**
- * main.js — Turquoise (Production Boot)
+ * main.js — Turquoise v7
  *
  * Boot sequence:
- *   1. Check browser APIs — show clear error if anything missing
- *   2. Load cryptographic identity
- *   3. Initialize network layer
- *   4. Mount full application UI
- *   5. Connect to signaling server (auto-detects protocol/host)
+ *   1. Register Service Worker (PWA + offline)
+ *   2. Check required browser APIs — show error if missing
+ *   3. Load cryptographic identity
+ *   4. Init network engine
+ *   5. Mount UI
+ *   6. Connect to signaling (auto-detects protocol + host)
  *
- * Works on:
- *   - Render (https://turquoise-xxxx.onrender.com → wss://…)
- *   - Local dev (https://localhost:3443 → wss://localhost:3443)
- *   - Any HTTPS host (auto-detects)
- *
- * Murphy's Law: every step catches its own errors and shows a clear
- *               message on screen. Nothing fails invisibly.
+ * After step 1 completes, the app is installable and works offline
+ * on all subsequent loads — even if the server is unreachable.
  */
 
 import { getIdentity }      from './identity.js';
 import { TurquoiseNetwork } from './webrtc.js';
 import { TurquoiseApp }     from './app.js';
 
+// ── Service Worker registration ───────────────────────────────────────────────
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    console.log('[SW] registered:', reg.scope);
+  }).catch(e => {
+    console.warn('[SW] registration failed:', e.message);
+    // Non-fatal — app still works online
+  });
+}
+
 // ── Browser capability check ──────────────────────────────────────────────────
 
 function checkAPIs() {
   const missing = [];
-  if (!window.indexedDB)                  missing.push('IndexedDB (not supported in this browser)');
-  if (!window.crypto?.subtle)             missing.push('crypto.subtle — open via HTTPS or localhost');
-  if (!window.RTCPeerConnection)          missing.push('WebRTC — not supported in this browser');
-  if (!window.WebSocket)                  missing.push('WebSocket — not supported in this browser');
-  if (!navigator.mediaDevices?.getUserMedia) {
-    // Not fatal — just disables voice/video
-    console.warn('getUserMedia not available — voice/video disabled.');
-  }
+  if (!window.indexedDB)         missing.push('IndexedDB');
+  if (!window.crypto?.subtle)    missing.push('crypto.subtle (requires HTTPS)');
+  if (!window.RTCPeerConnection) missing.push('WebRTC');
+  if (!window.WebSocket)         missing.push('WebSocket');
   return missing;
 }
 
-// ── Fatal error screen ─────────────────────────────────────────────────────────
+// ── Fatal error screen ────────────────────────────────────────────────────────
 
-function showFatal(title, detail) {
+function fatal(title, detail) {
   const app = document.getElementById('app');
   if (!app) { console.error(title, detail); return; }
   app.innerHTML = `
-    <div style="
-      display:flex; flex-direction:column; align-items:center; justify-content:center;
-      height:100vh; padding:2rem; font-family:'Courier New',monospace; color:#d95040;
-      background:#060b0b; text-align:center; gap:1rem;
-    ">
-      <div style="font-size:.75rem;letter-spacing:.3em;opacity:.5;">TURQUOISE</div>
-      <div style="font-size:.875rem;">${title}</div>
-      ${detail ? `<div style="font-size:.72rem;opacity:.6;max-width:400px;">${detail}</div>` : ''}
-    </div>
-  `;
+<div style="
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100dvh;padding:2rem;font-family:'Courier New',monospace;
+  color:var(--err,#BF4040);background:var(--void,#030d0d);
+  text-align:center;gap:var(--φ3,1rem);
+">
+  <div style="font-size:.55rem;letter-spacing:.6em;opacity:.4;">T·U·R·Q·U·O·I·S·E</div>
+  <div style="font-size:.85rem;">${title}</div>
+  ${detail ? `<div style="font-size:.68rem;opacity:.55;max-width:360px;line-height:1.9;">${detail}</div>` : ''}
+  <button onclick="location.reload()" style="
+    margin-top:1rem;padding:.4rem 1.2rem;
+    border:1px solid #BF4040;background:transparent;
+    color:#BF4040;font-family:inherit;font-size:.68rem;
+    letter-spacing:.1em;cursor:pointer;
+  ">reload</button>
+</div>`;
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -60,29 +69,30 @@ async function boot() {
 
   // 1. API check
   const missing = checkAPIs();
-  if (missing.length > 0) {
-    showFatal(
-      'Browser capabilities missing.',
+  if (missing.length) {
+    fatal(
+      'Browser missing required APIs.',
       missing.map(m => '· ' + m).join('<br/>')
+        + '<br/><br/>Use Chrome, Edge, or Firefox over HTTPS.'
     );
     return;
   }
 
-  // 2. Cryptographic identity
+  // 2. Identity
   let identity;
   try {
     identity = await getIdentity();
   } catch (e) {
-    showFatal('Identity failed.', e.message);
+    fatal('Identity initialization failed.', e.message);
     return;
   }
 
   // 3. Network
   let network;
   try {
-    network = new TurquoiseNetwork(identity, () => {});
+    network = new TurquoiseNetwork(identity);
   } catch (e) {
-    showFatal('Network init failed.', e.message);
+    fatal('Network engine failed.', e.message);
     return;
   }
 
@@ -92,32 +102,28 @@ async function boot() {
     app = new TurquoiseApp(identity, network);
     await app.mount();
   } catch (e) {
-    showFatal('App failed to load.', e.message);
-    console.error('App mount error:', e);
+    fatal('App failed to mount.', e.message);
+    console.error('[Boot] mount error:', e);
     return;
   }
 
-  // 5. Connect to signaling server
-  //    Auto-detect: https → wss, http → ws
-  //    No port suffix — Render uses the same host and port for both HTTP and WS.
-  //    Works locally too if served over https://localhost:3443
+  // 5. Connect to signaling
+  //    wss:// on HTTPS (Render), ws:// on http (local dev)
+  //    Same host:port — no hardcoded URL
   try {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const url      = `${protocol}://${window.location.host}`;
-    network.connect(url);
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    network.connect(`${proto}://${location.host}`);
   } catch (e) {
-    console.error('Network connect failed:', e.message);
-    // Non-fatal — UI is up, user can still see it. Network will retry.
+    console.warn('[Boot] signaling connect failed:', e.message);
+    // Non-fatal — UI is up, reconnect will be attempted automatically
   }
 }
 
-// ── Run ────────────────────────────────────────────────────────────────────────
-
-boot().catch(err => {
-  console.error('Fatal boot error:', err);
-  showFatal('Unexpected error.', err?.message || String(err));
+boot().catch(e => {
+  console.error('[Boot] fatal:', e);
+  fatal('Unexpected startup error.', e?.message || String(e));
 });
 
-window.addEventListener('unhandledrejection', (ev) => {
-  console.error('Unhandled promise rejection:', ev.reason);
+window.addEventListener('unhandledrejection', ev => {
+  console.error('[Unhandled]', ev.reason);
 });

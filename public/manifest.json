@@ -1,11 +1,17 @@
 {
   "name": "Turquoise",
   "short_name": "Turquoise",
-  "description": "Encrypted peer-to-peer messaging. No servers. No logs.",
-  "start_url": ".",
+  "description": "Encrypted peer-to-peer communication. No servers. LAN-first.",
+  "start_url": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#060b0b",
+  "background_color": "#030d0d",
   "theme_color": "#40E0D0",
-  "icons": []
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23030d0d'/><text y='.9em' font-size='90' x='5'>◈</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
 }
