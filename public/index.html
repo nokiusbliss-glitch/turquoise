@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Turquoise</title>
+  <link rel="manifest" href="manifest.json" />
+  <style>
+    /* ── Design system ──────────────────────────────────────────────────────── */
+    :root {
+      /* Golden ratio */
+      --phi:    1.618;
+      --s1:     0.382rem;
+      --s2:     0.618rem;
+      --s3:     1rem;
+      --s4:     1.618rem;
+      --s5:     2.618rem;
+
+      /* Color — turquoise is the only accent. Nothing else. */
+      --bg-0:   #060b0b;
+      --bg-1:   #0a1212;
+      --bg-2:   #0f1a1a;
+      --bg-3:   #152020;
+
+      --tq:           #40E0D0;
+      --tq-bright:    #6ff0e2;
+      --tq-dim:       rgba(64,224,208,0.10);
+      --tq-mid:       rgba(64,224,208,0.22);
+      --tq-border:    rgba(64,224,208,0.16);
+      --tq-muted:     rgba(64,224,208,0.38);
+      --tq-text:      rgba(64,224,208,0.75);
+
+      --white:        rgba(255,255,255,0.86);
+      --danger:       #d95040;
+      --ok:           #40c888;
+
+      /* Layout — golden ratio split */
+      --sidebar:      38.2%;
+      --chat:         61.8%;
+      --header-h:     3.236rem;
+      --input-h:      3.618rem;
+
+      font-size: 14px;
+    }
+
+    /* ── Reset ──────────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      background:  var(--bg-0);
+      color:       var(--tq);
+      font-family: 'Courier New', 'Consolas', monospace;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── App shell ──────────────────────────────────────────────────────────── */
+    #app {
+      display: grid;
+      grid-template-columns: var(--sidebar) var(--chat);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ────────────────────────────────────────────────────────────── */
+    #sidebar {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-1);
+      border-right: 1px solid var(--tq-border);
+      overflow: hidden;
+    }
+
+    #device-header {
+      padding: var(--s4);
+      border-bottom: 1px solid var(--tq-border);
+      flex-shrink: 0;
+    }
+    #device-header .wordmark {
+      font-size: 0.618rem;
+      letter-spacing: 0.5em;
+      text-transform: uppercase;
+      color: var(--tq-muted);
+      margin-bottom: var(--s2);
+    }
+    #device-header .short-id {
+      font-size: 1.1rem;
+      color: var(--tq);
+      margin-bottom: var(--s1);
+    }
+    #device-header .full-fp {
+      font-size: 0.618rem;
+      color: var(--tq-muted);
+      word-break: break-all;
+      line-height: 1.6;
+    }
+
+    /* ── Peer list ──────────────────────────────────────────────────────────── */
+    #peer-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: var(--s2);
+    }
+
+    #no-peers {
+      padding: var(--s4);
+      font-size: 0.75rem;
+      color: var(--tq-muted);
+      letter-spacing: 0.15em;
+      text-align: center;
+      margin-top: var(--s5);
+    }
+
+    .peer-tile {
+      display: flex;
+      align-items: center;
+      gap: var(--s3);
+      padding: var(--s3) var(--s3);
+      margin-bottom: 1px;
+      border: 1px solid var(--tq-border);
+      background: var(--bg-2);
+      cursor: pointer;
+      transition: background 0.1s, border-color 0.1s;
+      user-select: none;
+    }
+    .peer-tile:hover  { background: var(--tq-dim); border-color: var(--tq-mid); }
+    .peer-tile.active { background: var(--tq-dim); border-color: var(--tq);     }
+
+    .peer-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .peer-dot.online  { background: var(--ok);      box-shadow: 0 0 5px var(--ok); }
+    .peer-dot.offline { background: var(--tq-muted); }
+
+    .peer-info      { flex: 1; min-width: 0; }
+    .peer-short     { font-size: 0.875rem; color: var(--tq); }
+    .peer-preview   {
+      font-size: 0.7rem; color: var(--tq-muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    .peer-badge {
+      background: var(--tq); color: var(--bg-0);
+      border-radius: 50%;
+      width: 17px; height: 17px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.618rem; font-weight: bold;
+      flex-shrink: 0;
+    }
+
+    /* ── Chat area ──────────────────────────────────────────────────────────── */
+    #chat-area {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-0);
+      overflow: hidden;
+    }
+    #chat-area.drag-over {
+      outline: 1px dashed var(--tq);
+      outline-offset: -4px;
+    }
+
+    /* ── Chat header ────────────────────────────────────────────────────────── */
+    #chat-header {
+      display: flex;
+      align-items: center;
+      gap: var(--s3);
+      padding: 0 var(--s4);
+      height: var(--header-h);
+      border-bottom: 1px solid var(--tq-border);
+      background: var(--bg-1);
+      flex-shrink: 0;
+    }
+    #chat-header .peer-name { font-size: 0.875rem; color: var(--tq); }
+    #chat-header .peer-fp   { font-size: 0.618rem; color: var(--tq-muted); margin-top: 2px; }
+
+    /* ── Messages ───────────────────────────────────────────────────────────── */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: var(--s4);
+      display: flex;
+      flex-direction: column;
+      gap: var(--s3);
+    }
+
+    #empty-state {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      color: var(--tq-muted);
+      letter-spacing: 0.25em;
+    }
+
+    /* ── Message bubble ─────────────────────────────────────────────────────── */
+    .msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 68%;
+    }
+    .msg.own  { align-self: flex-end;   align-items: flex-end;   }
+    .msg.peer { align-self: flex-start; align-items: flex-start; }
+
+    .msg .meta {
+      font-size: 0.618rem;
+      color: var(--tq-muted);
+      margin-bottom: 4px;
+      letter-spacing: 0.05em;
+    }
+    .msg .bubble {
+      padding: var(--s2) var(--s3);
+      border: 1px solid;
+      word-break: break-word;
+      white-space: pre-wrap;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+    .msg.own  .bubble { background: var(--tq-dim); border-color: var(--tq-mid); color: var(--tq);   }
+    .msg.peer .bubble { background: var(--bg-2);   border-color: var(--tq-border); color: var(--white); }
+
+    /* ── File message ───────────────────────────────────────────────────────── */
+    .file-card {
+      display: flex;
+      flex-direction: column;
+      gap: var(--s1);
+      padding: var(--s3);
+      border: 1px solid var(--tq-border);
+      background: var(--bg-2);
+      min-width: 220px;
+      max-width: 300px;
+    }
+    .file-card .file-name {
+      font-size: 0.875rem; color: var(--tq);
+      word-break: break-all;
+    }
+    .file-card .file-size {
+      font-size: 0.7rem; color: var(--tq-muted);
+    }
+    .file-card .prog-track {
+      height: 1px;
+      background: var(--tq-border);
+      position: relative;
+      margin: var(--s1) 0;
+    }
+    .file-card .prog-fill {
+      position: absolute; left: 0; top: 0; bottom: 0;
+      background: var(--tq);
+      transition: width 0.2s ease;
+    }
+    .file-card .dl-btn {
+      display: inline-block;
+      padding: var(--s1) var(--s2);
+      border: 1px solid var(--tq);
+      color: var(--tq);
+      background: transparent;
+      font-family: inherit; font-size: 0.75rem;
+      text-decoration: none; text-align: center;
+      cursor: pointer; letter-spacing: 0.1em;
+      transition: background 0.1s;
+    }
+    .file-card .dl-btn:hover { background: var(--tq-dim); }
+
+    /* ── System message ─────────────────────────────────────────────────────── */
+    .sys-msg {
+      text-align: center;
+      font-size: 0.68rem;
+      color: var(--tq-muted);
+      letter-spacing: 0.1em;
+      padding: var(--s1) 0;
+    }
+    .sys-msg.err { color: var(--danger); }
+
+    /* ── Input bar ──────────────────────────────────────────────────────────── */
+    #input-bar {
+      display: none;
+      align-items: flex-end;
+      gap: var(--s2);
+      padding: var(--s2) var(--s4);
+      border-top: 1px solid var(--tq-border);
+      background: var(--bg-1);
+      flex-shrink: 0;
+    }
+
+    #file-btn {
+      background: transparent;
+      border: 1px solid var(--tq-border);
+      color: var(--tq-muted);
+      cursor: pointer;
+      padding: var(--s2);
+      font-size: 0.875rem;
+      line-height: 1;
+      transition: color 0.1s, border-color 0.1s;
+      flex-shrink: 0;
+      align-self: flex-end;
+      height: 2.2rem;
+    }
+    #file-btn:hover { color: var(--tq); border-color: var(--tq); }
+
+    #msg-input {
+      flex: 1;
+      background: var(--bg-2);
+      border: 1px solid var(--tq-border);
+      color: var(--tq);
+      padding: var(--s2) var(--s3);
+      font-family: inherit; font-size: 0.875rem;
+      outline: none; resize: none;
+      line-height: 1.5;
+      min-height: 2.2rem;
+      max-height: 8rem;
+      overflow-y: auto;
+    }
+    #msg-input:focus      { border-color: var(--tq); }
+    #msg-input::placeholder { color: var(--tq-muted); }
+
+    #send-btn {
+      background: transparent;
+      border: 1px solid var(--tq);
+      color: var(--tq);
+      cursor: pointer;
+      padding: var(--s2) var(--s3);
+      font-family: inherit; font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      transition: background 0.1s;
+      flex-shrink: 0;
+      align-self: flex-end;
+      height: 2.2rem;
+    }
+    #send-btn:hover    { background: var(--tq-dim); }
+    #send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    /* ── Scrollbar ──────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar        { width: 3px; }
+    ::-webkit-scrollbar-track  { background: transparent; }
+    ::-webkit-scrollbar-thumb  { background: var(--tq-border); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--tq-mid); }
+
+    /* ── Network log (collapsible, bottom of sidebar) ───────────────────────── */
+    #net-log {
+      max-height: 7rem;
+      overflow-y: auto;
+      padding: var(--s2) var(--s3);
+      border-top: 1px solid var(--tq-border);
+      background: var(--bg-0);
+      flex-shrink: 0;
+    }
+    #net-log .entry {
+      font-size: 0.618rem;
+      color: var(--tq-muted);
+      line-height: 1.8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #net-log .entry.err { color: var(--danger); }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- JS builds UI here -->
+    <div style="
+      display:flex; align-items:center; justify-content:center;
+      height:100vh; width:100vw;
+      font-size:0.75rem; letter-spacing:0.3em; color:rgba(64,224,208,0.3);
+    ">
+      loading…
+    </div>
+  </div>
+  <input type="file" id="file-input-hidden" style="display:none;" multiple />
+  <script type="module" src="main.js"></script>
+</body>
+</html>

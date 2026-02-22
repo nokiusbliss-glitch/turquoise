@@ -1,0 +1,9 @@
+{
+  "name": "Turquoise",
+  "short_name": "Turquoise",
+  "description": "Local-first cryptographic peer-to-peer communication",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#060b0b",
+  "theme_color": "#40E0D0"
+}
