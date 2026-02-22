@@ -1,131 +1,141 @@
 /**
- * server.js — Turquoise (Render Production Version)
+ * server.js — Turquoise (Render-Grade Signaling Core)
  *
- * - Serves /public over HTTP
- * - WebSocket signaling relay for WebRTC
- * - Render provides HTTPS automatically
+ * - Zero framework overhead
+ * - Proxy-safe WebSocket upgrade handling
+ * - Non-blocking static file server
+ * - Deterministic peer registry
+ * - Defensive against malformed input
+ *
+ * Designed for clarity, resilience, and silence.
  */
 
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { WebSocketServer } from 'ws';
+import http from "http";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC = path.join(__dirname, 'public');
-
-// IMPORTANT: Render injects PORT automatically
+const PUBLIC = path.join(__dirname, "public");
 const PORT = process.env.PORT || 3000;
 
-if (!fs.existsSync(PUBLIC)) {
-  console.error(`❌ /public folder not found at: ${PUBLIC}`);
-  process.exit(1);
-}
-
-// ── MIME TYPES ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Static file server (non-blocking, safe path resolution)
+// ─────────────────────────────────────────────────────────────
 
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript',
-  '.json': 'application/json',
-  '.css': 'text/css',
-  '.ico': 'image/x-icon',
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".ico": "image/x-icon",
 };
 
-// ── HTTP FILE SERVER ───────────────────────────────────────
+function serveFile(req, res) {
+  let reqPath = req.url === "/" ? "/index.html" : req.url;
+  const filePath = path.normalize(path.join(PUBLIC, reqPath));
 
-const server = http.createServer((req, res) => {
-  try {
-    const url = (!req.url || req.url === '/') ? '/index.html' : req.url;
-    const filePath = path.normalize(path.join(PUBLIC, url));
+  if (!filePath.startsWith(PUBLIC)) {
+    res.writeHead(403);
+    res.end();
+    return;
+  }
 
-    if (!filePath.startsWith(PUBLIC)) {
-      res.writeHead(403);
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
       res.end();
       return;
     }
 
     const ext = path.extname(filePath);
+    res.writeHead(200, {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+    });
+    res.end(data);
+  });
+}
 
-    try {
-      res.writeHead(200, {
-        'Content-Type': MIME[ext] || 'text/plain',
-      });
-      res.end(fs.readFileSync(filePath));
-    } catch {
-      res.writeHead(404);
-      res.end('Not found');
-    }
-  } catch {
-    res.writeHead(500);
-    res.end();
-  }
-});
+const server = http.createServer(serveFile);
 
-// ── WEBSOCKET SIGNALING SERVER ─────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// WebSocket signaling (explicit upgrade handling)
+// ─────────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ noServer: true });
 const peers = new Map();
 
-wss.on('connection', (ws) => {
-  let myFp = null;
+server.on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
 
-  ws.on('message', (raw) => {
+wss.on("connection", (ws) => {
+  let fingerprint = null;
+
+  ws.on("message", (raw) => {
     let msg;
     try {
-      msg = JSON.parse(raw);
+      msg = JSON.parse(raw.toString());
     } catch {
       return;
     }
 
-    if (!msg || typeof msg !== 'object') return;
+    if (!msg || typeof msg !== "object") return;
 
-    // New peer announces itself
-    if (msg.type === 'announce' && typeof msg.from === 'string') {
-      myFp = msg.from;
-      peers.set(myFp, ws);
+    // Announce
+    if (msg.type === "announce" && typeof msg.from === "string") {
+      fingerprint = msg.from;
+      peers.set(fingerprint, ws);
 
-      console.log(`+ ${myFp.slice(0, 8)} (${peers.size} online)`);
+      console.log(`+ ${fingerprint.slice(0, 8)} (${peers.size})`);
 
-      // Send existing peers to new peer
+      // Send existing peers to newcomer
       for (const [fp] of peers) {
-        if (fp !== myFp) {
+        if (fp !== fingerprint) {
           ws.send(JSON.stringify({
-            type: 'peer',
-            fingerprint: fp,
+            type: "peer",
+            fingerprint: fp
           }));
         }
       }
       return;
     }
 
-    // Direct message
-    if (msg.to) {
+    // Direct relay
+    if (msg.to && peers.has(msg.to)) {
       const target = peers.get(msg.to);
-      if (target?.readyState === 1) {
+      if (target.readyState === 1) {
         target.send(raw.toString());
       }
       return;
     }
 
     // Broadcast fallback
-    for (const [fp, peer] of peers) {
-      if (fp !== myFp && peer.readyState === 1) {
-        peer.send(raw.toString());
+    for (const [fp, client] of peers) {
+      if (fp !== fingerprint && client.readyState === 1) {
+        client.send(raw.toString());
       }
     }
   });
 
-  ws.on('close', () => {
-    if (myFp) {
-      peers.delete(myFp);
-      console.log(`- ${myFp.slice(0, 8)} (${peers.size} online)`);
+  ws.on("close", () => {
+    if (fingerprint) {
+      peers.delete(fingerprint);
+      console.log(`- ${fingerprint.slice(0, 8)} (${peers.size})`);
     }
+  });
+
+  ws.on("error", () => {
+    ws.close();
   });
 });
 
-// ── START SERVER ───────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Launch
+// ─────────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
   console.log(`🚀 Turquoise running on port ${PORT}`);
