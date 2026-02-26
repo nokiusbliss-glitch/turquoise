@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Turquoise</title>
+
+<link rel="manifest" href="/manifest.json" />
+<link rel="stylesheet" href="/style.css" />
+<meta name="theme-color" content="#008c8c" />
+</head>
+<body>
+
+<div id="app">
+
+  <header class="topbar">
+    <div class="logo">TURQUOISE</div>
+    <button id="menuBtn" class="ghost">☰</button>
+  </header>
+
+  <main class="stage" id="stage">
+    <div class="centered">
+      <h1>Ready</h1>
+      <p>Offline-first utility</p>
+    </div>
+  </main>
+
+  <nav class="sidebar hidden" id="sidebar">
+    <button data-action="create-group">Create Group</button>
+    <button data-action="join-group">Join Group</button>
+    <button data-action="share-file">Share File</button>
+    <button data-action="call">Call</button>
+  </nav>
+
+</div>
+
+<script type="module" src="/app.js"></script>
+
+</body>
+</html>

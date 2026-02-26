@@ -1,0 +1,82 @@
+:root {
+  --turquoise: #008c8c;
+  --dark: #071a1a;
+  --light: #e0ffff;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+body {
+  background: var(--dark);
+  color: var(--light);
+  height: 100vh;
+  display: flex;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.topbar {
+  height: 56px;
+  background: var(--turquoise);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 16px;
+  font-weight: 600;
+  letter-spacing: 2px;
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+
+.centered h1 {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.sidebar {
+  position: fixed;
+  right: 0;
+  top: 56px;
+  bottom: 0;
+  width: 240px;
+  background: var(--dark);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 16px;
+}
+
+.sidebar button {
+  background: var(--turquoise);
+  border: none;
+  padding: 12px;
+  font-size: 1rem;
+  color: white;
+  cursor: pointer;
+}
+
+.hidden {
+  display: none;
+}
+
+.ghost {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1.5rem;
+}
