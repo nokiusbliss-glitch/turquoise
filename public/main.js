@@ -1,80 +1,71 @@
 /**
- * main.js — Turquoise v7
+ * main.js — Turquoise Boot
  *
- * Boot sequence:
- *   1. Register Service Worker (PWA + offline)
- *   2. Check required browser APIs — show error if missing
- *   3. Load cryptographic identity
- *   4. Init network engine
- *   5. Mount UI
- *   6. Connect to signaling (auto-detects protocol + host)
+ * Works in both environments:
+ *   A) Inside Tauri app (desktop) → full LAN + online features
+ *   B) Plain browser (Render-hosted) → online-only, PWA installable
  *
- * After step 1 completes, the app is installable and works offline
- * on all subsequent loads — even if the server is unreachable.
+ * Sequence:
+ *   1. Check APIs
+ *   2. Load identity
+ *   3. Register Service Worker
+ *   4. Mount App UI
+ *   5. Connect network
+ *   6. (Tauri only) set identity in Rust backend
  */
 
-import { getIdentity }      from './identity.js';
-import { TurquoiseNetwork } from './webrtc.js';
-import { TurquoiseApp }     from './app.js';
-
-// ── Service Worker registration ───────────────────────────────────────────────
-
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(reg => {
-    console.log('[SW] registered:', reg.scope);
-  }).catch(e => {
-    console.warn('[SW] registration failed:', e.message);
-    // Non-fatal — app still works online
-  });
-}
-
-// ── Browser capability check ──────────────────────────────────────────────────
-
-function checkAPIs() {
-  const missing = [];
-  if (!window.indexedDB)         missing.push('IndexedDB');
-  if (!window.crypto?.subtle)    missing.push('crypto.subtle (requires HTTPS)');
-  if (!window.RTCPeerConnection) missing.push('WebRTC');
-  if (!window.WebSocket)         missing.push('WebSocket');
-  return missing;
-}
+import { getIdentity }       from './identity.js';
+import { TurquoiseNetwork, Mode } from './network.js';
+import { TurquoiseApp }      from './app.js';
+import { IS_TAURI, setIdentity } from './bridge.js';
 
 // ── Fatal error screen ────────────────────────────────────────────────────────
 
-function fatal(title, detail) {
+function showFatal(title, detail) {
   const app = document.getElementById('app');
   if (!app) { console.error(title, detail); return; }
   app.innerHTML = `
-<div style="
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  height:100dvh;padding:2rem;font-family:'Courier New',monospace;
-  color:var(--err,#BF4040);background:var(--void,#030d0d);
-  text-align:center;gap:var(--φ3,1rem);
-">
-  <div style="font-size:.55rem;letter-spacing:.6em;opacity:.4;">T·U·R·Q·U·O·I·S·E</div>
-  <div style="font-size:.85rem;">${title}</div>
-  ${detail ? `<div style="font-size:.68rem;opacity:.55;max-width:360px;line-height:1.9;">${detail}</div>` : ''}
-  <button onclick="location.reload()" style="
-    margin-top:1rem;padding:.4rem 1.2rem;
-    border:1px solid #BF4040;background:transparent;
-    color:#BF4040;font-family:inherit;font-size:.68rem;
-    letter-spacing:.1em;cursor:pointer;
-  ">reload</button>
-</div>`;
+    <div style="
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      height:100vh;padding:2rem;font-family:'Courier New',monospace;color:#d95040;
+      background:#060b0b;text-align:center;gap:1rem;
+    ">
+      <div style="font-size:.7rem;letter-spacing:.3em;opacity:.4">TURQUOISE</div>
+      <div style="font-size:.85rem">${title}</div>
+      ${detail ? `<div style="font-size:.7rem;opacity:.6;max-width:360px">${detail}</div>` : ''}
+    </div>`;
+}
+
+// ── API check ─────────────────────────────────────────────────────────────────
+
+function checkAPIs() {
+  const missing = [];
+  if (!window.indexedDB)      missing.push('IndexedDB not available');
+  if (!window.crypto?.subtle) missing.push('crypto.subtle — open via HTTPS or localhost');
+  if (!window.RTCPeerConnection) missing.push('WebRTC not available');
+  if (!window.WebSocket)      missing.push('WebSocket not available');
+  return missing;
+}
+
+// ── Register service worker (browser only) ────────────────────────────────────
+
+async function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.register('./sw.js');
+    console.log('[SW] registered:', reg.scope);
+  } catch (e) {
+    console.warn('[SW] registration failed (non-fatal):', e.message);
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 async function boot() {
-
   // 1. API check
   const missing = checkAPIs();
-  if (missing.length) {
-    fatal(
-      'Browser missing required APIs.',
-      missing.map(m => '· ' + m).join('<br/>')
-        + '<br/><br/>Use Chrome, Edge, or Firefox over HTTPS.'
-    );
+  if (missing.length > 0) {
+    showFatal('Missing browser capabilities.', missing.map(m => '· ' + m).join('<br/>'));
     return;
   }
 
@@ -83,47 +74,75 @@ async function boot() {
   try {
     identity = await getIdentity();
   } catch (e) {
-    fatal('Identity initialization failed.', e.message);
+    showFatal('Identity error.', e.message);
     return;
   }
 
-  // 3. Network
+  // 3. Service Worker (browser PWA only — skip in Tauri)
+  if (!IS_TAURI) registerSW();
+
+  // 4. Network
   let network;
   try {
-    network = new TurquoiseNetwork(identity);
+    network = new TurquoiseNetwork(identity, () => {});
   } catch (e) {
-    fatal('Network engine failed.', e.message);
+    showFatal('Network init failed.', e.message);
     return;
   }
 
-  // 4. App UI
-  let app;
+  // 5. App UI
+  let appCtrl;
   try {
-    app = new TurquoiseApp(identity, network);
-    await app.mount();
+    appCtrl = new TurquoiseApp(identity, network);
+    await appCtrl.mount();
   } catch (e) {
-    fatal('App failed to mount.', e.message);
-    console.error('[Boot] mount error:', e);
+    showFatal('App failed.', e.message);
+    console.error('App mount error:', e);
     return;
   }
 
-  // 5. Connect to signaling
-  //    wss:// on HTTPS (Render), ws:// on http (local dev)
-  //    Same host:port — no hardcoded URL
+  // 6. Network connections
   try {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    network.connect(`${proto}://${location.host}`);
+    // Detect initial mode from localStorage (persists user's last choice)
+    const savedMode = localStorage.getItem('tq_mode') || Mode.ONLINE;
+    if (savedMode !== network.mode) network.setMode(savedMode);
+
+    // Online signaling
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const cloudUrl = `${protocol}://${window.location.host}`;
+
+    if (network.mode === Mode.ONLINE) {
+      network.connect(cloudUrl);
+    } else {
+      network.cloudUrl = cloudUrl;
+    }
+
+    // Save mode changes
+    network.onModeChange = (mode) => {
+      localStorage.setItem('tq_mode', mode);
+    };
   } catch (e) {
-    console.warn('[Boot] signaling connect failed:', e.message);
-    // Non-fatal — UI is up, reconnect will be attempted automatically
+    console.error('Network connect error:', e);
+    // Non-fatal — UI is up, user can retry
+  }
+
+  // 7. Tauri: register identity with Rust backend
+  if (IS_TAURI) {
+    try {
+      await setIdentity(identity.fingerprint, identity.nickname);
+    } catch (e) {
+      console.warn('[Boot] setIdentity failed:', e.message);
+    }
   }
 }
 
-boot().catch(e => {
-  console.error('[Boot] fatal:', e);
-  fatal('Unexpected startup error.', e?.message || String(e));
+// ── Run ───────────────────────────────────────────────────────────────────────
+
+boot().catch(err => {
+  console.error('Fatal boot:', err);
+  showFatal('Unexpected error.', err?.message || String(err));
 });
 
-window.addEventListener('unhandledrejection', ev => {
-  console.error('[Unhandled]', ev.reason);
+window.addEventListener('unhandledrejection', (ev) => {
+  console.error('Unhandled rejection:', ev.reason);
 });
