@@ -1,22 +1,20 @@
 const CACHE = "turquoise-v1";
-const ASSETS = [
-  "/",
-  "/index.html",
-  "/style.css",
-  "/app.js",
-  "/state.js",
-  "/ui.js",
-  "/manifest.json"
-];
 
-self.addEventListener("install", e => {
+self.addEventListener("install", (e) => {
   e.waitUntil(
-    caches.open(CACHE).then(cache => cache.addAll(ASSETS))
+    caches.open(CACHE).then((cache) =>
+      cache.addAll([
+        "/",
+        "/index.html",
+        "/style.css",
+        "/app.js",
+      ])
+    )
   );
 });
 
-self.addEventListener("fetch", e => {
+self.addEventListener("fetch", (e) => {
   e.respondWith(
-    caches.match(e.request).then(resp => resp || fetch(e.request))
+    caches.match(e.request).then((res) => res || fetch(e.request))
   );
 });

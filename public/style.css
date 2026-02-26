@@ -1,82 +1,36 @@
 :root {
-  --turquoise: #008c8c;
-  --dark: #071a1a;
-  --light: #e0ffff;
-}
-
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  --turquoise: #00f5d4;
+  --bg: #001f1f;
 }
 
 body {
-  background: var(--dark);
-  color: var(--light);
-  height: 100vh;
-  display: flex;
+  margin: 0;
+  background: var(--bg);
+  color: var(--turquoise);
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-#app {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-.topbar {
-  height: 56px;
-  background: var(--turquoise);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 16px;
-  font-weight: 600;
-  letter-spacing: 2px;
-}
-
-.stage {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
+header {
   text-align: center;
+  padding: 1rem;
+  font-weight: 300;
+  letter-spacing: 4px;
 }
 
-.centered h1 {
-  font-size: 2rem;
-  margin-bottom: 8px;
+#videos {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
-.sidebar {
-  position: fixed;
-  right: 0;
-  top: 56px;
-  bottom: 0;
-  width: 240px;
-  background: var(--dark);
-  display: flex;
-  flex-direction: column;
-  padding: 16px;
-  gap: 16px;
+video {
+  width: 100%;
+  border-radius: 16px;
+  background: black;
 }
 
-.sidebar button {
-  background: var(--turquoise);
-  border: none;
-  padding: 12px;
-  font-size: 1rem;
-  color: white;
-  cursor: pointer;
-}
-
-.hidden {
-  display: none;
-}
-
-.ghost {
-  background: none;
-  border: none;
-  color: white;
-  font-size: 1.5rem;
+@media (min-width: 768px) {
+  #videos {
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
 }
