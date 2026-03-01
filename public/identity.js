@@ -9,18 +9,13 @@ const DB_VERSION = 2;
 const STORE_KEY  = 'tq-keys';
 const STORE_NICK = 'tq-prefs';
 
-// ── IndexedDB ──────────────────────────────────────────────────────────────────
 function openDB() {
   return new Promise((res, rej) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
-      if (!db.objectStoreNames.contains(STORE_KEY)) {
-        db.createObjectStore(STORE_KEY);
-      }
-      if (!db.objectStoreNames.contains(STORE_NICK)) {
-        db.createObjectStore(STORE_NICK);
-      }
+      if (!db.objectStoreNames.contains(STORE_KEY))  db.createObjectStore(STORE_KEY);
+      if (!db.objectStoreNames.contains(STORE_NICK)) db.createObjectStore(STORE_NICK);
     };
     req.onsuccess = (e) => res(e.target.result);
     req.onerror   = () => rej(new Error('IndexedDB open failed: ' + req.error?.message));
@@ -46,11 +41,10 @@ function dbPut(db, store, key, value) {
   });
 }
 
-// ── Key pair ──────────────────────────────────────────────────────────────────
 async function generateKeyPair() {
   return crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
-    false,       // non-exportable private key
+    false,
     ['sign', 'verify']
   );
 }
@@ -58,17 +52,15 @@ async function generateKeyPair() {
 async function fingerprintOf(publicKey) {
   const raw  = await crypto.subtle.exportKey('raw', publicKey);
   const hash = await crypto.subtle.digest('SHA-256', raw);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,'0')).join('');
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
 export async function getIdentity() {
   if (!window.crypto?.subtle) throw new Error('crypto.subtle unavailable — requires HTTPS');
-  if (!window.indexedDB)       throw new Error('IndexedDB unavailable');
+  if (!window.indexedDB)      throw new Error('IndexedDB unavailable');
 
   const db = await openDB();
 
-  // Load or generate key pair
   let keys = await dbGet(db, STORE_KEY, 'keypair');
   if (!keys) {
     keys = await generateKeyPair();
@@ -78,18 +70,16 @@ export async function getIdentity() {
   const fingerprint = await fingerprintOf(keys.publicKey);
   const shortId     = fingerprint.slice(0, 8);
 
-  // Load nickname (falls back to shortId)
   const savedNick = await dbGet(db, STORE_NICK, 'nickname');
   const nickname  = (typeof savedNick === 'string' && savedNick.trim()) ? savedNick.trim() : shortId;
+  const isNewUser = !savedNick; // true if nickname was never set
 
-  // Sign function
   async function sign(data) {
     const encoded = new TextEncoder().encode(typeof data === 'string' ? data : JSON.stringify(data));
     const sigBuf  = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, encoded);
     return Array.from(new Uint8Array(sigBuf));
   }
 
-  // Verify function
   async function verify(data, sigArray, pubKey) {
     try {
       const encoded = new TextEncoder().encode(typeof data === 'string' ? data : JSON.stringify(data));
@@ -98,12 +88,23 @@ export async function getIdentity() {
     } catch { return false; }
   }
 
-  // Save nickname
   async function saveNickname(nick) {
     const trimmed = (nick || '').trim().slice(0, 32);
     await dbPut(db, STORE_NICK, 'nickname', trimmed || shortId);
     return trimmed || shortId;
   }
 
-  return { fingerprint, shortId, nickname, sign, verify, saveNickname };
+  return { fingerprint, shortId, nickname, isNewUser, sign, verify, saveNickname };
+}
+
+// Clears the cryptographic identity — next load generates a fresh one
+export async function resetIdentity() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction([STORE_KEY, STORE_NICK], 'readwrite');
+    tx.objectStore(STORE_KEY).delete('keypair');
+    tx.objectStore(STORE_NICK).delete('nickname');
+    tx.oncomplete = () => res();
+    tx.onerror    = () => rej(tx.error);
+  });
 }

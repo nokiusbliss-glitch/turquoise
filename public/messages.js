@@ -1,6 +1,7 @@
 /**
  * messages.js — Turquoise
- * IndexedDB persistence for messages and peer metadata
+ * IndexedDB persistence for messages and peer metadata.
+ * Chats persist forever for the same identity.
  */
 
 const DB_NAME    = 'tq-messages';
@@ -49,6 +50,34 @@ export async function loadMessages(sessionId) {
       res(msgs);
     };
     req.onerror = () => rej(req.error);
+  });
+}
+
+// Clear all messages for one peer (keeps peer metadata)
+export async function clearMessages(sessionId) {
+  const db = await getDB();
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('messages', 'readwrite');
+    const idx = tx.objectStore('messages').index('by-session');
+    const req = idx.openCursor(IDBKeyRange.only(sessionId));
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+      else res();
+    };
+    req.onerror = () => rej(req.error);
+  });
+}
+
+// Clear everything — used by full reset
+export async function clearAllData() {
+  const db = await getDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(['messages', 'peers'], 'readwrite');
+    tx.objectStore('messages').clear();
+    tx.objectStore('peers').clear();
+    tx.oncomplete = () => res();
+    tx.onerror    = () => rej(tx.error);
   });
 }
 

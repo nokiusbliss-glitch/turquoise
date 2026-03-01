@@ -3,23 +3,23 @@
  * UI controller: chat, files, voice/video
  *
  * Render = website delivery + WebRTC signaling only.
- * After P2P handshake, ALL data is direct device-to-device over local WiFi.
- * No messages, files, audio, or video ever go through Render.
+ * After P2P handshake: ALL data is direct device-to-device over local WiFi.
  *
- * Call flow (simplified — no accept/decline):
+ * Call flow (auto-answer — no accept/decline UI):
  *   Initiator clicks mic/camera → startMedia() → sends offer-reneg via P2P ctrl
- *   Receiver receives offer-reneg → answerMedia() auto-opens mic/camera → connected
- *   Either side clicks "end" → call-end message → both clean up
+ *   Receiver receives offer-reneg → answerMedia() → connected
+ *   Either side clicks "end" → call-end → both clean up
  *
  * File transfer:
- *   Sender:   _queueFile() → ft.send() → creates file card UI → sends binary chunks
- *   Receiver: file-meta ctrl msg → creates file card UI → receives chunks → download link
+ *   Sender:   _queueFile() → ft.send() → file card with progress bar
+ *   Receiver: file-meta → file card created → chunks arrive → download link
  *
- * Audio: always routed to loudspeaker (default device, setSinkId where supported)
- * Video: double-tap remote video to toggle fullscreen
+ * Audio: always loudspeaker (setSinkId('') where supported)
+ * Video: double-click remote video OR click ⛶ button for fullscreen
  */
 
-import { saveMessage, loadMessages, savePeer, loadPeers } from './messages.js';
+import { saveMessage, loadMessages, savePeer, loadPeers, clearMessages, clearAllData } from './messages.js';
+import { resetIdentity } from './identity.js';
 import { FileTransfer } from './files.js';
 
 const $ = (id) => document.getElementById(id);
@@ -45,11 +45,11 @@ export class TurquoiseApp {
     this.unread   = new Map();   // fp → count
     this.call     = null;        // {fp, video, muted, camOff, localStream, remoteStream}
 
-    // Hidden audio element — always-on remote audio, loudspeaker by default
+    // Hidden audio — always-on remote audio routed to loudspeaker
     this._audioEl = document.createElement('audio');
-    this._audioEl.autoplay   = true;
+    this._audioEl.autoplay    = true;
     this._audioEl.playsInline = true;
-    this._audioEl.controls   = false;
+    this._audioEl.controls    = false;
     this._audioEl.style.display = 'none';
     document.body.appendChild(this._audioEl);
 
@@ -58,9 +58,9 @@ export class TurquoiseApp {
       (fp, buf) => network.sendBinary(fp, buf),
       (fp)      => network.waitForBuffer(fp),
     );
-    this.ft.onProgress  = (id, pct)   => this._onFileProg(id, pct);
-    this.ft.onFileReady = (f)         => this._onFileReady(f);
-    this.ft.onError     = (id, msg)   => this._onFileErr(id, msg);
+    this.ft.onProgress  = (id, pct)  => this._onFileProg(id, pct);
+    this.ft.onFileReady = (f)        => this._onFileReady(f);
+    this.ft.onError     = (id, msg)  => this._onFileErr(id, msg);
   }
 
   // ── Mount ──────────────────────────────────────────────────────────────────
@@ -83,6 +83,14 @@ export class TurquoiseApp {
     this._renderPeers();
     this._bind();
     this._wire();
+
+    // First-time user: prompt for name immediately
+    if (this.id.isNewUser) {
+      this._status('set your name to get started', 'info');
+      setTimeout(() => this._triggerNickEdit(), 400);
+    } else {
+      this._status('connecting…', 'info');
+    }
   }
 
   // ── Event binding ──────────────────────────────────────────────────────────
@@ -90,17 +98,16 @@ export class TurquoiseApp {
     // Nickname edit
     const row = $('identity-row'), disp = $('nick-display'), inp = $('nick-input');
     if (row && disp && inp) {
-      row.addEventListener('click', () => {
-        if (inp.classList.contains('visible')) return;
-        disp.classList.add('hidden'); inp.classList.add('visible'); inp.focus(); inp.select();
-      });
+      row.addEventListener('click', () => this._triggerNickEdit());
       const saveNick = async () => {
+        if (!inp.classList.contains('visible')) return;
         const saved = await this.id.saveNickname(inp.value).catch(() => this.id.nickname);
         this.id.nickname = saved;
         if (disp) disp.textContent = saved;
         if (inp)  inp.value        = saved;
         disp.classList.remove('hidden'); inp.classList.remove('visible');
         this.net.getConnectedPeers().forEach(fp => this.net.sendCtrl(fp, { type: 'nick-update', nick: saved }));
+        this._status('name saved: ' + saved, 'ok');
       };
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); saveNick(); } });
       inp.addEventListener('blur', saveNick);
@@ -117,7 +124,7 @@ export class TurquoiseApp {
     // File button
     const fb = $('file-btn'), fi = $('__file-input');
     if (fb && fi) {
-      fb.addEventListener('click', () => { if (!this.active) { this._sys('Select a peer first', true); return; } fi.click(); });
+      fb.addEventListener('click', () => { if (!this.active) { this._sys('select a peer first', true); return; } fi.click(); });
       fi.addEventListener('change', (e) => { Array.from(e.target.files || []).forEach(f => this._queueFile(f)); fi.value = ''; });
     }
 
@@ -128,13 +135,23 @@ export class TurquoiseApp {
       ca.addEventListener('dragleave', () => ca.classList.remove('drag-over'));
       ca.addEventListener('drop', (e) => {
         e.preventDefault(); ca.classList.remove('drag-over');
-        if (!this.active) { this._sys('Select a peer first', true); return; }
+        if (!this.active) { this._sys('select a peer first', true); return; }
         Array.from(e.dataTransfer?.files || []).forEach(f => this._queueFile(f));
       });
     }
 
-    // Back button (narrow)
+    // Back button (narrow screens)
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
+
+    // Reset identity
+    $('reset-btn')?.addEventListener('click', () => this._confirmReset());
+  }
+
+  _triggerNickEdit() {
+    const disp = $('nick-display'), inp = $('nick-input');
+    if (!disp || !inp) return;
+    if (inp.classList.contains('visible')) return;
+    disp.classList.add('hidden'); inp.classList.add('visible'); inp.focus(); inp.select();
   }
 
   // ── Wire network callbacks ─────────────────────────────────────────────────
@@ -145,6 +162,8 @@ export class TurquoiseApp {
     n.onMessage          = (fp, msg)  => { try { this._dispatch(fp, msg); } catch (e) { this._log('⚠ msg: ' + e.message, true); } };
     n.onBinaryChunk      = (fp, buf)  => { try { this.ft.handleBinary(fp, buf); } catch (e) { this._log('⚠ binary: ' + e.message, true); } };
     n.onLog              = (t, e)     => this._log(t, e);
+    n.onSignalingConnected    = () => this._status('online — waiting for peers', 'ok', 3000);
+    n.onSignalingDisconnected = () => this._status('signaling lost — reconnecting…', 'warn');
   }
 
   // ── Peer lifecycle ─────────────────────────────────────────────────────────
@@ -161,15 +180,18 @@ export class TurquoiseApp {
       }).catch(() => { this.sessions.set(fp, []); });
     } else { this._renderPeers(); }
     if (this.active === fp) this._renderHeader();
+    this._status(`${name} connected`, 'ok', 3000);
     this._log(`✓ ${name} connected`);
   }
 
   _onDisconnect(fp) {
     const p = this.peers.get(fp);
+    const name = p?.nick || fp.slice(0, 8);
     if (p) p.connected = false;
     if (this.call?.fp === fp) this._endCallLocal();
     this._renderPeers();
     if (this.active === fp) this._renderHeader();
+    this._status(`${name} disconnected — will reconnect`, 'warn', 5000);
   }
 
   // ── Message dispatcher ─────────────────────────────────────────────────────
@@ -184,7 +206,9 @@ export class TurquoiseApp {
     if (type === 'nick-update') {
       const p = this.peers.get(fp);
       if (p && msg.nick) {
-        p.nick = msg.nick; this._renderPeers();
+        p.nick = msg.nick;
+        this._renderPeers();
+        if (this.active === fp) this._renderHeader();
         savePeer({ fingerprint: fp, shortId: fp.slice(0, 8), nickname: msg.nick }).catch(() => {});
       }
       return;
@@ -193,10 +217,16 @@ export class TurquoiseApp {
 
     // File transfer
     if (type === 'file-meta') {
-      // Create card on receiver side so download link has somewhere to appear
       const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
-      this._addFileCard(nick, msg.fileId, msg.name, msg.size, false);
+      // Open session if needed so card is visible
+      if (this.active !== fp) {
+        this.unread.set(fp, (this.unread.get(fp) || 0) + 1);
+        this._renderPeers();
+      } else {
+        this._addFileCard(nick, msg.fileId, msg.name, msg.size, false);
+      }
       this.ft.handleCtrl(fp, msg);
+      this._status(`receiving file from ${nick}…`, 'info');
       return;
     }
     if (type === 'file-end' || type === 'file-abort') {
@@ -204,13 +234,22 @@ export class TurquoiseApp {
       return;
     }
 
-    // Call: receiver auto-answers (no invite/accept/decline UI)
+    // Call: receiver auto-answers
     if (type === 'offer-reneg') {
+      const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
+      this._status(`${nick} is calling — opening mic…`, 'info');
       this._onIncomingMedia(fp, msg);
       return;
     }
-    if (type === 'call-end') {
-      this._onCallEnd(fp);
+    if (type === 'call-end') { this._onCallEnd(fp); return; }
+
+    // Permission denied — the peer couldn't open their mic/camera
+    if (type === 'permission-denied') {
+      const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
+      const media = msg.media || 'microphone';
+      this._status(`${nick} cannot join: ${media} permission denied on their device`, 'err', 8000);
+      this._sys(`${nick}'s device denied ${media} permission`, true);
+      if (this.call?.fp === fp) this._endCallLocal();
       return;
     }
   }
@@ -236,12 +275,13 @@ export class TurquoiseApp {
     const text = inp?.value?.trim();
     if (!text || !this.active) return;
     const fp  = this.active;
+    if (!this.net.isReady(fp)) { this._sys('peer offline — message not sent', true); return; }
     const msg = {
       id: crypto.randomUUID(), sessionId: fp, from: this.id.fingerprint,
       fromNick: this.id.nickname, text, ts: Date.now(), type: 'text', own: true,
     };
     if (!this.net.sendCtrl(fp, { type: 'chat', id: msg.id, nick: this.id.nickname, text, ts: msg.ts })) {
-      this._sys('Peer offline', true); return;
+      this._sys('peer offline — message not sent', true); return;
     }
     if (!this.sessions.has(fp)) this.sessions.set(fp, []);
     this.sessions.get(fp).push(msg);
@@ -254,8 +294,10 @@ export class TurquoiseApp {
   // ── Files ──────────────────────────────────────────────────────────────────
   _queueFile(file) {
     if (!file || !this.active) return;
+    if (!this.net.isReady(this.active)) { this._sys('peer offline — cannot send file', true); return; }
     const fileId = crypto.randomUUID();
     this._addFileCard(this.id.nickname, fileId, file.name, file.size, true);
+    this._status(`sending ${file.name} to ${this.peers.get(this.active)?.nick || '?'}…`, 'info');
     this.ft.send(file, this.active, fileId);
   }
 
@@ -265,17 +307,22 @@ export class TurquoiseApp {
   }
 
   _onFileReady(f) {
-    const card = document.querySelector(`[data-fcid="${f.fileId}"]`);
+    // Try to find the card — it might be in a non-active session
+    let card = document.querySelector(`[data-fcid="${f.fileId}"]`);
+    if (!card) {
+      // Card was created but session isn't open — create a temporary notification
+      const nick = this.peers.get(f.from)?.nick || f.from?.slice(0, 8) || '?';
+      this._status(`file received from ${nick}: ${f.name} — open chat to download`, 'ok', 8000);
+    }
     if (!card) return;
     card.querySelector('.prog-track')?.remove();
     if (!card.querySelector('.dl-btn')) {
       const a = document.createElement('a');
-      a.className = 'dl-btn';
-      a.href = f.url;
-      a.download = f.name || 'file';
+      a.className = 'dl-btn'; a.href = f.url; a.download = f.name || 'file';
       a.textContent = '↓ ' + esc(f.name || 'file');
       card.appendChild(a);
     }
+    this._status(`file received: ${f.name}`, 'ok', 4000);
   }
 
   _onFileErr(fileId, errMsg) {
@@ -283,17 +330,18 @@ export class TurquoiseApp {
     if (card) {
       const d = document.createElement('div');
       d.style.cssText = 'color:var(--err);font-size:.65rem;margin-top:4px';
-      d.textContent = '⚠ ' + errMsg;
-      card.appendChild(d);
+      d.textContent = '⚠ ' + errMsg; card.appendChild(d);
     }
-    this._sys('File error: ' + errMsg, true);
+    this._status('file error: ' + errMsg, 'err', 5000);
+    this._sys('file error: ' + errMsg, true);
   }
 
   // ── Voice / Video ──────────────────────────────────────────────────────────
-
-  // Initiator: called when user clicks mic/camera button
   async _startCall(fp, callType) {
+    if (!this.net.isReady(fp)) { this._sys('peer offline — cannot call', true); return; }
     if (this.call) await this._endCallLocal();
+    const peerName = this.peers.get(fp)?.nick || fp.slice(0, 8);
+    this._status(`calling ${peerName}…`, 'info');
     try {
       const video       = callType === 'video';
       const localStream = await this.net.startMedia(fp, video);
@@ -301,17 +349,25 @@ export class TurquoiseApp {
       this._attachRemote(fp);
       this._openSession(fp);
       this._renderCallPanel();
+      this._status(`${callType} call started — waiting for ${peerName}`, 'info');
     } catch (e) {
-      this._log('❌ Call failed: ' + e.message, true);
-      this._sys('Call failed: ' + e.message, true);
+      if (e.message.startsWith('permission-denied:')) {
+        const media = e.message.split(':')[1];
+        this._status(`${media} permission denied — allow in browser settings`, 'err', 8000);
+        this._sys(`allow ${media} access in browser settings`, true);
+      } else if (e.message.startsWith('no-device:')) {
+        this._status(`no ${e.message.split(':')[1]} found on this device`, 'err', 6000);
+      } else {
+        this._status('call failed: ' + e.message, 'err', 5000);
+      }
+      this._log('❌ call failed: ' + e.message, true);
       this.call = null;
     }
   }
 
-  // Receiver: auto-answers without any UI prompt
+  // Receiver auto-answers — no UI prompt needed
   async _onIncomingMedia(fp, msg) {
-    // If already in a different call, ignore
-    if (this.call && this.call.fp !== fp) return;
+    if (this.call && this.call.fp !== fp) return; // already in a different call
     try {
       const video       = msg.callType === 'video';
       const localStream = await this.net.answerMedia(fp, msg.sdp, video);
@@ -319,28 +375,37 @@ export class TurquoiseApp {
       this._attachRemote(fp);
       this._openSession(fp);
       this._renderCallPanel();
+      const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
+      this._status(`in ${msg.callType || 'audio'} call with ${nick}`, 'ok');
     } catch (e) {
-      this._log('❌ Answer failed: ' + e.message, true);
-      this._sys('Could not open mic/camera: ' + e.message, true);
+      if (e.message.startsWith('permission-denied:')) {
+        const media = e.message.split(':')[1];
+        this._status(`${media} permission denied — ${this.peers.get(fp)?.nick || '?'} tried to call`, 'err', 8000);
+        this._sys(`allow ${media} access to receive calls`, true);
+      } else if (e.message.startsWith('no-device:')) {
+        this._status(`no ${e.message.split(':')[1]} found — cannot answer call`, 'err', 6000);
+      } else {
+        this._status('could not answer call: ' + e.message, 'err', 5000);
+      }
+      this._log('❌ answer failed: ' + e.message, true);
     }
   }
 
   _attachRemote(fp) {
     this.net.setRemoteStreamHandler(fp, (stream) => {
       if (!stream) return;
-
-      // Wire audio to persistent element — loudspeaker default
+      // Route audio to loudspeaker (default device)
       this._audioEl.srcObject = stream;
-      // setSinkId('') = default output = loudspeaker on most devices
       if (typeof this._audioEl.setSinkId === 'function') {
         this._audioEl.setSinkId('').catch(() => {});
       }
       this._audioEl.play().catch(() => {});
 
-      // Wire video if in a video call
       if (this.call?.fp === fp) {
         this.call.remoteStream = stream;
         this._renderCallPanel();
+        const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
+        this._status(`in call with ${nick}`, 'ok');
       }
     });
   }
@@ -348,7 +413,7 @@ export class TurquoiseApp {
   _onCallEnd(fp) {
     if (this.call?.fp === fp) {
       this._endCallLocal();
-      this._sys('Call ended');
+      this._status('call ended', 'info', 3000);
     }
   }
 
@@ -362,14 +427,8 @@ export class TurquoiseApp {
   }
 
   _renderCallPanel() {
-    const panel = $('call-panel');
-    if (!panel) return;
-
-    if (!this.call) {
-      panel.innerHTML = '';
-      panel.classList.remove('visible');
-      return;
-    }
+    const panel = $('call-panel'); if (!panel) return;
+    if (!this.call) { panel.innerHTML = ''; panel.classList.remove('visible'); return; }
 
     const { fp, video, muted, camOff, localStream, remoteStream } = this.call;
     const peerName = this.peers.get(fp)?.nick || fp.slice(0, 8);
@@ -378,7 +437,7 @@ export class TurquoiseApp {
     let videoHTML = '';
     if (video) {
       videoHTML = `
-        <div class="video-grid" id="video-grid">
+        <div class="video-grid">
           <div class="video-wrap" id="vw-remote">
             <video id="vid-remote" autoplay playsinline></video>
             <div class="video-label">${esc(peerName)}</div>
@@ -393,19 +452,17 @@ export class TurquoiseApp {
     panel.innerHTML = videoHTML + `
       <div class="call-controls">
         <div class="call-btn ${muted ? 'muted' : ''}" id="cb-mute">🎙 ${muted ? 'unmute' : 'mute'}</div>
-        ${video ? `<div class="call-btn ${camOff ? 'muted' : ''}" id="cb-cam">📷 ${camOff ? 'cam off' : 'cam on'}</div>` : ''}
-        ${video ? `<div class="call-btn" id="cb-fs">⛶ fullscreen</div>` : ''}
+        ${video ? `<div class="call-btn ${camOff ? 'muted' : ''}" id="cb-cam">📷 ${camOff ? 'off' : 'on'}</div>` : ''}
+        ${video ? `<div class="call-btn" id="cb-fs">⛶</div>` : ''}
         <div class="call-btn end" id="cb-end">✕ end</div>
       </div>`;
 
-    // Attach streams
     const vr = $('vid-remote'), vl = $('vid-local');
     if (vr && remoteStream) {
       vr.srcObject = remoteStream;
-      // Double-tap/click for fullscreen
       vr.addEventListener('dblclick', () => {
         if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-        else vr.requestFullscreen?.();
+        else vr.requestFullscreen?.().catch(() => {});
       });
     }
     if (vl && localStream) vl.srcObject = localStream;
@@ -423,14 +480,14 @@ export class TurquoiseApp {
       this._renderCallPanel();
     });
     $('cb-fs')?.addEventListener('click', () => {
-      const vr2 = $('vid-remote');
-      if (!vr2) return;
+      const vr2 = $('vid-remote'); if (!vr2) return;
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-      else vr2.requestFullscreen?.();
+      else vr2.requestFullscreen?.().catch(() => {});
     });
     $('cb-end')?.addEventListener('click', () => {
       if (this.call) this.net.sendCtrl(this.call.fp, { type: 'call-end' });
       this._endCallLocal();
+      this._status('call ended', 'info', 3000);
     });
   }
 
@@ -447,20 +504,53 @@ export class TurquoiseApp {
     this._renderMsgs();
     this._renderPeers();
     this._renderCallPanel();
-    const ib = $('input-bar');
-    if (ib) ib.classList.add('visible');
+    const ib = $('input-bar'); if (ib) ib.classList.add('visible');
     $('msg-input')?.focus();
     this._showChat();
   }
 
+  // ── Clear chat (current session) ───────────────────────────────────────────
+  async _clearChat(fp) {
+    if (!fp) return;
+    const nick = this.peers.get(fp)?.nick || fp.slice(0, 8);
+    if (!confirm(`Clear all messages with ${nick}?\nThis cannot be undone.`)) return;
+    try {
+      await clearMessages(fp);
+      this.sessions.set(fp, []);
+      this._renderMsgs();
+      this._status('chat cleared', 'ok', 3000);
+    } catch (e) {
+      this._status('clear failed: ' + e.message, 'err', 4000);
+    }
+  }
+
+  // ── Full reset ─────────────────────────────────────────────────────────────
+  async _confirmReset() {
+    const ok = confirm(
+      'Reset Turquoise?\n\n' +
+      '• Your identity (cryptographic key + name) will be deleted\n' +
+      '• All chat history will be deleted\n' +
+      '• A fresh identity will be created on next load\n\n' +
+      'This cannot be undone.'
+    );
+    if (!ok) return;
+    this._status('resetting…', 'warn');
+    try {
+      await clearAllData();
+      await resetIdentity();
+      // Clear SW cache so app re-fetches fresh
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+    } catch (e) { console.warn('reset cleanup error:', e); }
+    location.reload();
+  }
+
   // ── Render: peer list ──────────────────────────────────────────────────────
   _renderPeers() {
-    const list = $('peer-list');
-    if (!list) return;
-    if (!this.peers.size) {
-      list.innerHTML = '<div id="no-peers">waiting for peers…</div>';
-      return;
-    }
+    const list = $('peer-list'); if (!list) return;
+    if (!this.peers.size) { list.innerHTML = '<div id="no-peers">waiting for peers…</div>'; return; }
 
     const sorted = [...this.peers.entries()].sort(([, a], [, b]) => {
       if (a.connected !== b.connected) return a.connected ? -1 : 1;
@@ -491,16 +581,15 @@ export class TurquoiseApp {
 
   // ── Render: chat header ────────────────────────────────────────────────────
   _renderHeader() {
-    const h = $('chat-header');
-    if (!h) return;
+    const h = $('chat-header'); if (!h) return;
     const fp = this.active, p = fp ? this.peers.get(fp) : null;
     if (!fp || !p) {
       h.innerHTML = '<span id="back-btn" style="display:none">←</span><span id="chat-placeholder">select a peer</span>';
       $('back-btn')?.addEventListener('click', () => this._showSidebar());
       return;
     }
-    const dot = p.connected ? 'online' : 'offline';
-    const inCall = this.call?.fp === fp;
+    const dot    = p.connected ? 'online' : 'offline';
+    const inCall = !!(this.call?.fp === fp);
     h.innerHTML = `
       <span id="back-btn" style="display:none">←</span>
       <div class="peer-dot ${dot}"></div>
@@ -511,6 +600,7 @@ export class TurquoiseApp {
       <div class="chat-actions">
         <div class="action-btn ${inCall ? 'active-call' : ''}" id="hbtn-audio" title="voice call">🎙</div>
         <div class="action-btn ${inCall ? 'active-call' : ''}" id="hbtn-video" title="video call">📷</div>
+        <div class="action-btn danger" id="hbtn-clear" title="clear chat history">🗑</div>
       </div>`;
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
     $('hbtn-audio')?.addEventListener('click', () => {
@@ -521,12 +611,12 @@ export class TurquoiseApp {
       if (this.call?.fp === fp) { this.net.sendCtrl(fp, { type: 'call-end' }); this._endCallLocal(); }
       else this._startCall(fp, 'video');
     });
+    $('hbtn-clear')?.addEventListener('click', () => this._clearChat(fp));
   }
 
   // ── Render: messages ───────────────────────────────────────────────────────
   _renderMsgs() {
-    const msgs = $('messages');
-    if (!msgs) return;
+    const msgs = $('messages'); if (!msgs) return;
     msgs.innerHTML = '';
     const session = this.sessions.get(this.active) || [];
     if (!session.length) { msgs.innerHTML = '<div class="sys-msg">no messages yet</div>'; return; }
@@ -537,8 +627,7 @@ export class TurquoiseApp {
   }
 
   _appendMsg(msg) {
-    const msgs = $('messages');
-    if (!msgs) return;
+    const msgs = $('messages'); if (!msgs) return;
     const e = msgs.querySelector('.sys-msg');
     if (e && msgs.children.length === 1) e.remove();
     msgs.appendChild(this._msgEl(msg));
@@ -554,10 +643,8 @@ export class TurquoiseApp {
   }
 
   _addFileCard(fromNick, fileId, name, size, own) {
-    const msgs = $('messages');
-    if (!msgs || !fileId) return;
-    // Avoid duplicate cards
-    if (document.querySelector(`[data-fcid="${fileId}"]`)) return;
+    const msgs = $('messages'); if (!msgs || !fileId) return;
+    if (document.querySelector(`[data-fcid="${fileId}"]`)) return; // no duplicates
     const e = msgs.querySelector('.sys-msg');
     if (e && msgs.children.length === 1) e.remove();
     const w = document.createElement('div');
@@ -577,23 +664,37 @@ export class TurquoiseApp {
   _showChat()    { $('sidebar')?.classList.add('slide-left');    $('chat-area')?.classList.add('slide-in'); }
   _showSidebar() { $('sidebar')?.classList.remove('slide-left'); $('chat-area')?.classList.remove('slide-in'); }
 
+  // ── Status bar ─────────────────────────────────────────────────────────────
+  // type: 'info' | 'ok' | 'warn' | 'err'
+  // duration: ms to auto-clear, or null/0 for persistent
+  _status(text, type = 'info', duration = 0) {
+    const bar = $('status-bar'); if (!bar) return;
+    clearTimeout(this._statusTimer);
+    bar.textContent = text;
+    bar.className = `status-bar status-${type}`;
+    bar.classList.add('visible');
+    if (duration) {
+      this._statusTimer = setTimeout(() => {
+        bar.classList.remove('visible');
+      }, duration);
+    }
+  }
+
   // ── Utilities ──────────────────────────────────────────────────────────────
   _scroll() { const m = $('messages'); if (m) m.scrollTop = m.scrollHeight; }
 
   _sys(text, isErr = false) {
-    const msgs = $('messages');
-    if (!msgs) return;
+    const msgs = $('messages'); if (!msgs) return;
     const d = document.createElement('div');
     d.className = `sys-msg${isErr ? ' err' : ''}`;
     d.textContent = text;
     msgs.appendChild(d);
     this._scroll();
-    setTimeout(() => { try { d.remove(); } catch {} }, 4000);
+    setTimeout(() => { try { d.remove(); } catch {} }, 5000);
   }
 
   _log(text, isErr = false) {
-    const log = $('net-log');
-    if (!log) return;
+    const log = $('net-log'); if (!log) return;
     const d = document.createElement('div');
     d.className = `entry${isErr ? ' err' : ''}`;
     d.textContent = text;

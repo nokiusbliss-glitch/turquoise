@@ -1,20 +1,18 @@
 /**
  * main.js — Turquoise
- * Boot sequence: checks → identity → network → app → connect
- * Render-safe WebSocket URL auto-detection
+ * Boot sequence: checks → service worker → identity → network → app → connect
  */
 
 import { getIdentity }      from './identity.js';
 import { TurquoiseNetwork } from './webrtc.js';
 import { TurquoiseApp }     from './app.js';
 
-// ── API check ─────────────────────────────────────────────────────────────────
 function checkAPIs() {
   const missing = [];
-  if (!window.indexedDB)           missing.push('IndexedDB');
-  if (!window.crypto?.subtle)      missing.push('crypto.subtle (needs HTTPS)');
-  if (!window.RTCPeerConnection)   missing.push('WebRTC');
-  if (!window.WebSocket)           missing.push('WebSocket');
+  if (!window.indexedDB)         missing.push('IndexedDB');
+  if (!window.crypto?.subtle)    missing.push('crypto.subtle (needs HTTPS)');
+  if (!window.RTCPeerConnection) missing.push('WebRTC');
+  if (!window.WebSocket)         missing.push('WebSocket');
   return missing;
 }
 
@@ -26,32 +24,35 @@ function fatal(msg) {
     </div>`;
 }
 
-// ── Signaling URL (Render-safe) ───────────────────────────────────────────────
 function signalingURL() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host}`;
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// Register service worker for offline-first operation
+async function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    await navigator.serviceWorker.register('/sw.js');
+  } catch (e) {
+    console.warn('[TQ] SW registration failed:', e.message);
+  }
+}
+
 async function boot() {
   const missing = checkAPIs();
-  if (missing.length) {
-    fatal('Missing: ' + missing.join(', ')); return;
-  }
+  if (missing.length) { fatal('Missing: ' + missing.join(', ')); return; }
+
+  // Register SW (non-blocking)
+  registerSW();
 
   let identity;
-  try {
-    identity = await getIdentity();
-  } catch (e) {
-    fatal('Identity failed: ' + e.message); return;
-  }
+  try { identity = await getIdentity(); }
+  catch (e) { fatal('Identity failed: ' + e.message); return; }
 
   let network;
-  try {
-    network = new TurquoiseNetwork(identity);
-  } catch (e) {
-    fatal('Network init failed: ' + e.message); return;
-  }
+  try { network = new TurquoiseNetwork(identity); }
+  catch (e) { fatal('Network init failed: ' + e.message); return; }
 
   let app;
   try {
@@ -62,7 +63,6 @@ async function boot() {
     console.error(e); return;
   }
 
-  // Connect to signaling server — auto-detect URL
   network.connect(signalingURL());
 }
 
