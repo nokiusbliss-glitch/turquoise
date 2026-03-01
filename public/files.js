@@ -1,277 +1,127 @@
 /**
  * files.js — Turquoise
- * Binary streaming file transfer — any size, max WiFi speed
+ * Simple reliable file transfer over WebRTC DataChannel.
  *
- * Protocol:
- *   ctrl channel: file-meta (JSON) + file-end (JSON) + file-abort (JSON)
- *   data channel: raw ArrayBuffer chunks with 40-byte header
+ * Design:
+ *   - ctrl channel: file-meta → file-end | file-abort (JSON)
+ *   - data channel: raw ArrayBuffer chunks, no header needed
+ *   - one active transfer per peer at a time (queued)
+ *   - receiver knows active file from last file-meta on ctrl
+ *   - chunks arrive in order (ordered:true DataChannel guarantee)
+ *   - reassemble as Blob — works for any size the WiFi allows
  *
- * Header format (40 bytes):
- *   [0..3]  chunkIndex (uint32 big-endian)
- *   [4..39] fileId     (36 bytes ASCII UUID)
- *   [40..]  file data
- *
- * Flow control: wait when DataChannel buffer exceeds HIGH_WATER
- * Large files (>64MB): OPFS (Origin Private File System) for zero-RAM assembly
- * Small files: Blob assembly in memory
+ * All data is P2P. Nothing touches Render after connection.
  */
 
-const CHUNK_SIZE  = 256 * 1024;   // 256 KB — optimal DataChannel chunk
-const HIGH_WATER  = 16 * 1024 * 1024;  // 16 MB buffer high water mark
-const LARGE_FILE  = 64 * 1024 * 1024;  // 64 MB threshold for OPFS
-const HEADER_SIZE = 40;
+const CHUNK = 65536; // 64 KB per chunk
 
-// ── Binary header encoding/decoding ───────────────────────────────────────────
-function encodeChunk(fileId, chunkIndex, data) {
-  const buf  = new ArrayBuffer(HEADER_SIZE + data.byteLength);
-  const view = new DataView(buf);
-  view.setUint32(0, chunkIndex, false);  // big-endian
-  const idBytes = new TextEncoder().encode(fileId.slice(0, 36).padEnd(36, ' '));
-  new Uint8Array(buf).set(idBytes, 4);
-  new Uint8Array(buf).set(new Uint8Array(data), HEADER_SIZE);
-  return buf;
-}
-
-function decodeChunk(buf) {
-  if (buf.byteLength < HEADER_SIZE) return null;
-  const view       = new DataView(buf);
-  const chunkIndex = view.getUint32(0, false);
-  const fileId     = new TextDecoder().decode(new Uint8Array(buf, 4, 36)).trim();
-  const data       = buf.slice(HEADER_SIZE);
-  return { chunkIndex, fileId, data };
-}
-
-// ── OPFS writer (for large files) ─────────────────────────────────────────────
-async function openOPFSWriter(fileId) {
-  try {
-    const root = await navigator.storage?.getDirectory?.();
-    if (!root) return null;
-    const fh     = await root.getFileHandle(`tq-${fileId}`, { create: true });
-    const writer = await fh.createWritable({ keepExistingData: false });
-    return { writer, fh };
-  } catch {
-    return null; // fallback to memory
-  }
-}
-
-async function getOPFSFile(fileId) {
-  try {
-    const root = await navigator.storage?.getDirectory?.();
-    if (!root) return null;
-    const fh = await root.getFileHandle(`tq-${fileId}`);
-    return await fh.getFile();
-  } catch { return null; }
-}
-
-async function deleteOPFSFile(fileId) {
-  try {
-    const root = await navigator.storage?.getDirectory?.();
-    if (!root) return;
-    await root.removeEntry(`tq-${fileId}`);
-  } catch {}
-}
-
-// ── FileTransfer ──────────────────────────────────────────────────────────────
 export class FileTransfer {
-  constructor(sendCtrlFn, sendBinaryFn, waitForBufferFn) {
-    if (!sendCtrlFn || !sendBinaryFn) throw new Error('FileTransfer: send functions required');
-    this._sendCtrl    = sendCtrlFn;    // (fp, jsonObj)   → bool
-    this._sendBinary  = sendBinaryFn;  // (fp, ArrayBuf)  → bool
-    this._waitBuffer  = waitForBufferFn || (() => Promise.resolve());
+  constructor(sendCtrlFn, sendBinaryFn, waitBufferFn) {
+    this._sendCtrl   = sendCtrlFn;
+    this._sendBinary = sendBinaryFn;
+    this._waitBuf    = waitBufferFn || (() => Promise.resolve());
 
-    this._recv   = new Map(); // fileId → RecvState
-    this._active = new Set(); // fileIds being sent
+    this._recv    = new Map(); // fp → recv state
+    this._queue   = new Map(); // fp → [{file, fileId}]
+    this._sending = new Set(); // fps currently sending
 
-    // Callbacks
-    this.onProgress  = null; // (fileId, 0-1, 'send'|'recv', fp)
-    this.onFileReady = null; // ({fileId, url, name, size, mimeType, from})
-    this.onError     = null; // (fileId, message, fp)
+    this.onProgress  = null;
+    this.onFileReady = null;
+    this.onError     = null;
   }
 
-  // ── Send ──────────────────────────────────────────────────────────────────────
-  async sendFile(file, fp, fileId) {
-    if (!file instanceof File) throw new Error('sendFile: File required');
-    if (!fp)     throw new Error('sendFile: fp required');
-    if (!fileId) throw new Error('sendFile: fileId required');
+  // ── Send API ──────────────────────────────────────────────────────────────────
+  send(file, fp, fileId) {
+    if (!file || !fp || !fileId) return;
+    if (!this._queue.has(fp)) this._queue.set(fp, []);
+    this._queue.get(fp).push({ file, fileId });
+    if (!this._sending.has(fp)) this._drain(fp);
+  }
 
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  async _drain(fp) {
+    this._sending.add(fp);
+    const q = this._queue.get(fp) || [];
+    while (q.length) {
+      const item = q[0];
+      try {
+        await this._sendOne(item.file, fp, item.fileId);
+      } catch (e) {
+        this.onError?.(item.fileId, e.message, fp);
+        this._sendCtrl(fp, { type: 'file-abort', fileId: item.fileId });
+      }
+      q.shift();
+    }
+    this._sending.delete(fp);
+  }
 
-    // Send metadata over ctrl channel
-    const sent = this._sendCtrl(fp, {
-      type: 'file-meta',
-      fileId,
-      name:        file.name,
-      size:        file.size,
-      mimeType:    file.type || 'application/octet-stream',
+  async _sendOne(file, fp, fileId) {
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK));
+
+    const ok = this._sendCtrl(fp, {
+      type: 'file-meta', fileId,
+      name: file.name, size: file.size,
+      mimeType: file.type || 'application/octet-stream',
       totalChunks,
     });
-    if (!sent) throw new Error('Peer not connected');
+    if (!ok) throw new Error('Peer not connected');
 
-    this._active.add(fileId);
+    let offset = 0;
+    let idx    = 0;
 
-    try {
-      let offset     = 0;
-      let chunkIndex = 0;
-
-      while (offset < file.size) {
-        if (!this._active.has(fileId)) break; // aborted
-
-        // Flow control: wait for buffer to drain
-        await this._waitBuffer(fp);
-
-        const slice = file.slice(offset, offset + CHUNK_SIZE);
-        const data  = await slice.arrayBuffer();
-        const chunk = encodeChunk(fileId, chunkIndex, data);
-
-        const ok = this._sendBinary(fp, chunk);
-        if (!ok) throw new Error('DataChannel closed during transfer');
-
-        offset += data.byteLength;
-        chunkIndex++;
-
-        this.onProgress?.(fileId, offset / file.size, 'send', fp);
-      }
-
-      // Send completion signal
-      this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: chunkIndex });
-    } catch (e) {
-      this._active.delete(fileId);
-      this._sendCtrl(fp, { type: 'file-abort', fileId });
-      throw e;
+    while (offset < file.size) {
+      await this._waitBuf(fp);
+      const buf = await file.slice(offset, offset + CHUNK).arrayBuffer();
+      if (!this._sendBinary(fp, buf)) throw new Error('DataChannel closed during transfer');
+      offset += buf.byteLength;
+      idx++;
+      this.onProgress?.(fileId, offset / file.size, 'send', fp);
     }
 
-    this._active.delete(fileId);
+    this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: idx });
   }
 
-  abortSend(fileId) {
-    this._active.delete(fileId);
-  }
+  // ── Receive API ───────────────────────────────────────────────────────────────
+  handleCtrl(fp, msg) {
+    const { type, fileId } = msg;
+    if (!fileId) return;
 
-  // ── Receive ────────────────────────────────────────────────────────────────────
-  async handleCtrl(fp, msg) {
-    if (!msg?.fileId) return;
-    const { fileId } = msg;
-
-    if (msg.type === 'file-meta') {
-      await this._initReceive(fp, msg);
-      return;
-    }
-    if (msg.type === 'file-end') {
-      await this._finalizeReceive(fp, fileId, msg.totalChunks);
-      return;
-    }
-    if (msg.type === 'file-abort') {
-      await this._abortReceive(fileId);
-      return;
+    if (type === 'file-meta') {
+      this._recv.set(fp, {
+        fileId,
+        name:     msg.name     || 'file',
+        size:     msg.size     || 0,
+        mimeType: msg.mimeType || 'application/octet-stream',
+        total:    msg.totalChunks || 0,
+        chunks:   [],
+        bytes:    0,
+      });
+    } else if (type === 'file-end') {
+      this._finalize(fp, fileId);
+    } else if (type === 'file-abort') {
+      this._recv.delete(fp);
+      this.onError?.(fileId, 'Transfer aborted by sender', fp);
     }
   }
 
   handleBinary(fp, buf) {
-    const parsed = decodeChunk(buf);
-    if (!parsed) return;
-    const { chunkIndex, fileId, data } = parsed;
-    this._storeChunk(fp, fileId, chunkIndex, data);
+    const s = this._recv.get(fp);
+    if (!s) return;
+    s.chunks.push(buf);
+    s.bytes += buf.byteLength;
+    const pct = s.size > 0 ? Math.min(s.bytes / s.size, 0.99) : (s.total > 0 ? s.chunks.length / s.total : 0);
+    this.onProgress?.(s.fileId, pct, 'recv', fp);
   }
 
-  // ── Internal receive ──────────────────────────────────────────────────────────
-  async _initReceive(fp, meta) {
-    const { fileId, name, size, mimeType, totalChunks } = meta;
-    const large = size >= LARGE_FILE;
-
-    let opfsHandle = null;
-    if (large) {
-      opfsHandle = await openOPFSWriter(fileId);
-    }
-
-    this._recv.set(fileId, {
-      fp, name, size, mimeType, totalChunks,
-      received: 0,
-      chunks: large ? null : new Array(totalChunks), // null = use OPFS
-      opfsHandle,
-      opfsOffset: 0,
-    });
-  }
-
-  async _storeChunk(fp, fileId, chunkIndex, data) {
-    const state = this._recv.get(fileId);
-    if (!state) return;
-
-    if (state.opfsHandle) {
-      // Write at correct byte offset
-      const byteOffset = chunkIndex * CHUNK_SIZE;
-      try {
-        await state.opfsHandle.writer.write({
-          type: 'write',
-          position: byteOffset,
-          data,
-        });
-      } catch (e) {
-        this.onError?.(fileId, 'OPFS write failed: ' + e.message, fp);
-        return;
-      }
-    } else {
-      if (!state.chunks) return;
-      state.chunks[chunkIndex] = data;
-    }
-
-    state.received++;
-    this.onProgress?.(fileId, state.received / (state.totalChunks || 1), 'recv', fp);
-  }
-
-  async _finalizeReceive(fp, fileId, reportedChunks) {
-    const state = this._recv.get(fileId);
-    if (!state) return;
-
-    // Verify completeness
-    const expected = state.totalChunks || reportedChunks || 0;
-    if (state.received < expected) {
-      const missing = expected - state.received;
-      this.onError?.(fileId, `${missing} chunk${missing > 1 ? 's' : ''} missing`, fp);
-      await this._abortReceive(fileId);
-      return;
-    }
-
-    let url, blob;
-
+  _finalize(fp, fileId) {
+    const s = this._recv.get(fp);
+    if (!s || s.fileId !== fileId) return;
+    this._recv.delete(fp);
     try {
-      if (state.opfsHandle) {
-        await state.opfsHandle.writer.close();
-        const file = await getOPFSFile(fileId);
-        if (!file) throw new Error('OPFS file missing after write');
-        blob = new Blob([file], { type: state.mimeType });
-      } else {
-        // Filter nulls (gaps shouldn't happen but be safe)
-        const parts = state.chunks.filter(Boolean);
-        if (parts.length < expected) {
-          throw new Error(`Only ${parts.length} of ${expected} chunks present`);
-        }
-        blob = new Blob(parts, { type: state.mimeType || 'application/octet-stream' });
-      }
-
-      url = URL.createObjectURL(blob);
+      const blob = new Blob(s.chunks, { type: s.mimeType });
+      const url  = URL.createObjectURL(blob);
+      this.onFileReady?.({ fileId, url, name: s.name, size: blob.size, mimeType: s.mimeType, from: fp });
     } catch (e) {
       this.onError?.(fileId, 'Assembly failed: ' + e.message, fp);
-      await this._abortReceive(fileId);
-      return;
     }
-
-    this._recv.delete(fileId);
-
-    this.onFileReady?.({
-      fileId,
-      url,
-      name:     state.name,
-      size:     blob.size,
-      mimeType: state.mimeType,
-      from:     fp,
-    });
-  }
-
-  async _abortReceive(fileId) {
-    const state = this._recv.get(fileId);
-    if (!state) return;
-    try { await state.opfsHandle?.writer.abort?.(); } catch {}
-    await deleteOPFSFile(fileId);
-    this._recv.delete(fileId);
   }
 }
