@@ -1,9 +1,12 @@
 {
   "name": "Turquoise",
   "short_name": "Turquoise",
+  "description": "Local-first peer-to-peer communication",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#071a1a",
-  "theme_color": "#008c8c",
+  "orientation": "any",
+  "background_color": "#040a09",
+  "theme_color": "#040a09",
+  "lang": "en",
   "icons": []
 }

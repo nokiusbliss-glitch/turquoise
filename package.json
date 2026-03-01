@@ -1,12 +1,15 @@
 {
   "name": "turquoise",
-  "version": "1.0.0",
+  "version": "5.0.0",
   "type": "module",
-  "private": true,
+  "description": "Local-first cryptographic peer-to-peer communication",
   "scripts": {
-    "start": "node server/server.js"
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "ws": "^8.19.0"
   }
 }
