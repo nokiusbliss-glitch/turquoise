@@ -1,18 +1,27 @@
 /**
  * webrtc.js — Turquoise
  *
- * Render = signaling relay only (~few KB total per connection lifecycle).
- * After handshake: ALL data flows P2P over local WiFi via DataChannels.
+ * Render = signaling relay only. After handshake: ALL data flows P2P.
  *
- * Two DataChannels per peer:
- *   'ctrl' — ordered JSON (chat, file-meta, call signals, nick)
- *   'data' — ordered binary ArrayBuffer (file chunks only)
+ * DataChannel flow control — the correct approach:
+ *   LOW_WATER  (bufferedAmountLowThreshold) = 64KB
+ *     → onbufferedamountlow fires when buffer drains below this
+ *   HIGH_WATER (where we pause before sending) = 1MB
+ *     → when bufferedAmount > 1MB, pause and wait for low-water event
  *
- * Voice/video renegotiation over ctrl DataChannel (P2P, never Render).
- * WS keepalive ping every 25s — Render free tier kills idle WS at ~55s.
- * Perfect negotiation: higher fingerprint = impolite (keeps its offer on glare).
- * STUN intentionally removed — local WiFi host candidates are sufficient.
+ *   This creates a sliding window: buffer stays between 64KB–1MB.
+ *   At 60Mbps: 1MB buffer = ~133ms of data in flight. Correct and safe.
+ *
+ *   Previously: LOW_WATER was set to 16MB = Chrome's maximum buffer.
+ *   The event never fired. Buffer overflowed. Channel closed. Files failed.
+ *
+ * WS keepalive: 25s ping prevents Render free-tier 55s idle timeout.
+ * Perfect negotiation: higher fp = impolite (keeps its offer on glare).
+ * STUN removed: local WiFi host candidates are sufficient, faster.
  */
+
+const LOW_WATER  = 64 * 1024;    // 64KB — bufferedAmountLowThreshold
+const HIGH_WATER = 1024 * 1024;  // 1MB  — pause sending above this
 
 export class TurquoiseNetwork {
   constructor(identity) {
@@ -35,6 +44,7 @@ export class TurquoiseNetwork {
     this.onSignalingDisconnected = null;
   }
 
+  // ── Signaling ──────────────────────────────────────────────────────────────
   connect(url) {
     this._wsURL = url; this._dead = false; this._retry = 0;
     this._openWS();
@@ -53,9 +63,8 @@ export class TurquoiseNetwork {
       this._log('signaling connected ✓');
       ws.send(JSON.stringify({ type: 'announce', from: this.id.fingerprint, nick: this.id.nickname }));
       this.onSignalingConnected?.();
-
-      // Keepalive: prevents Render free-tier 55s idle WS timeout
       clearInterval(this._ping);
+      // 25s ping: keeps Render free-tier WS alive (idle timeout ~55s)
       this._ping = setInterval(() => {
         if (ws.readyState === 1) try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
       }, 25000);
@@ -86,7 +95,6 @@ export class TurquoiseNetwork {
     if (msg.type === 'peer') {
       const fp = msg.fingerprint;
       if (fp && fp !== this.id.fingerprint && !this.peers.has(fp)) {
-        // Random jitter reduces simultaneous-connect glare
         setTimeout(() => { if (!this.peers.has(fp)) this._initiate(fp); }, Math.random() * 150);
       }
       return;
@@ -97,9 +105,10 @@ export class TurquoiseNetwork {
     if (msg.type === 'ice')    { this._onICE(from, msg.candidate); return; }
   }
 
+  // ── PeerConnection ─────────────────────────────────────────────────────────
   _makePC(fp) {
     let pc;
-    try { pc = new RTCPeerConnection({ iceServers: [] }); } // STUN not needed on local WiFi
+    try { pc = new RTCPeerConnection({ iceServers: [] }); }
     catch (e) { this._log('PC failed: ' + e.message, true); return null; }
 
     pc.onicecandidate = ({ candidate }) => {
@@ -133,9 +142,9 @@ export class TurquoiseNetwork {
     return pc;
   }
 
+  // ── DataChannel wiring ─────────────────────────────────────────────────────
   _wireCtrl(fp, ch) {
     const ps = this.peers.get(fp); if (ps) ps.ctrl = ch;
-    // Use closure variable — avoids looking up peers.get at error time (peer may be deleted)
     let closed = false;
     ch.onopen = () => {
       this._log(`ctrl ✓ ${fp.slice(0, 8)}`);
@@ -162,7 +171,9 @@ export class TurquoiseNetwork {
     const ps = this.peers.get(fp); if (ps) ps.data = ch;
     let closed = false;
     ch.binaryType = 'arraybuffer';
-    ch.bufferedAmountLowThreshold = 16 * 1024 * 1024;
+    // LOW_WATER: when buffer drains below this, onbufferedamountlow fires
+    // This must be MUCH less than Chrome's 16MB max. 64KB is safe and responsive.
+    ch.bufferedAmountLowThreshold = LOW_WATER;
     ch.onopen  = () => { this._log(`data ✓ ${fp.slice(0, 8)}`); this._checkReady(fp); };
     ch.onmessage = (e) => { if (e.data instanceof ArrayBuffer) this.onBinaryChunk?.(fp, e.data); };
     ch.onerror = () => {
@@ -186,6 +197,7 @@ export class TurquoiseNetwork {
     }
   }
 
+  // ── Initiate ───────────────────────────────────────────────────────────────
   async _initiate(fp) {
     if (this.peers.has(fp)) return;
     this._log(`→ ${fp.slice(0, 8)}`);
@@ -215,6 +227,7 @@ export class TurquoiseNetwork {
     };
   }
 
+  // ── Respond ────────────────────────────────────────────────────────────────
   async _onOffer(fp, sdp, nick) {
     if (!sdp) return;
     let ps = this.peers.get(fp);
@@ -235,11 +248,10 @@ export class TurquoiseNetwork {
       };
     } else if (nick) { ps.nick = nick; }
 
-    // Perfect negotiation: handle simultaneous offers (glare)
-    const offerCollision = ps._makingOffer || ps.pc.signalingState !== 'stable';
-    if (offerCollision) {
-      if (!ps._isPolite) return; // Impolite (higher fp): ignore their offer
-      // Polite (lower fp): roll back and accept theirs
+    // Perfect negotiation: handle simultaneous offers
+    const collision = ps._makingOffer || ps.pc.signalingState !== 'stable';
+    if (collision) {
+      if (!ps._isPolite) return;
       try { await ps.pc.setLocalDescription({ type: 'rollback' }); }
       catch {
         this._closePeer(fp);
@@ -267,7 +279,7 @@ export class TurquoiseNetwork {
   async _onICE(fp, candidate) {
     const ps = this.peers.get(fp); if (!ps || !candidate) return;
     try { await ps.pc.addIceCandidate(candidate); }
-    catch (e) { if (!String(e).includes('701') && !String(e).includes('closed')) this._log('ICE err: ' + e.message, true); }
+    catch (e) { if (!String(e).includes('701') && !String(e).includes('closed')) this._log('ICE: ' + e.message, true); }
   }
 
   _onPeerMsg(fp, msg) {
@@ -298,17 +310,37 @@ export class TurquoiseNetwork {
     return false;
   }
 
-  // Buffer check for flow control — only throttle when near overflow
+  /**
+   * waitForBuffer — event-driven backpressure for file transfer.
+   *
+   * If DataChannel buffer < HIGH_WATER (1MB): resolves immediately.
+   * Otherwise: waits for onbufferedamountlow event (fires at LOW_WATER = 64KB).
+   *
+   * This is the correct mechanism. The previous polling loop with setTimeout(20)
+   * wasted CPU and didn't prevent buffer overflow at the OS/browser level.
+   * The onbufferedamountlow event is the WebRTC-spec way to do this.
+   */
   waitForBuffer(fp) {
-    return new Promise(res => {
+    return new Promise((res, rej) => {
       const ps = this.peers.get(fp);
-      if (!ps?.data || ps.data.bufferedAmount < 16 * 1024 * 1024) { res(); return; }
-      const check = () => {
-        const ps2 = this.peers.get(fp);
-        if (!ps2?.data || ps2.data.bufferedAmount < 8 * 1024 * 1024) { res(); return; }
-        setTimeout(check, 20);
+      // Channel gone — resolve (caller will detect closed channel on next sendBinary)
+      if (!ps?.data) { res(); return; }
+      // Channel closed — resolve immediately
+      if (ps.data.readyState !== 'open') { res(); return; }
+      // Buffer below high-water — no waiting needed
+      if (ps.data.bufferedAmount < HIGH_WATER) { res(); return; }
+      // Buffer full — wait for low-water event
+      const prev = ps.data.onbufferedamountlow;
+      const timeout = setTimeout(() => {
+        // Safety timeout: 5s max wait — prevents deadlock if channel goes silent
+        ps.data.onbufferedamountlow = prev;
+        res();
+      }, 5000);
+      ps.data.onbufferedamountlow = () => {
+        clearTimeout(timeout);
+        ps.data.onbufferedamountlow = prev;
+        res();
       };
-      check();
     });
   }
 
@@ -323,9 +355,7 @@ export class TurquoiseNetwork {
 
   getPeerNick(fp) { return this.peers.get(fp)?.nick || fp?.slice(0, 8) || '?'; }
 
-  // ── Media API (split into 3 steps for clean invite/accept flow) ────────────
-
-  // Step 1: Get local stream only — doesn't touch the PeerConnection
+  // ── Media API ──────────────────────────────────────────────────────────────
   async getLocalStream(video = false) {
     try {
       return await navigator.mediaDevices.getUserMedia({
@@ -341,7 +371,6 @@ export class TurquoiseNetwork {
     }
   }
 
-  // Step 2a (Initiator): Attach stream to PC, create and send offer-reneg
   async offerWithStream(fp, stream) {
     const ps = this.peers.get(fp);
     if (!ps) throw new Error('Peer not connected');
@@ -361,7 +390,6 @@ export class TurquoiseNetwork {
     } finally { ps._mediaLock = false; }
   }
 
-  // Step 2b (Receiver): Attach stream to PC, accept offer, send answer
   async answerWithStream(fp, remoteSdp, stream) {
     const ps = this.peers.get(fp);
     if (!ps) throw new Error('Peer not found');

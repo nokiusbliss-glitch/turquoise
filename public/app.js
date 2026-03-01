@@ -969,14 +969,18 @@ export class TurquoiseApp {
   _showChat()    { $('sidebar')?.classList.add('slide-left');    $('chat-area')?.classList.add('slide-in'); }
   _showSidebar() { $('sidebar')?.classList.remove('slide-left'); $('chat-area')?.classList.remove('slide-in'); }
 
-  // ── Status bar ─────────────────────────────────────────────────────────────
+  // ── Status bar — always visible, updates text+colour in place ─────────────
+  // duration: ms before reverting to neutral colour (0 = stays coloured)
+  // The bar is never hidden — it's a permanent chrome element like a footer.
   _status(text, type = 'info', duration = 0) {
     const bar = $('status-bar'); if (!bar) return;
     clearTimeout(this._statusTimer);
     bar.textContent = text;
-    bar.className   = `status-bar status-${type} visible`;
+    bar.className   = `s-${type}`; // just the colour class — no show/hide
     if (duration) {
-      this._statusTimer = setTimeout(() => bar.classList.remove('visible'), duration);
+      this._statusTimer = setTimeout(() => {
+        bar.className = ''; // revert to neutral (var(--tx2))
+      }, duration);
     }
   }
 
