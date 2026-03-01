@@ -1,46 +1,46 @@
 /**
  * webrtc.js — Turquoise
  *
- * Render = signaling ONLY (offer/answer/ICE, ~few KB total per connection)
- * After handshake: ALL data is P2P over local WiFi. Render never sees it.
+ * Render = signaling relay only (offer/answer/ICE exchange, ~few KB total).
+ * After handshake: ALL data flows P2P over local WiFi via DataChannels.
+ * Nothing — messages, files, audio, video — ever touches Render after connect.
  *
- * Two DataChannels per peer:
- *   'ctrl' — JSON messages (chat, file-meta, call signals, nick updates)
- *   'data' — raw binary ArrayBuffer (file chunks)
+ * Channels per peer:
+ *   'ctrl' — JSON (chat, file-meta, nick updates, call signals)
+ *   'data' — raw binary ArrayBuffer (file chunks only)
  *
- * Voice/video: renegotiation via ctrl channel (not signaling server)
- * Auto-reconnect: WebSocket reconnects with backoff if Render sleeps
+ * Voice/video renegotiation goes over the ctrl DataChannel (P2P, not Render).
+ * WebSocket auto-reconnects with φ-backoff when Render free tier sleeps.
  */
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
 ];
 
 export class TurquoiseNetwork {
   constructor(identity) {
     if (!identity?.fingerprint) throw new Error('identity.fingerprint required');
-    this.id       = identity;
-    this.peers    = new Map();      // fp → PeerState
-    this.ws       = null;
-    this._wsURL   = null;
-    this._retry   = 0;
-    this._timer   = null;
-    this._dead    = false;
+    this.id     = identity;
+    this.peers  = new Map();   // fp → PeerState
+    this.ws     = null;
+    this._wsURL = null;
+    this._retry = 0;
+    this._timer = null;
+    this._dead  = false;
 
     // Callbacks — set by app.js
-    this.onPeerConnected    = null;
-    this.onPeerDisconnected = null;
-    this.onMessage          = null;
-    this.onBinaryChunk      = null;
-    this.onLog              = null;
+    this.onPeerConnected    = null; // (fp, nick)
+    this.onPeerDisconnected = null; // (fp)
+    this.onMessage          = null; // (fp, msg)  — ALL ctrl messages
+    this.onBinaryChunk      = null; // (fp, ArrayBuffer)
+    this.onLog              = null; // (text, isErr)
   }
 
-  // ── Signaling connection ───────────────────────────────────────────────────
+  // ── Signaling (Render WebSocket) ───────────────────────────────────────────
   connect(url) {
-    this._wsURL = url;
-    this._dead  = false;
-    this._retry = 0;
+    this._wsURL = url; this._dead = false; this._retry = 0;
     this._openWS();
   }
 
@@ -49,10 +49,10 @@ export class TurquoiseNetwork {
     this._log('Connecting to signaling…');
     let ws;
     try { ws = new WebSocket(this._wsURL); }
-    catch (e) { this._log('WebSocket failed: ' + e.message, true); this._schedWS(); return; }
+    catch (e) { this._log('WS error: ' + e.message, true); this._schedWS(); return; }
 
     this.ws = ws;
-    ws.onopen  = () => {
+    ws.onopen = () => {
       this._retry = 0;
       this._log('Signaling connected ✓');
       ws.send(JSON.stringify({ type: 'announce', from: this.id.fingerprint, nick: this.id.nickname }));
@@ -75,7 +75,6 @@ export class TurquoiseNetwork {
     if (this.ws?.readyState === 1) try { this.ws.send(JSON.stringify(obj)); } catch {}
   }
 
-  // ── Signaling messages ─────────────────────────────────────────────────────
   _onSignal(msg) {
     if (!msg?.type) return;
     if (msg.type === 'peer') {
@@ -83,8 +82,7 @@ export class TurquoiseNetwork {
       if (fp && fp !== this.id.fingerprint && !this.peers.has(fp)) this._initiate(fp);
       return;
     }
-    const from = msg.from;
-    if (!from) return;
+    const from = msg.from; if (!from) return;
     if (msg.type === 'offer')  { this._onOffer(from, msg.sdp, msg.nick); return; }
     if (msg.type === 'answer') { this._onAnswer(from, msg.sdp); return; }
     if (msg.type === 'ice')    { this._onICE(from, msg.candidate); return; }
@@ -93,53 +91,48 @@ export class TurquoiseNetwork {
   // ── PeerConnection factory ─────────────────────────────────────────────────
   _makePC(fp) {
     let pc;
-    try { pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 }); }
+    try { pc = new RTCPeerConnection({ iceServers: ICE_SERVERS }); }
     catch (e) { this._log('PC failed: ' + e.message, true); return null; }
 
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) this._sig({ type: 'ice', from: this.id.fingerprint, to: fp, candidate });
     };
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') {
-        this._log(`ICE failed → restart: ${fp.slice(0,8)}`);
-        try { pc.restartIce(); } catch {}
-      }
+      if (pc.iceConnectionState === 'failed') { try { pc.restartIce(); } catch {} }
     };
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
-      if (s === 'connected') {
-        this._log(`P2P link up: ${fp.slice(0,8)}`);
-      }
       if (s === 'failed' || s === 'closed') {
         const ps = this.peers.get(fp);
-        const nick = ps?.nick || fp.slice(0,8);
+        const wasReady = ps?.ready;
+        const nick = ps?.nick || fp.slice(0, 8);
         this._closePeer(fp);
-        this.onPeerDisconnected?.(fp);
+        if (wasReady) this.onPeerDisconnected?.(fp);
         this._log(`✗ ${nick} disconnected`, true);
         if (!this._dead) setTimeout(() => { if (!this.peers.has(fp)) this._initiate(fp); }, 4000);
       }
     };
+
+    // Remote audio/video tracks — fires when remote peer adds tracks
     pc.ontrack = (e) => {
       const ps = this.peers.get(fp);
       if (!ps) return;
-      // Build or update remote MediaStream
       if (!ps.remoteStream) ps.remoteStream = new MediaStream();
-      e.track.onunmute = () => {
-        if (!ps.remoteStream.getTracks().includes(e.track)) ps.remoteStream.addTrack(e.track);
-        ps.onRemoteStream?.(ps.remoteStream);
-      };
-      if (!ps.remoteStream.getTracks().includes(e.track)) ps.remoteStream.addTrack(e.track);
+      const track = e.track;
+      if (!ps.remoteStream.getTracks().includes(track)) ps.remoteStream.addTrack(track);
       ps.onRemoteStream?.(ps.remoteStream);
+      // Also fire when track unmutes (sometimes needed)
+      track.onunmute = () => ps.onRemoteStream?.(ps.remoteStream);
     };
+
     return pc;
   }
 
   // ── DataChannel wiring ─────────────────────────────────────────────────────
   _wireCtrl(fp, ch) {
-    const ps = this.peers.get(fp);
-    if (ps) ps.ctrl = ch;
+    const ps = this.peers.get(fp); if (ps) ps.ctrl = ch;
     ch.onopen = () => {
-      this._log(`ctrl open: ${fp.slice(0,8)}`);
+      this._log(`ctrl ✓ ${fp.slice(0, 8)}`);
       try { ch.send(JSON.stringify({ type: 'hello', fingerprint: this.id.fingerprint, nick: this.id.nickname })); } catch {}
       this._checkReady(fp);
     };
@@ -148,18 +141,17 @@ export class TurquoiseNetwork {
       let msg; try { msg = JSON.parse(e.data); } catch { return; }
       this._onPeerMsg(fp, msg);
     };
-    ch.onerror = (e) => this._log(`ctrl err ${fp.slice(0,8)}: ${e.message||'?'}`, true);
-    ch.onclose = () => this._log(`ctrl closed: ${fp.slice(0,8)}`);
+    ch.onerror = () => this._log(`ctrl err ${fp.slice(0, 8)}`, true);
+    ch.onclose = () => {};
   }
 
   _wireData(fp, ch) {
-    const ps = this.peers.get(fp);
-    if (ps) ps.data = ch;
+    const ps = this.peers.get(fp); if (ps) ps.data = ch;
     ch.binaryType = 'arraybuffer';
-    ch.bufferedAmountLowThreshold = 4 * 1024 * 1024; // 4 MB
-    ch.onopen  = () => { this._log(`data open: ${fp.slice(0,8)}`); this._checkReady(fp); };
+    ch.bufferedAmountLowThreshold = 2 * 1024 * 1024; // 2 MB low-water
+    ch.onopen  = () => { this._log(`data ✓ ${fp.slice(0, 8)}`); this._checkReady(fp); };
     ch.onmessage = (e) => { if (e.data instanceof ArrayBuffer) this.onBinaryChunk?.(fp, e.data); };
-    ch.onerror = (e) => this._log(`data err ${fp.slice(0,8)}: ${e.message||'?'}`, true);
+    ch.onerror = () => this._log(`data err ${fp.slice(0, 8)}`, true);
   }
 
   _checkReady(fp) {
@@ -167,7 +159,7 @@ export class TurquoiseNetwork {
     if (!ps || ps.ready) return;
     if (ps.ctrl?.readyState === 'open' && ps.data?.readyState === 'open') {
       ps.ready = true;
-      this._log(`✓ ${ps.nick || fp.slice(0,8)} ready (P2P)`);
+      this._log(`✓ ${ps.nick || fp.slice(0, 8)} ready (P2P)`);
       this.onPeerConnected?.(fp, ps.nick);
     }
   }
@@ -175,20 +167,17 @@ export class TurquoiseNetwork {
   // ── Initiate (we send offer) ───────────────────────────────────────────────
   async _initiate(fp) {
     if (this.peers.has(fp)) return;
-    this._log(`→ ${fp.slice(0,8)}`);
+    this._log(`→ ${fp.slice(0, 8)}`);
     const pc = this._makePC(fp);
     if (!pc) return;
 
     const ps = { pc, ctrl: null, data: null, ready: false, nick: null, remoteStream: null, localStream: null, onRemoteStream: null };
     this.peers.set(fp, ps);
 
-    // Create both channels
     const ctrl = pc.createDataChannel('ctrl', { ordered: true });
     const data = pc.createDataChannel('data', { ordered: true });
-    this._wireCtrl(fp, ctrl);
-    this._wireData(fp, data);
-    ps.ctrl = ctrl;
-    ps.data = data;
+    this._wireCtrl(fp, ctrl); ps.ctrl = ctrl;
+    this._wireData(fp, data); ps.data = data;
 
     let busy = false;
     pc.onnegotiationneeded = async () => {
@@ -201,26 +190,22 @@ export class TurquoiseNetwork {
     };
   }
 
-  // ── Respond (we receive offer) ─────────────────────────────────────────────
+  // ── Respond (we receive offer from signaling) ──────────────────────────────
   async _onOffer(fp, sdp, nick) {
     if (!sdp) return;
     let ps = this.peers.get(fp);
 
     if (!ps) {
-      this._log(`← ${fp.slice(0,8)}`);
+      this._log(`← ${fp.slice(0, 8)}`);
       const pc = this._makePC(fp);
       if (!pc) return;
       ps = { pc, ctrl: null, data: null, ready: false, nick: nick || null, remoteStream: null, localStream: null, onRemoteStream: null };
       this.peers.set(fp, ps);
-
       pc.ondatachannel = (e) => {
         if (e.channel.label === 'ctrl') this._wireCtrl(fp, e.channel);
         else if (e.channel.label === 'data') this._wireData(fp, e.channel);
       };
-    } else {
-      // Renegotiation
-      if (nick) ps.nick = nick;
-    }
+    } else if (nick) { ps.nick = nick; }
 
     try {
       await ps.pc.setRemoteDescription(sdp);
@@ -233,29 +218,37 @@ export class TurquoiseNetwork {
   }
 
   async _onAnswer(fp, sdp) {
-    const ps = this.peers.get(fp);
-    if (!ps || !sdp) return;
+    const ps = this.peers.get(fp); if (!ps || !sdp) return;
     try { await ps.pc.setRemoteDescription(sdp); }
     catch (e) { this._log('setRemote err: ' + e.message, true); }
   }
 
   async _onICE(fp, candidate) {
-    const ps = this.peers.get(fp);
-    if (!ps || !candidate) return;
+    const ps = this.peers.get(fp); if (!ps || !candidate) return;
     try { await ps.pc.addIceCandidate(candidate); }
     catch (e) { if (!String(e).includes('701') && !String(e).includes('closed')) this._log('ICE err: ' + e.message, true); }
   }
 
-  // ── Peer messages (arrive over ctrl DataChannel — P2P) ─────────────────────
+  // ── P2P ctrl messages ──────────────────────────────────────────────────────
   _onPeerMsg(fp, msg) {
     if (!msg?.type) return;
     if (msg.type === 'hello') {
       const ps = this.peers.get(fp);
       if (ps && msg.nick) ps.nick = msg.nick;
     }
-    if (msg.type === 'offer-reneg') { this._onRenegOffer(fp, msg.sdp); return; }
-    if (msg.type === 'answer-reneg') { this._onRenegAnswer(fp, msg.sdp); return; }
+    // answer-reneg: apply SDP silently here, app.js doesn't need to act on it
+    if (msg.type === 'answer-reneg') {
+      this._applyRenegAnswer(fp, msg.sdp);
+      return; // no need to pass to app.js
+    }
+    // Everything else (including offer-reneg) goes to app.js
     this.onMessage?.(fp, msg);
+  }
+
+  async _applyRenegAnswer(fp, sdp) {
+    const ps = this.peers.get(fp); if (!ps || !sdp) return;
+    try { await ps.pc.setRemoteDescription(sdp); }
+    catch (e) { this._log('reneg answer err: ' + e.message, true); }
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -274,7 +267,7 @@ export class TurquoiseNetwork {
   waitForBuffer(fp) {
     return new Promise(res => {
       const ps = this.peers.get(fp);
-      if (!ps?.data || ps.data.bufferedAmount < ps.data.bufferedAmountLowThreshold) { res(); return; }
+      if (!ps?.data || ps.data.bufferedAmount < (ps.data.bufferedAmountLowThreshold ?? 2097152)) { res(); return; }
       const prev = ps.data.onbufferedamountlow;
       ps.data.onbufferedamountlow = () => { ps.data.onbufferedamountlow = prev; res(); };
     });
@@ -289,71 +282,74 @@ export class TurquoiseNetwork {
     return [...this.peers.entries()].filter(([, ps]) => ps.ready).map(([fp]) => fp);
   }
 
-  getPeerNick(fp) { return this.peers.get(fp)?.nick || fp?.slice(0,8) || '?'; }
+  getPeerNick(fp) { return this.peers.get(fp)?.nick || fp?.slice(0, 8) || '?'; }
 
-  // ── Voice / Video ──────────────────────────────────────────────────────────
+  // ── Voice / Video: INITIATOR calls this ────────────────────────────────────
   async startMedia(fp, video = false) {
     const ps = this.peers.get(fp);
     if (!ps) throw new Error('Peer not connected');
 
-    // Stop any previous local stream
+    // Clean up previous tracks
     ps.localStream?.getTracks().forEach(t => t.stop());
+    ps.pc.getSenders().forEach(s => { try { ps.pc.removeTrack(s); } catch {} });
 
-    const constraints = {
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 },
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: video ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : false,
-    };
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    });
     ps.localStream = stream;
-
-    // Remove old senders, add new tracks
-    ps.pc.getSenders().forEach(s => ps.pc.removeTrack(s));
     stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
 
-    // Renegotiate via ctrl DataChannel (P2P, not signaling server)
-    await ps.pc.setLocalDescription();
-    this.sendCtrl(fp, { type: 'offer-reneg', sdp: ps.pc.localDescription });
+    // Renegotiate via P2P ctrl channel — Render never sees this
+    const offer = await ps.pc.createOffer();
+    await ps.pc.setLocalDescription(offer);
+    this.sendCtrl(fp, { type: 'offer-reneg', sdp: ps.pc.localDescription, callType: video ? 'video' : 'audio' });
+
+    return stream;
+  }
+
+  // ── Voice / Video: RECEIVER calls this (auto-answer) ──────────────────────
+  async answerMedia(fp, remoteSdp, video = false) {
+    const ps = this.peers.get(fp);
+    if (!ps) throw new Error('Peer not found');
+
+    // Clean up previous tracks
+    ps.localStream?.getTracks().forEach(t => t.stop());
+    ps.pc.getSenders().forEach(s => { try { ps.pc.removeTrack(s); } catch {} });
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: video ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : false,
+    });
+    ps.localStream = stream;
+    stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
+
+    // Apply remote offer, create answer, send back via P2P ctrl channel
+    await ps.pc.setRemoteDescription(remoteSdp);
+    const answer = await ps.pc.createAnswer();
+    await ps.pc.setLocalDescription(answer);
+    this.sendCtrl(fp, { type: 'answer-reneg', sdp: ps.pc.localDescription });
 
     return stream;
   }
 
   async stopMedia(fp) {
-    const ps = this.peers.get(fp);
-    if (!ps) return;
-    ps.localStream?.getTracks().forEach(t => { t.stop(); });
+    const ps = this.peers.get(fp); if (!ps) return;
+    ps.localStream?.getTracks().forEach(t => t.stop());
     ps.pc.getSenders().forEach(s => { try { ps.pc.removeTrack(s); } catch {} });
     ps.localStream = null;
     this.sendCtrl(fp, { type: 'call-end' });
   }
 
-  async _onRenegOffer(fp, sdp) {
-    const ps = this.peers.get(fp);
-    if (!ps || !sdp) return;
-    try {
-      await ps.pc.setRemoteDescription(sdp);
-      await ps.pc.setLocalDescription();
-      this.sendCtrl(fp, { type: 'answer-reneg', sdp: ps.pc.localDescription });
-    } catch (e) { this._log('reneg answer err: ' + e.message, true); }
-  }
-
-  async _onRenegAnswer(fp, sdp) {
-    const ps = this.peers.get(fp);
-    if (!ps || !sdp) return;
-    try { await ps.pc.setRemoteDescription(sdp); }
-    catch (e) { this._log('reneg setRemote err: ' + e.message, true); }
-  }
-
   setRemoteStreamHandler(fp, fn) {
-    const ps = this.peers.get(fp);
-    if (!ps) return;
+    const ps = this.peers.get(fp); if (!ps) return;
     ps.onRemoteStream = fn;
-    if (ps.remoteStream) fn(ps.remoteStream); // fire immediately if already have stream
+    if (ps.remoteStream) fn(ps.remoteStream);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
   _closePeer(fp) {
-    const ps = this.peers.get(fp);
-    if (!ps) return;
+    const ps = this.peers.get(fp); if (!ps) return;
     ps.localStream?.getTracks().forEach(t => t.stop());
     try { ps.ctrl?.close(); } catch {}
     try { ps.data?.close(); } catch {}
@@ -362,8 +358,7 @@ export class TurquoiseNetwork {
   }
 
   destroy() {
-    this._dead = true;
-    clearTimeout(this._timer);
+    this._dead = true; clearTimeout(this._timer);
     try { this.ws?.close(); } catch {}
     for (const fp of [...this.peers.keys()]) this._closePeer(fp);
   }
