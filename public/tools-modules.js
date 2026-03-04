@@ -2,22 +2,19 @@ import { getToolById } from './tools-registry.js';
 
 export function createToolRuntime(toolId, ctx) {
   if (toolId === 'tic-tac-toe') return createTicTacToeRuntime(ctx);
-  return createPlaceholderRuntime(toolId, ctx);
+  return createPlaceholderRuntime(toolId);
 }
 
-function createPlaceholderRuntime(ctxToolId, ctx) {
-  const tool = getToolById(ctxToolId);
+function createPlaceholderRuntime(toolId) {
   let root = null;
+  const tool = getToolById(toolId);
 
   return {
     mount(container) {
       root = document.createElement('div');
       root.innerHTML = `
         <div style="font-size:.75rem;color:#7ab8b2;">
-          <b>${escapeHtml(tool?.title || ctxToolId)}</b> is registered but not implemented yet.
-        </div>
-        <div style="margin-top:6px;font-size:.65rem;color:#3d7a74;">
-          Add implementation in <code>tools-modules.js</code> only.
+          <b>${escapeHtml(tool?.title || toolId)}</b> is registered but not implemented yet.
         </div>
       `;
       container.appendChild(root);
@@ -25,7 +22,6 @@ function createPlaceholderRuntime(ctxToolId, ctx) {
     apply() {},
     destroy() {
       if (root?.parentNode) root.parentNode.removeChild(root);
-      root = null;
     },
   };
 }
@@ -33,30 +29,12 @@ function createPlaceholderRuntime(ctxToolId, ctx) {
 function createTicTacToeRuntime(ctx) {
   const players = [...new Set(ctx.participants)].slice(0, 2);
   const board = Array(9).fill(null);
-  const seenActions = new Set();
+  const seen = new Set();
   let turn = players[0] || null;
   let winner = null;
-  let root = null;
   let statusEl = null;
   let cells = [];
-
-  function render() {
-    if (!statusEl) return;
-    const iAmPlayer = players.includes(ctx.selfId);
-    const myTurn = turn === ctx.selfId;
-    const role = iAmPlayer ? (players.indexOf(ctx.selfId) === 0 ? 'X' : 'O') : 'spectator';
-    const header = winner
-      ? (winner === 'draw' ? 'Draw' : `Winner: ${short(winner)}`)
-      : `Turn: ${turn ? short(turn) : '-'}`;
-
-    statusEl.textContent = `${header} | you: ${role}${iAmPlayer ? (myTurn ? ' | your move' : ' | wait') : ''}`;
-
-    for (let i = 0; i < 9; i += 1) {
-      const v = board[i];
-      cells[i].textContent = v === null ? '' : v;
-      cells[i].disabled = !!winner || !iAmPlayer || !myTurn || board[i] !== null;
-    }
-  }
+  let root = null;
 
   function markerFor(fp) {
     if (fp === players[0]) return 'X';
@@ -64,47 +42,42 @@ function createTicTacToeRuntime(ctx) {
     return null;
   }
 
-  function evaluate() {
-    const lines = [
-      [0,1,2],[3,4,5],[6,7,8],
-      [0,3,6],[1,4,7],[2,5,8],
-      [0,4,8],[2,4,6],
-    ];
-    for (const [a,b,c] of lines) {
-      if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
-    }
+  function evalWinner() {
+    const l = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    for (const [a,b,c] of l) if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
     if (board.every(Boolean)) return 'draw';
     return null;
   }
 
-  function applyMove(action) {
-    if (!action || action.type !== 'move') return;
-    if (seenActions.has(action.id)) return;
-    seenActions.add(action.id);
+  function render() {
+    const iAmPlayer = players.includes(ctx.selfId);
+    const myTurn = turn === ctx.selfId;
+    const role = iAmPlayer ? (players.indexOf(ctx.selfId) === 0 ? 'X' : 'O') : 'spectator';
+    statusEl.textContent = winner
+      ? (winner === 'draw' ? 'Draw' : `Winner: ${winner}`)
+      : `Turn: ${turn ? turn.slice(0,8) : '-'} | you: ${role}${iAmPlayer && myTurn ? ' | your move' : ''}`;
 
-    if (winner) return;
-    if (action.by !== turn) return;
-    if (typeof action.index !== 'number' || action.index < 0 || action.index > 8) return;
-    if (board[action.index] !== null) return;
+    for (let i = 0; i < 9; i += 1) {
+      cells[i].textContent = board[i] || '';
+      cells[i].disabled = !!winner || !iAmPlayer || !myTurn || board[i] !== null;
+    }
+  }
+
+  function apply(action) {
+    if (!action || action.type !== 'move' || seen.has(action.id)) return;
+    seen.add(action.id);
+    if (winner || action.by !== turn || board[action.index] !== null) return;
 
     board[action.index] = markerFor(action.by);
-    winner = evaluate();
-    if (!winner) {
-      turn = turn === players[0] ? players[1] : players[0];
-    }
+    winner = evalWinner();
+    if (!winner) turn = turn === players[0] ? players[1] : players[0];
     render();
   }
 
-  function onLocalMove(index) {
-    if (winner || turn !== ctx.selfId) return;
-    const action = {
-      id: `${ctx.selfId}:${Date.now()}:${index}`,
-      type: 'move',
-      index,
-      by: ctx.selfId,
-      ts: Date.now(),
-    };
-    applyMove(action);
+  function onMove(i) {
+    if (turn !== ctx.selfId || winner) return;
+    const action = { id: `${ctx.selfId}:${Date.now()}:${i}`, type: 'move', index: i, by: ctx.selfId };
+    apply(action);
     ctx.broadcast(action);
   }
 
@@ -122,7 +95,7 @@ function createTicTacToeRuntime(ctx) {
       for (let i = 0; i < 9; i += 1) {
         const b = document.createElement('button');
         b.style.cssText = 'height:56px;border:1px solid #1e7068;background:#0a2320;color:#c4e8e4;font-size:1rem;cursor:pointer;';
-        b.addEventListener('click', () => onLocalMove(i));
+        b.addEventListener('click', () => onMove(i));
         cells.push(b);
         grid.appendChild(b);
       }
@@ -131,27 +104,13 @@ function createTicTacToeRuntime(ctx) {
       container.appendChild(root);
       render();
     },
-    apply(action) {
-      applyMove(action);
-    },
+    apply,
     destroy() {
       if (root?.parentNode) root.parentNode.removeChild(root);
-      root = null;
-      statusEl = null;
-      cells = [];
     },
   };
 }
 
-function short(v) {
-  return (v || '?').slice(0, 8);
-}
-
 function escapeHtml(s) {
-  return String(s)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+  return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
 }
