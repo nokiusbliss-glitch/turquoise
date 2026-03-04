@@ -1,11 +1,9 @@
 /**
- * sw.js — Turquoise Service Worker
- * Caches all app assets after first load.
- * After that: zero interaction with Render for page loads.
- * Render is only ever contacted for the WebSocket signaling handshake.
+ * sw.js — Turquoise service worker
+ * Stable offline shell + safe runtime caching.
  */
 
-const CACHE_NAME = 'tq-v2';
+const CACHE_NAME = 'tq-v3';
 
 const CORE_ASSETS = [
   '/',
@@ -19,61 +17,78 @@ const CORE_ASSETS = [
   '/manifest.json',
 ];
 
-// Install: cache all core assets immediately
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(CORE_ASSETS))
-      .then(() => self.skipWaiting())
-      .catch(err => console.warn('[SW] install cache failed:', err))
-  );
+function isStaticAsset(pathname) {
+  return /\.(js|css|png|svg|ico|woff2|json|webmanifest)$/i.test(pathname);
+}
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(CORE_ASSETS);
+    await self.skipWaiting();
+  })());
 });
 
-// Activate: delete old caches
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
-  );
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)));
+    await self.clients.claim();
+  })());
 });
 
-// Fetch: cache-first for our own assets, network-then-cache for fonts
-self.addEventListener('fetch', (e) => {
-  if (e.request.method !== 'GET') return;
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
 
-  const url = new URL(e.request.url);
+  const url = new URL(req.url);
 
-  // WebSocket upgrade — never intercept
-  if (e.request.headers.get('upgrade') === 'websocket') return;
-
-  // Cross-origin (Google Fonts): network first, cache fallback
   if (url.origin !== self.location.origin) {
-    e.respondWith(
-      caches.open(CACHE_NAME).then(cache =>
-        fetch(e.request)
-          .then(r => { if (r && r.ok) cache.put(e.request, r.clone()); return r; })
-          .catch(() => cache.match(e.request))
-      )
-    );
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try {
+        const net = await fetch(req);
+        if (net && (net.ok || net.type === 'opaque')) {
+          cache.put(req, net.clone()).catch(() => {});
+        }
+        return net;
+      } catch {
+        const cached = await cache.match(req);
+        return cached || Response.error();
+      }
+    })());
     return;
   }
 
-  // Own assets: cache first, network fallback
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(r => {
-        if (r && r.ok) {
-          caches.open(CACHE_NAME).then(c => c.put(e.request, r.clone()));
-        }
-        return r;
-      }).catch(() => {
-        // Offline and not cached — return blank for navigation
-        if (e.request.mode === 'navigate') {
-          return caches.match('/index.html');
-        }
-      });
-    })
-  );
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try {
+        const net = await fetch(req);
+        if (net && net.ok) cache.put('/index.html', net.clone()).catch(() => {});
+        return net;
+      } catch {
+        const cached = await cache.match('/index.html');
+        return cached || Response.error();
+      }
+    })());
+    return;
+  }
+
+  if (isStaticAsset(url.pathname)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(req);
+
+      const networkPromise = fetch(req)
+        .then((net) => {
+          if (net && net.ok) cache.put(req, net.clone()).catch(() => {});
+          return net;
+        })
+        .catch(() => null);
+
+      return cached || (await networkPromise) || Response.error();
+    })());
+    return;
+  }
 });

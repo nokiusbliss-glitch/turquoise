@@ -1,12 +1,27 @@
 {
+  "id": "/",
   "name": "Turquoise",
   "short_name": "Turquoise",
-  "description": "Local-first peer-to-peer communication",
+  "description": "Local-first peer-to-peer communication on same Wi-Fi",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#040a09",
   "theme_color": "#040a09",
   "lang": "en",
-  "icons": []
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }
