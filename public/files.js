@@ -2,37 +2,29 @@
  * files.js — Turquoise
  * High-throughput file transfer over WebRTC DataChannel.
  *
- * Flow control — why the previous version crashed on large files:
- *   bufferedAmountLowThreshold was set to 16MB, which equals Chrome's
- *   DataChannel buffer maximum. The threshold never fired, buffer overflowed,
- *   and the channel closed. Fixed by using proper event-driven backpressure.
+ * Flow control:
+ *   LOW_WATER  = 64KB  (bufferedAmountLowThreshold, set in webrtc.js)
+ *   HIGH_WATER = 1MB   — pause sending above this, resume on low-water event
+ *   CHUNK      = 256KB — lazy disk reads, never loads whole file into RAM
  *
- * Correct design:
- *   HIGH_WATER = 1MB  — pause sending when buffer exceeds this
- *   LOW_WATER  = 64KB — resume when onbufferedamountlow fires (set in webrtc.js)
- *   CHUNK      = 256KB — sweet spot: 4-16× less overhead than 64KB,
- *                         compatible with all browsers, no buffer overflow risk
- *
- * Speed at 5GHz WiFi (theoretical ~600Mbps / practical ~60–100Mbps):
- *   256KB × 240 iterations (60MB file) with backpressure:
- *   At 60Mbps = 7.5 MB/s → ~8 seconds for 60MB ✓
- *
- * Unlimited file size: each chunk is read lazily from disk, never loaded whole.
+ * Race condition fix:
+ *   ctrl channel and data channel are separate ordered streams.
+ *   file-end (on ctrl) can arrive before the last binary chunk (on data).
+ *   Fix: track both `ended` flag AND bytes received.
+ *   Finalize only when BOTH: file-end received AND bytes >= expected size.
  */
 
-const CHUNK      = 256 * 1024;  // 256KB per chunk
-const HIGH_WATER = 1024 * 1024; // 1MB — pause threshold
+const CHUNK      = 256 * 1024;
+const HIGH_WATER =   1 * 1024 * 1024;
 
 export class FileTransfer {
   constructor(sendCtrlFn, sendBinaryFn, waitBufferFn) {
     this._sendCtrl   = sendCtrlFn;
     this._sendBinary = sendBinaryFn;
     this._waitBuf    = waitBufferFn || (() => Promise.resolve());
-
     this._recv    = new Map(); // fp → recv state
     this._queue   = new Map(); // fp → [{file, fileId}]
     this._sending = new Set();
-
     this.onProgress  = null;
     this.onFileReady = null;
     this.onError     = null;
@@ -50,9 +42,8 @@ export class FileTransfer {
     const q = this._queue.get(fp) || [];
     while (q.length) {
       const { file, fileId } = q[0];
-      try {
-        await this._sendOne(file, fp, fileId);
-      } catch (e) {
+      try { await this._sendOne(file, fp, fileId); }
+      catch (e) {
         this.onError?.(fileId, e.message, fp);
         try { this._sendCtrl(fp, { type: 'file-abort', fileId }); } catch {}
       }
@@ -62,88 +53,63 @@ export class FileTransfer {
   }
 
   async _sendOne(file, fp, fileId) {
-    // Empty file: meta + immediate end
     if (file.size === 0) {
-      this._sendCtrl(fp, {
-        type: 'file-meta', fileId, name: file.name, size: 0,
-        mimeType: file.type || 'application/octet-stream', totalChunks: 0,
-      });
+      this._sendCtrl(fp, { type: 'file-meta', fileId, name: file.name, size: 0, mimeType: file.type || 'application/octet-stream', totalChunks: 0 });
       this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: 0 });
       this.onProgress?.(fileId, 1, 'send', fp);
       return;
     }
 
     const totalChunks = Math.ceil(file.size / CHUNK);
-    const sent = this._sendCtrl(fp, {
+    const ok = this._sendCtrl(fp, {
       type: 'file-meta', fileId,
       name: file.name, size: file.size,
       mimeType: file.type || 'application/octet-stream',
       totalChunks,
     });
-    if (!sent) throw new Error('Peer not connected');
+    if (!ok) throw new Error('Peer not connected');
 
-    let offset      = 0;
-    let chunkIdx    = 0;
-    let lastUIPct   = -1;
+    let offset = 0, chunkIdx = 0, lastPct = -1;
 
     while (offset < file.size) {
-      // ── Backpressure: wait before sending if buffer is near-full ──────────
-      // This is the critical loop — checked before EVERY chunk, not every N.
-      // Prevents DataChannel buffer overflow which closes the channel.
-      await this._waitBuf(fp);
-
-      // Verify channel is still open before reading from disk
-      if (!this._canSend(fp)) throw new Error('DataChannel closed during transfer');
-
-      // Lazy disk read — only this 256KB chunk, never the whole file
+      await this._waitBuf(fp); // event-driven backpressure — never polls
       const end = Math.min(offset + CHUNK, file.size);
       let buf;
       try { buf = await file.slice(offset, end).arrayBuffer(); }
       catch (e) { throw new Error('File read error: ' + e.message); }
-
       if (!this._sendBinary(fp, buf)) throw new Error('DataChannel closed during transfer');
-
       offset += buf.byteLength;
       chunkIdx++;
-
-      // Throttle UI: only update when progress changes by ≥1% or on completion
-      const pct = offset / file.size;
-      const pctInt = Math.floor(pct * 100);
-      if (pctInt !== lastUIPct || offset >= file.size) {
-        this.onProgress?.(fileId, pct, 'send', fp);
-        lastUIPct = pctInt;
-      }
+      const pct = Math.floor(offset / file.size * 100);
+      if (pct !== lastPct) { this.onProgress?.(fileId, offset / file.size, 'send', fp); lastPct = pct; }
     }
 
     this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: chunkIdx });
   }
 
-  _canSend(fp) {
-    // Ask the network layer directly rather than holding a reference
-    // sendBinary returns false if channel is closed — but we check first
-    // to give a cleaner error message
-    return this._sendBinary !== null; // actual check happens in sendBinary
-  }
-
-  // ── Receive ─────────────────────────────────────────────────────────────────
   handleCtrl(fp, msg) {
     const { type, fileId } = msg;
     if (!fileId) return;
 
     if (type === 'file-meta') {
       this._recv.set(fp, {
-        fileId,
-        name:     msg.name     || 'file',
-        size:     msg.size     || 0,
+        fileId, from: fp,
+        name: msg.name || 'file',
+        size: msg.size || 0,
         mimeType: msg.mimeType || 'application/octet-stream',
-        total:    msg.totalChunks || 0,
-        chunks:   [],
-        bytes:    0,
-        from:     fp,
-        lastUIPct: -1,
+        total: msg.totalChunks || 0,
+        chunks: [], bytes: 0,
+        ended: false,   // file-end received
+        lastPct: -1,
       });
     } else if (type === 'file-end') {
-      this._finalize(fp, fileId);
+      const s = this._recv.get(fp);
+      if (s && s.fileId === fileId) {
+        s.ended = true;
+        // If all bytes already arrived, finalize now.
+        // If not (ctrl ahead of data), _tryFinalize in handleBinary will catch it.
+        this._tryFinalize(fp, fileId);
+      }
     } else if (type === 'file-abort') {
       this._recv.delete(fp);
       this.onError?.(fileId, 'Transfer aborted by sender', fp);
@@ -155,19 +121,18 @@ export class FileTransfer {
     if (!s) return;
     s.chunks.push(buf);
     s.bytes += buf.byteLength;
-
-    // Throttle UI: only update on whole-percent change
-    const pct    = s.size > 0 ? Math.min(s.bytes / s.size, 0.99) : 0;
+    const pct = s.size > 0 ? Math.min(s.bytes / s.size, 0.99) : 0;
     const pctInt = Math.floor(pct * 100);
-    if (pctInt !== s.lastUIPct) {
-      this.onProgress?.(s.fileId, pct, 'recv', fp);
-      s.lastUIPct = pctInt;
-    }
+    if (pctInt !== s.lastPct) { this.onProgress?.(s.fileId, pct, 'recv', fp); s.lastPct = pctInt; }
+    // Try finalize — will succeed when both file-end received AND all bytes arrived
+    if (s.ended) this._tryFinalize(fp, s.fileId);
   }
 
-  _finalize(fp, fileId) {
+  _tryFinalize(fp, fileId) {
     const s = this._recv.get(fp);
     if (!s || s.fileId !== fileId) return;
+    if (!s.ended) return; // still waiting for file-end on ctrl channel
+    if (s.size > 0 && s.bytes < s.size) return; // still waiting for binary chunks
     this._recv.delete(fp);
     try {
       const blob = new Blob(s.chunks, { type: s.mimeType });
