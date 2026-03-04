@@ -2,331 +2,249 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#040a09">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Turquoise</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
-<input type="file" id="__file-input" style="display:none" multiple>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-*,::before,::after{box-sizing:border-box;margin:0;padding:0}
-html,body{
-  height:100%;overflow:hidden;
-  -webkit-tap-highlight-color:transparent;
-  touch-action:manipulation;
-  -webkit-text-size-adjust:100%;
-}
-button,input,textarea{font:inherit;border:none;background:none;color:inherit;outline:none}
-a{color:inherit;text-decoration:none}
-::-webkit-scrollbar{width:3px;height:3px}
-::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--tq-low)}
-
-/* ── Design tokens (golden ratio φ=1.618) ────────────────────────────── */
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#040a09;color:#c4e8e4;font-family:"DM Mono",ui-monospace,monospace}
+button,input,textarea{font:inherit;color:inherit}
 :root{
-  --bg0:#040a09;--bg1:#081210;--bg2:#0c1916;--bg3:#112019;--bg4:#162820;
+  --bg0:#040a09;--bg1:#081210;--bg2:#0c1916;--bg3:#112019;
   --tq:#40e0d0;--tq-mid:#1e7068;--tq-low:#0d3530;
-  --tx0:#c4e8e4;--tx1:#7ab8b2;--tx2:#3d7a74;--tx3:#1d4440;
-  --err:#e05040;--ok:#40d090;--warn:#d09040;
-  /* Spacing: base=7px, each step ×φ */
-  --sp1:.25rem;--sp2:.4375rem;--sp3:.6875rem;--sp4:1.125rem;--sp5:1.8125rem;--sp6:2.9375rem;
-  /* Component heights */
-  --header-h:3.236rem;   /* fixed chrome */
-  --input-h:2.618rem;    /* text input + buttons */
-  --btn-h:2.236rem;      /* icon buttons in header */
-  --status-h:1.618rem;   /* status bar text */
-  --safe-b:max(env(safe-area-inset-bottom,0px),12px);
-  font-family:'DM Mono','JetBrains Mono','Fira Mono',ui-monospace,monospace;
-  font-size:13px;line-height:1.618;
-  -webkit-font-smoothing:antialiased;
-  color:var(--tx0);background:var(--bg0);
+  --tx0:#c4e8e4;--tx1:#7ab8b2;--tx2:#3d7a74;--err:#e05040;--ok:#40d090;
+  --sp1:.25rem;--sp2:.5rem;--sp3:.75rem;--sp4:1rem;--sp5:1.5rem;
 }
 
-/* ── App shell ───────────────────────────────────────────────────────── */
-body{background:var(--bg0)}
-#app{display:flex;width:100vw;height:100vh;height:100dvh;overflow:hidden;position:relative}
-
-/* ════════════════════════════════════════════════════════════════════════
-   SIDEBAR — fixed column, only peer-list scrolls
-   ════════════════════════════════════════════════════════════════════════ */
+#app{display:flex;height:100dvh;width:100vw;overflow:hidden}
 #sidebar{
-  width:38.2%;min-width:260px;max-width:400px;height:100%;
-  display:flex;flex-direction:column;
-  background:var(--bg1);border-right:1px solid var(--tq-low);
-  flex-shrink:0;overflow:hidden;z-index:2;
-  transition:transform .18s ease;
+  width:340px;max-width:45vw;min-width:260px;background:var(--bg1);
+  border-right:1px solid var(--tq-low);display:flex;flex-direction:column;overflow:hidden
 }
-#device-header{flex-shrink:0;padding:var(--sp4) var(--sp4) var(--sp3);border-bottom:1px solid var(--tq-low)}
-.wordmark{display:flex;align-items:center;justify-content:space-between;font-size:.625rem;font-weight:500;letter-spacing:.35em;text-transform:uppercase;color:var(--tq);margin-bottom:var(--sp3)}
-.wordmark-text{flex:1}
-#reset-btn{font-size:.55rem;letter-spacing:.1em;color:var(--tx3);cursor:pointer;padding:var(--sp1) var(--sp2);border:1px solid var(--tx3);transition:color .15s,border-color .15s;flex-shrink:0}
-#reset-btn:hover{color:var(--err);border-color:var(--err)}
-.identity-row{display:flex;align-items:center;gap:var(--sp2);cursor:pointer;padding:var(--sp2);border:1px solid transparent;transition:border-color .15s}
-.identity-row:hover{border-color:var(--tq-mid)}
-.identity-row:hover .edit-hint{opacity:1}
-.nick-display{font-size:1rem;font-weight:500;letter-spacing:.04em;color:var(--tx0);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.nick-input{font-size:16px;font-weight:500;letter-spacing:.04em;color:var(--tq);flex:1;background:transparent;border-bottom:1px solid var(--tq);display:none;padding-bottom:1px}
-.nick-input.visible{display:block}
-.nick-display.hidden{display:none}
-.edit-hint{font-size:.6rem;color:var(--tx2);opacity:0;transition:opacity .15s;white-space:nowrap;flex-shrink:0}
-.full-fp{font-size:.58rem;color:var(--tx3);letter-spacing:.04em;margin-top:var(--sp1);font-weight:300;word-break:break-all}
+#device-header{padding:var(--sp4);border-bottom:1px solid var(--tq-low)}
+.wordmark{display:flex;justify-content:space-between;align-items:center;color:var(--tq);letter-spacing:.24em;text-transform:uppercase;font-size:.62rem}
+#nick-line{margin-top:var(--sp3);font-size:.95rem;color:var(--tx0);display:flex;align-items:center;gap:var(--sp2)}
+#full-fp{margin-top:var(--sp2);font-size:.62rem;color:var(--tx2);word-break:break-all}
+.list-block{border-bottom:1px solid var(--tq-low);padding:var(--sp3)}
+.block-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp2);font-size:.62rem;color:var(--tx1);letter-spacing:.18em;text-transform:uppercase}
+.block-btn{
+  border:1px solid var(--tq-mid);color:var(--tq);background:transparent;cursor:pointer;padding:2px 8px;font-size:.58rem
+}
+#peer-list,#circles-list{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto}
+.peer-item,.circle-item{
+  border:1px solid var(--tq-low);background:var(--bg2);padding:8px 10px;cursor:pointer;
+  display:flex;justify-content:space-between;align-items:center;font-size:.74rem
+}
+.peer-item.active,.circle-item.active{border-color:var(--tq-mid);background:var(--bg3)}
+.peer-left{display:flex;align-items:center;gap:8px;min-width:0}
+.dot{width:8px;height:8px;border-radius:50%;background:#355}
+.dot.on{background:var(--ok)}
+.peer-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini{font-size:.62rem;color:var(--tx2)}
+.circle-edit{border:0;background:transparent;color:var(--tx2);cursor:pointer;font-size:.72rem}
+#net-log{margin-top:auto;font-size:.62rem;color:var(--tx2);padding:var(--sp3);height:110px;overflow:auto;border-top:1px solid var(--tq-low)}
 
-/* Peer list — the only scrollable element in the sidebar */
-#peer-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:var(--sp1) 0}
-#no-peers{padding:var(--sp4);color:var(--tx2);font-size:.75rem;letter-spacing:.06em}
-
-.peer-tile{display:flex;align-items:center;gap:var(--sp3);padding:var(--sp3) var(--sp4);cursor:pointer;border-left:2px solid transparent;transition:background .1s,border-color .1s;user-select:none}
-.peer-tile:hover{background:var(--bg3)}
-.peer-tile.active{background:var(--bg3);border-left-color:var(--tq)}
-.mesh-icon{font-size:1rem;line-height:1;width:16px;text-align:center;color:var(--tx3);flex-shrink:0;transition:color .2s}
-.mesh-icon.online{color:var(--tq)}
-.mesh-icon-hdr{font-size:1rem;color:var(--tq);flex-shrink:0;line-height:1;margin-right:var(--sp1)}
-.mesh-toggle{font-size:.8rem;color:var(--tq-mid);cursor:pointer;flex-shrink:0;padding:var(--sp1) var(--sp2);border:1px solid transparent;opacity:.3;transition:opacity .12s,color .12s,border-color .12s}
-.peer-tile:hover .mesh-toggle{opacity:.8}
-.mesh-toggle:hover{border-color:var(--tq-mid);opacity:1}
-.mesh-toggle.blocked{color:var(--tx3);opacity:.25}
-.mesh-toggle.blocked:hover{color:var(--err);border-color:var(--err);opacity:1}
-.peer-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;transition:background .3s}
-.peer-dot.online{background:var(--tq)}
-.peer-dot.offline{background:var(--tx3)}
-.peer-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-.peer-nick{font-size:.82rem;font-weight:500;color:var(--tx0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.peer-preview{font-size:.68rem;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.peer-badge{background:var(--tq);color:var(--bg0);font-size:.58rem;font-weight:500;min-width:1.2rem;height:1.2rem;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0 var(--sp1)}
-.peer-badge.call-badge{background:var(--tq-low);color:var(--tq);border:1px solid var(--tq-mid);font-size:.8rem}
-#net-log{flex-shrink:0;max-height:5rem;overflow-y:auto;border-top:1px solid var(--tq-low);padding:var(--sp2) var(--sp3);padding-bottom:calc(var(--sp2) + var(--safe-b))}
-#net-log .entry{font-size:.58rem;color:var(--tx2);padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#net-log .entry.err{color:var(--err)}
-
-/* ════════════════════════════════════════════════════════════════════════
-   CHAT AREA — strict flex column
-   ONLY #messages is scrollable. Everything else: flex-shrink:0.
-
-   Structure (top→bottom, all fixed except messages):
-   ┌─────────────────────┐
-   │  #chat-header       │ ← flex-shrink:0  ALWAYS VISIBLE, NEVER SCROLLS
-   ├─────────────────────┤
-   │  #call-panel        │ ← flex-shrink:0  1:1 call (conditionally shown)
-   ├─────────────────────┤
-   │  #mesh-call-panel   │ ← flex-shrink:0  mesh call (conditionally shown)
-   ├─────────────────────┤
-   │  #messages          │ ← flex:1 min-height:0  ONLY SCROLLABLE ELEMENT
-   ├─────────────────────┤
-   │  #input-bar         │ ← flex-shrink:0
-   ├─────────────────────┤
-   │  #status-bar        │ ← flex-shrink:0  ALWAYS VISIBLE, NEVER HIDDEN
-   └─────────────────────┘
-
-   Key: min-height:0 on #messages is required — without it a flex child
-   refuses to shrink below its content height, causing the whole page to scroll.
-   ════════════════════════════════════════════════════════════════════════ */
 #chat-area{
-  flex:1;min-width:0;height:100%;
-  display:flex;flex-direction:column;
-  overflow:hidden; /* critical: clips children, prevents body scroll */
-  background:var(--bg2);position:relative;
+  flex:1;min-width:0;height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--bg0)
 }
-#chat-area.drag-over::after{content:'drop to send';position:absolute;inset:0;z-index:10;background:color-mix(in srgb,var(--tq) 8%,transparent);border:2px solid var(--tq);display:flex;align-items:center;justify-content:center;font-size:1.618rem;color:var(--tq);letter-spacing:.2em}
 
-/* ── Chat header — FIXED, never scrolls ─────────────────────────────── */
+/* fixed top bar */
 #chat-header{
-  flex-shrink:0;          /* does NOT grow or shrink */
-  height:var(--header-h);
-  display:flex;align-items:center;
-  padding:0 var(--sp4);gap:var(--sp3);
-  background:var(--bg1);
-  border-bottom:1px solid var(--tq-low);
-  box-shadow:0 1px 0 color-mix(in srgb,var(--tq) 5%,transparent);
-  z-index:1;              /* stays above message list */
+  flex:0 0 auto;position:sticky;top:0;z-index:40;
+  display:flex;align-items:center;gap:var(--sp2);
+  padding:10px 12px;background:rgba(4,10,9,.96);backdrop-filter:blur(6px);
+  border-bottom:1px solid var(--tq-low)
 }
-#chat-placeholder{color:var(--tx2);font-size:.75rem;letter-spacing:.1em}
-.chat-peer-info{display:flex;flex-direction:column;flex:1;min-width:0}
-.chat-peer-name{font-size:.9rem;font-weight:500;color:var(--tx0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.chat-peer-fp{font-size:.56rem;color:var(--tx3);letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.chat-actions{display:flex;gap:var(--sp2);align-items:center;flex-shrink:0}
-/* Action buttons — square at --btn-h */
-.action-btn{width:var(--btn-h);height:var(--btn-h);display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;border:1px solid transparent;font-size:.9rem;transition:color .12s,border-color .12s,background .12s;flex-shrink:0}
-.action-btn:hover{color:var(--tq);border-color:var(--tq-mid)}
-.action-btn.active-call{color:var(--tq);border-color:var(--tq);background:var(--tq-low)}
-.action-btn.danger:hover{color:var(--err);border-color:var(--err)}
-
-/* ── Call panels — FIXED below header ──────────────────────────────── */
-#call-panel,#mesh-call-panel{
-  flex-shrink:0;
-  display:none;flex-direction:column;align-items:center;
-  gap:var(--sp4);padding:var(--sp4) var(--sp5);
-  background:var(--bg1);border-bottom:1px solid var(--tq-low);
+#back-btn{display:none;border:1px solid var(--tq-low);background:var(--bg2);cursor:pointer;padding:4px 8px}
+#chat-title-wrap{min-width:0;flex:1}
+#chat-title{font-size:.86rem;color:var(--tx0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#chat-subtitle{font-size:.62rem;color:var(--tx2)}
+#chat-actions{display:flex;gap:8px}
+.icon-btn{
+  width:34px;height:34px;border:1px solid var(--tq-low);background:var(--bg2);cursor:pointer;
+  display:flex;align-items:center;justify-content:center
 }
-#call-panel.visible,#mesh-call-panel.visible{display:flex}
+.icon-btn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8}
+.icon-btn:hover{border-color:var(--tq-mid);color:var(--tq)}
+.icon-btn:disabled{opacity:.35;cursor:not-allowed}
 
-.call-waiting{display:flex;flex-direction:column;align-items:center;gap:var(--sp3)}
-.call-type-badge{font-size:.68rem;letter-spacing:.18em;text-transform:uppercase;color:var(--tq)}
-.call-state{font-size:.82rem;color:var(--tx0)}
-.walkie-active{font-size:.82rem;color:var(--tq);letter-spacing:.08em;padding:var(--sp2) var(--sp4);border:1px solid var(--tq-mid);background:var(--tq-low);animation:wk-pulse 2s ease-in-out infinite}
-.walkie-peer{font-weight:500}
-@keyframes wk-pulse{0%,100%{opacity:.65}50%{opacity:1}}
-.video-grid{display:flex;gap:var(--sp3);width:100%;max-height:36vh;flex-wrap:wrap}
-.video-wrap{flex:1;min-width:120px;position:relative;background:var(--bg0);border:1px solid var(--tq-low);overflow:hidden}
-.video-wrap video{width:100%;height:100%;object-fit:cover}
-.video-label{position:absolute;bottom:var(--sp2);left:var(--sp2);font-size:.58rem;color:var(--tx1);background:color-mix(in srgb,var(--bg0) 72%,transparent);padding:2px 6px;letter-spacing:.06em}
-.video-wrap.local{max-width:120px;max-height:90px;flex:none}
-.call-controls{display:flex;gap:var(--sp3);flex-wrap:wrap;justify-content:center}
-/* Call buttons — same height as input bar */
-.call-btn{height:var(--input-h);padding:0 var(--sp4);display:inline-flex;align-items:center;justify-content:center;gap:var(--sp2);border:1px solid var(--tq-mid);color:var(--tx0);cursor:pointer;font-size:.75rem;letter-spacing:.06em;white-space:nowrap;transition:all .12s}
-.call-btn:hover{background:var(--bg4)}
-.call-btn.muted{color:var(--err);border-color:var(--err)}
-.call-btn.end{background:var(--err);border-color:var(--err);color:#fff}
-.call-btn.end:hover{filter:brightness(.85)}
+/* fixed call panel block (does not scroll with messages) */
+#call-panel{
+  flex:0 0 auto;display:none;background:var(--bg1);border-bottom:1px solid var(--tq-low);padding:10px
+}
+#call-panel.active{display:block}
+.call-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.call-tile{position:relative;border:1px solid var(--tq-low);background:#021312;min-height:120px;overflow:hidden}
+.call-video{width:100%;height:100%;display:block;object-fit:cover;background:#000}
+.call-label{
+  position:absolute;left:8px;top:8px;background:rgba(0,0,0,.55);padding:2px 6px;font-size:.6rem;letter-spacing:.1em
+}
+.call-actions{
+  position:absolute;right:8px;top:8px;display:flex;gap:6px
+}
+.call-actions button{
+  border:1px solid var(--tq-low);background:rgba(0,0,0,.55);color:var(--tx0);cursor:pointer;padding:2px 6px
+}
+.call-tech{
+  position:absolute;left:8px;bottom:8px;right:8px;background:rgba(0,0,0,.55);
+  border:1px solid rgba(64,224,208,.25);font-size:.58rem;padding:4px;color:var(--tx1);line-height:1.35
+}
 
-/* ── Messages — THE ONLY SCROLLABLE ELEMENT ─────────────────────────── */
+/* only this scrolls */
 #messages{
-  flex:1;        /* fills ALL remaining vertical space */
-  min-height:0;  /* CRITICAL: allows flex child to shrink below content */
-  overflow-y:auto;overflow-x:hidden;
-  padding:var(--sp4);
-  display:flex;flex-direction:column;gap:var(--sp3);
+  flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px
 }
-.sys-msg{font-size:.68rem;color:var(--tx2);text-align:center;letter-spacing:.06em;padding:var(--sp2)}
-.sys-msg.err{color:var(--err)}
-.msg{display:flex;flex-direction:column;max-width:72%;gap:var(--sp1)}
-.msg.own{align-self:flex-end;align-items:flex-end}
-.msg.peer{align-self:flex-start;align-items:flex-start}
-.meta{font-size:.58rem;color:var(--tx2);letter-spacing:.04em;padding:0 var(--sp1)}
-.bubble{padding:var(--sp3) var(--sp4);font-size:.82rem;line-height:1.618;white-space:pre-wrap;word-break:break-word}
-.msg.own .bubble{background:var(--tq-low);border:1px solid var(--tq-mid);color:var(--tx0)}
-.msg.peer .bubble{background:var(--bg3);border:1px solid var(--tx3);color:var(--tx0)}
-.file-card{padding:var(--sp3) var(--sp4);border:1px solid var(--tq-mid);background:var(--tq-low);min-width:200px;max-width:280px;display:flex;flex-direction:column;gap:var(--sp2)}
-.msg.peer .file-card{border-color:var(--tx3);background:var(--bg3)}
-.file-name{font-size:.78rem;color:var(--tx0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.file-size{font-size:.62rem;color:var(--tx2)}
-.file-err{font-size:.65rem;color:var(--err)}
-.prog-track{height:2px;background:var(--tx3);overflow:hidden}
-.prog-fill{height:100%;background:var(--tq);transition:width .06s linear;will-change:width}
-.dl-btn{display:inline-flex;align-items:center;gap:var(--sp1);font-size:.68rem;color:var(--tq);letter-spacing:.06em;cursor:pointer;border:1px solid var(--tq-mid);padding:var(--sp1) var(--sp3);transition:all .12s}
-.dl-btn:hover{background:var(--tq);color:var(--bg0)}
+.sys-msg{font-size:.68rem;color:var(--tx2)}
+.msg-row{display:flex}
+.msg-row.mine{justify-content:flex-end}
+.msg-bubble{
+  max-width:min(80ch,85%);background:var(--bg2);border:1px solid var(--tq-low);padding:8px 10px
+}
+.msg-row.mine .msg-bubble{border-color:var(--tq-mid);background:#0a1f1c}
+.msg-meta{font-size:.58rem;color:var(--tx2);margin-bottom:4px;letter-spacing:.08em}
+.msg-text{font-size:.78rem;white-space:pre-wrap;word-break:break-word}
+.msg-actions{display:flex;gap:8px;margin-top:8px}
+.msg-actions button{border:1px solid var(--tq-mid);background:transparent;color:var(--tq);cursor:pointer;padding:3px 8px;font-size:.66rem}
 
-/* ── Input bar — FIXED ───────────────────────────────────────────────── */
-#input-bar{flex-shrink:0;display:none;align-items:flex-end;gap:var(--sp2);padding:var(--sp2) var(--sp3);background:var(--bg1);border-top:1px solid var(--tq-low)}
-#input-bar.visible{display:flex}
-/* File attach — square at input-h */
-#file-btn{width:var(--input-h);height:var(--input-h);display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;border:1px solid var(--tx3);font-size:1.2rem;flex-shrink:0;align-self:flex-end;transition:color .12s,border-color .12s}
-#file-btn:hover{color:var(--tq);border-color:var(--tq)}
-/* Textarea — 16px prevents iOS auto-zoom */
-#msg-input{flex:1;resize:none;background:var(--bg3);border:1px solid var(--tx3);color:var(--tx0);padding:calc((var(--input-h) - 1.618rem) / 2) var(--sp3);font-size:16px;line-height:1.618;min-height:var(--input-h);max-height:calc(var(--input-h)*3);overflow-y:auto;transition:border-color .12s}
-#msg-input:focus{border-color:var(--tq-mid)}
-#msg-input::placeholder{color:var(--tx3)}
-/* Send — same height as input */
-#send-btn{height:var(--input-h);padding:0 var(--sp4);background:var(--tq-low);border:1px solid var(--tq-mid);color:var(--tq);cursor:pointer;font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;transition:all .12s;flex-shrink:0;align-self:flex-end;white-space:nowrap}
-#send-btn:hover{background:var(--tq);color:var(--bg0)}
+.transfer{margin-top:6px}
+.transfer-bar{height:6px;background:#071a18;border:1px solid var(--tq-low)}
+.transfer-fill{height:100%;width:0;background:linear-gradient(90deg,#1a5b55,#40e0d0)}
+.transfer-nerd{margin-top:6px;font-size:.62rem;color:var(--tx1)}
 
-/* ── Status bar — ALWAYS VISIBLE, always at bottom ──────────────────── */
+.tool-wrap{margin-top:8px;border:1px solid var(--tq-low);background:#071816;padding:8px}
+.tool-title{font-size:.64rem;letter-spacing:.14em;color:var(--tq);text-transform:uppercase;margin-bottom:8px}
+
+#input-bar{
+  flex:0 0 auto;display:flex;align-items:flex-end;gap:8px;padding:10px;border-top:1px solid var(--tq-low);background:var(--bg1)
+}
+#file-btn,#send-btn{
+  height:34px;min-width:34px;border:1px solid var(--tq-low);background:var(--bg2);cursor:pointer
+}
+#file-btn:hover,#send-btn:hover{border-color:var(--tq-mid);color:var(--tq)}
+#msg-input{
+  flex:1;resize:none;max-height:28vh;min-height:34px;border:1px solid var(--tq-low);background:#071715;padding:7px 9px;outline:none
+}
 #status-bar{
-  flex-shrink:0;
-  height:calc(var(--status-h) + var(--sp2)*2 + var(--safe-b));
-  padding:var(--sp2) var(--sp4);
-  padding-bottom:calc(var(--sp2) + var(--safe-b));
-  font-size:.62rem;letter-spacing:.06em;
-  background:var(--bg0);border-top:1px solid var(--tq-low);
-  color:var(--tx3); /* neutral when idle */
-  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
-  transition:color .2s;
+  flex:0 0 auto;border-top:1px solid var(--tq-low);padding:4px 10px;font-size:.62rem;color:var(--tx2);background:#050f0d
 }
-#status-bar.s-ok{color:var(--ok)}
-#status-bar.s-err{color:var(--err)}
-#status-bar.s-warn{color:var(--warn)}
-#status-bar.s-info{color:var(--tx1)}
 
-/* ── Incoming call overlay ───────────────────────────────────────────── */
-#call-incoming{display:none;position:fixed;inset:0;z-index:200;background:color-mix(in srgb,var(--bg0) 88%,transparent);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);flex-direction:column;align-items:center;justify-content:center;gap:var(--sp3)}
+#plus-menu{
+  position:fixed;z-index:70;left:10px;bottom:64px;border:1px solid var(--tq-mid);background:#061513;display:flex;flex-direction:column;min-width:230px
+}
+#plus-menu.hidden{display:none}
+#plus-menu button{
+  border:0;border-bottom:1px solid var(--tq-low);background:transparent;color:var(--tx0);text-align:left;padding:9px 10px;cursor:pointer
+}
+#plus-menu button:last-child{border-bottom:0}
+#plus-menu button:hover{background:#0b2220;color:var(--tq)}
+
+#call-incoming{
+  position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.72);display:none;align-items:center;justify-content:center
+}
 #call-incoming.visible{display:flex}
-.ci-icon{font-size:2.618rem;animation:ci-pulse .9s ease-in-out infinite}
-@keyframes ci-pulse{0%,100%{transform:scale(1);opacity:.8}50%{transform:scale(1.1);opacity:1}}
-.ci-mesh{font-size:.6rem;letter-spacing:.25em;text-transform:uppercase;color:var(--tq);border:1px solid var(--tq-mid);padding:var(--sp1) var(--sp3);background:var(--tq-low)}
-.ci-label{font-size:.65rem;letter-spacing:.3em;text-transform:uppercase;color:var(--tq)}
-.ci-name{font-size:1.618rem;font-weight:500;color:var(--tx0);letter-spacing:.04em}
-.ci-sub{font-size:.72rem;color:var(--tx2);letter-spacing:.08em}
-.ci-btns{display:flex;gap:var(--sp5);margin-top:var(--sp3)}
-.ci-btn{height:var(--sp6);padding:0 var(--sp5);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:.75rem;letter-spacing:.15em;text-transform:uppercase;border:1px solid;transition:all .15s;min-width:120px}
-.ci-btn.accept{border-color:var(--ok);color:var(--ok)}
-.ci-btn.accept:hover{background:var(--ok);color:var(--bg0)}
-.ci-btn.decline{border-color:var(--err);color:var(--err)}
-.ci-btn.decline:hover{background:var(--err);color:#fff}
+.ci-card{width:min(94vw,420px);border:1px solid var(--tq-mid);background:#071816;padding:14px}
+.ci-title{font-size:.64rem;letter-spacing:.2em;text-transform:uppercase;color:var(--tq)}
+.ci-name{margin-top:8px;font-size:1rem}
+.ci-btns{display:flex;gap:10px;margin-top:12px}
+.ci-btns button{flex:1;padding:8px;border:1px solid;cursor:pointer;background:transparent}
+.ci-accept{border-color:var(--ok);color:var(--ok)}
+.ci-decline{border-color:var(--err);color:var(--err)}
 
-/* ── Back button (mobile) ───────────────────────────────────────────── */
-#back-btn{display:none;width:var(--btn-h);height:var(--btn-h);align-items:center;justify-content:center;color:var(--tx1);cursor:pointer;font-size:1.1rem;margin-right:var(--sp1);transition:color .12s;flex-shrink:0}
-#back-btn:hover{color:var(--tq)}
+#modal-root{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.65)}
+#modal-root.visible{display:flex}
+.modal{width:min(92vw,520px);max-height:84vh;overflow:auto;border:1px solid var(--tq-mid);background:#061614;padding:12px}
+.modal h3{margin:0 0 10px 0;font-size:.78rem;letter-spacing:.12em;color:var(--tq);text-transform:uppercase}
+.modal .row{margin-bottom:9px}
+.modal input[type="text"]{width:100%;border:1px solid var(--tq-low);background:#071816;padding:8px}
+.modal .check-list{display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto;border:1px solid var(--tq-low);padding:8px}
+.modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:10px}
+.modal .actions button{padding:6px 12px;border:1px solid var(--tq-mid);background:transparent;color:var(--tq);cursor:pointer}
+.modal .tool-item{border:1px solid var(--tq-low);padding:8px;margin-bottom:8px;cursor:pointer}
+.modal .tool-item:hover{border-color:var(--tq-mid);background:#0a2320}
 
-/* ── Responsive: ≤680px one panel at a time ──────────────────────────── */
-@media(max-width:680px){
-  #sidebar{position:absolute;top:0;left:0;bottom:0;width:100%!important;max-width:100%!important;transform:translateX(0)}
-  #sidebar.slide-left{transform:translateX(-100%)}
-  #chat-area{position:absolute;inset:0;transform:translateX(100%)}
-  #chat-area.slide-in{transform:translateX(0)}
-  #sidebar,#chat-area{transition:transform .2s ease}
-  #back-btn{display:flex!important}
-  .chat-peer-fp{display:none}
-  .video-wrap.local{max-width:72px;max-height:54px}
+@media (max-width: 760px){
+  #sidebar{position:absolute;inset:0 auto 0 0;max-width:100vw;width:100%;z-index:60;transform:translateX(0);transition:transform .2s}
+  #sidebar.hidden-mobile{transform:translateX(-100%)}
+  #chat-area{position:absolute;inset:0}
+  #back-btn{display:inline-block}
 }
 </style>
 </head>
 <body>
 <div id="app">
-
   <aside id="sidebar">
     <div id="device-header">
-      <div class="wordmark">
-        <span class="wordmark-text">Turquoise</span>
-        <div id="reset-btn" title="reset identity — wipes all data">reset</div>
-      </div>
-      <div class="identity-row" id="identity-row" title="tap to edit name">
-        <span class="nick-display" id="nick-display"></span>
-        <input class="nick-input" id="nick-input" maxlength="32" autocomplete="off" spellcheck="false" placeholder="your name…">
-        <span class="edit-hint">edit</span>
-      </div>
-      <div class="full-fp" id="full-fp"></div>
+      <div class="wordmark"><span>Turquoise</span><span>mesh</span></div>
+      <div id="nick-line">you: <span id="nick-display">...</span></div>
+      <div id="full-fp"></div>
     </div>
-    <div id="peer-list"></div>
+
+    <div class="list-block">
+      <div class="block-head"><span>Peers</span></div>
+      <div id="peer-list"></div>
+    </div>
+
+    <div class="list-block">
+      <div class="block-head">
+        <span>Circles (short mesh)</span>
+        <button id="new-circle-btn" class="block-btn">+ circle</button>
+      </div>
+      <div id="circles-list"></div>
+    </div>
+
     <div id="net-log"></div>
   </aside>
 
   <main id="chat-area">
-    <!-- FIXED: never scrolls -->
     <div id="chat-header">
-      <span id="back-btn">←</span>
-      <span id="chat-placeholder">select a peer</span>
+      <button id="back-btn">←</button>
+      <div id="chat-title-wrap">
+        <div id="chat-title">Select a peer or circle</div>
+        <div id="chat-subtitle">Only messages scroll. Header is fixed.</div>
+      </div>
+      <div id="chat-actions">
+        <button id="walkie-btn" class="icon-btn" title="walkie voice note">
+          <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3M8 21h8"/></svg>
+        </button>
+        <button id="audio-call-btn" class="icon-btn" title="audio call">
+          <svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.4 2.1l-1.2 1.2a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.4 14 14 0 0 0 2.6.6A2 2 0 0 1 22 16.9Z"/></svg>
+        </button>
+        <button id="video-call-btn" class="icon-btn" title="video call">
+          <svg viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7Z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        </button>
+      </div>
     </div>
 
-    <!-- FIXED: 1:1 call panel, shown only when active -->
     <div id="call-panel"></div>
 
-    <!-- FIXED: mesh call panel, shown only when active -->
-    <div id="mesh-call-panel"></div>
-
-    <!-- SCROLLABLE: the only element that scrolls -->
     <div id="messages">
       <div class="sys-msg">no peer selected</div>
     </div>
 
-    <!-- FIXED: message input -->
     <div id="input-bar">
-      <button id="file-btn" title="attach file">+</button>
-      <textarea id="msg-input" placeholder="message…" rows="1"></textarea>
+      <button id="file-btn" title="actions">+</button>
+      <textarea id="msg-input" rows="1" placeholder="message…"></textarea>
       <button id="send-btn">send</button>
     </div>
 
-    <!-- FIXED: status bar, always visible -->
     <div id="status-bar">turquoise</div>
   </main>
-
 </div>
 
-<!-- Incoming call overlay -->
-<div id="call-incoming"></div>
+<div id="plus-menu" class="hidden">
+  <button data-plus="file">Share file(s)</button>
+  <button data-plus="tool">Start game / tool</button>
+  <button data-plus="circle">Create short mesh circle</button>
+</div>
 
+<div id="call-incoming"></div>
+<div id="modal-root"></div>
+
+<input type="file" id="__file-input" multiple hidden>
 <script type="module" src="/main.js"></script>
 </body>
 </html>
