@@ -65,6 +65,13 @@ async function boot() {
 
   registerSW().catch(() => {});
 
+  // Request persistent storage to prevent browser from evicting the identity keypair
+  if (navigator.storage?.persist) {
+    navigator.storage.persist().then((granted) => {
+      if (!granted) console.warn('[TQ] persistent storage not granted — identity may be evicted under storage pressure');
+    }).catch(() => {});
+  }
+
   let identity;
   try {
     identity = await getIdentity();
