@@ -59,10 +59,11 @@ export class TurquoiseApp {
     this._renderSidebar();
 
     this.fileEngine = new FileTransferEngine(this.network, {
-      onOffer:    (fp, offer) => this._onFileOffer(fp, offer),
-      onProgress: (p)        => this._onTransferProgress(p),
-      onComplete: (done)     => this._onTransferComplete(done),
-      onError:    (err)      => this._flash(`file error: ${err.error}`),
+      onOffer:       (fp, offer) => this._onFileOffer(fp, offer),
+      onProgress:    (p)         => this._onTransferProgress(p),
+      onComplete:    (done)      => this._onTransferComplete(done),
+      onStateChange: (s)         => this._onTransferStateChange(s),
+      onError:       (err)       => this._onTransferError(err),
     });
 
     this._flash('ready', 2000);
@@ -168,6 +169,7 @@ export class TurquoiseApp {
       this._renderSidebar();
       savePeer({ fingerprint: fp, nickname: nick || null }).catch(() => {});
       this._updateLiveStats();
+      this.fileEngine?.onPeerReconnected(fp);
     };
 
     this.network.onPeerDisconnected = (fp) => {
@@ -177,6 +179,8 @@ export class TurquoiseApp {
       this._log(`peer down ${short(fp)}`);
       this._detachCallPeer(fp);
       this._updateLiveStats();
+      this.fileEngine?.onPeerDisconnected(fp);
+      this.prevStats.delete(fp);
     };
 
     this.network.onMessage   = (fp, msg) => this._onCtrlMessage(fp, msg);
@@ -283,8 +287,20 @@ export class TurquoiseApp {
         await resetIdentity();
         await clearAllData();
         localStorage.clear();
-        this._flash('identity reset — reloading…', 0);
-        setTimeout(() => location.reload(), 900);
+        sessionStorage.clear();
+        this._flash('clearing cache…', 0);
+        // Clear all SW caches
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(k => caches.delete(k)));
+        }
+        // Unregister service worker so fresh files load on reload
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map(r => r.unregister()));
+        }
+        this._flash('identity reset — loading fresh…', 0);
+        setTimeout(() => location.reload(true), 600);
       } catch (e) {
         this._flash('reset failed: ' + e.message);
       }
@@ -776,36 +792,70 @@ export class TurquoiseApp {
       view = this._createTransferView(p);
       this.transferViews.set(p.transferId, view);
     }
-
     if (view.fill) view.fill.style.width = `${p.pct.toFixed(2)}%`;
     if (view.nerd) {
       const dir = p.direction === 'send' ? '↑' : '↓';
       view.nerd.textContent =
         `${dir} ${fmtBytes(p.bytes)} / ${fmtBytes(p.total)}  ·  ${fmtRate(p.speed)}  ·  ETA ${fmtEta(p.etaSec)}`;
     }
+    if (view.statusEl) { view.statusEl.textContent = 'transferring'; view.statusEl.className = 'tx-status tx-transferring'; }
+    if (view.retryBtn) view.retryBtn.style.display = 'none';
   }
 
   _createTransferView(p) {
     const isAudio  = (p.mime || '').startsWith('audio/');
     const isImage  = (p.mime || '').startsWith('image/');
     const icon     = isAudio ? '🎙' : isImage ? '🖼' : '📁';
+    const sender   = p.direction === 'send' ? 'you' : escapeHtml(this._peerNick(p.fp));
+    const dirLabel = p.direction === 'send' ? '↑ sending' : '↓ receiving';
 
     const row = document.createElement('div');
     row.className = `msg-row${p.direction === 'send' ? ' mine' : ''}`;
     row.innerHTML = `
       <div class="msg-bubble">
-        <div class="msg-meta">${p.direction === 'send' ? 'you' : escapeHtml(this._peerNick(p.fp))} · ${icon} ${escapeHtml(p.fileName)}</div>
+        <div class="msg-meta">${sender} · ${icon} ${escapeHtml(p.fileName)}</div>
         <div class="transfer">
+          <div class="tx-status-row">
+            <span class="tx-status tx-transferring">${dirLabel}</span>
+            <span class="tx-size">${fmtBytes(p.total)}</span>
+          </div>
           <div class="transfer-bar"><div class="transfer-fill"></div></div>
           <div class="transfer-nerd"></div>
+          <div class="transfer-actions"></div>
           <div class="transfer-media"></div>
         </div>
       </div>
     `;
 
-    const fill  = row.querySelector('.transfer-fill');
-    const nerd  = row.querySelector('.transfer-nerd');
-    const media = row.querySelector('.transfer-media');
+    const fill    = row.querySelector('.transfer-fill');
+    const nerd    = row.querySelector('.transfer-nerd');
+    const media   = row.querySelector('.transfer-media');
+    const actions = row.querySelector('.transfer-actions');
+    const statusEl = row.querySelector('.tx-status');
+
+    // Dismiss button — always visible, removes card after confirmation
+    const dismissBtn = document.createElement('button');
+    dismissBtn.textContent = '✕ dismiss';
+    dismissBtn.className   = 'tx-btn tx-dismiss';
+    dismissBtn.addEventListener('click', () => {
+      this.fileEngine?.dismiss(p.transferId);
+      this.transferViews.delete(p.transferId);
+      row.remove();
+    });
+    actions.appendChild(dismissBtn);
+
+    // Retry button — only shown on fail/paused (send direction)
+    let retryBtn = null;
+    if (p.direction === 'send') {
+      retryBtn = document.createElement('button');
+      retryBtn.textContent = '↺ retry';
+      retryBtn.className   = 'tx-btn tx-retry';
+      retryBtn.style.display = 'none';
+      retryBtn.addEventListener('click', () => {
+        this.fileEngine?.retryOutgoing(p.transferId);
+      });
+      actions.appendChild(retryBtn);
+    }
 
     const sessionId = p.sessionId || `peer:${p.fp}`;
     if (this._sessionId() === sessionId) {
@@ -813,7 +863,7 @@ export class TurquoiseApp {
       this._scrollToBottom();
     }
 
-    return { row, fill, nerd, media, sessionId, fileName: p.fileName, mime: p.mime };
+    return { row, fill, nerd, media, actions, statusEl, retryBtn, sessionId, fileName: p.fileName, mime: p.mime };
   }
 
   _onTransferComplete(done) {
@@ -861,6 +911,59 @@ export class TurquoiseApp {
       text: `${done.direction === 'send' ? 'sent' : 'received'} ${done.fileName} (${fmtBytes(done.size)})`,
       ts: Date.now(), mine: done.direction === 'send',
     }, false);
+  }
+
+  _onTransferStateChange(s) {
+    let view = this.transferViews.get(s.transferId);
+    if (!view) {
+      view = this._createTransferView(s);
+      this.transferViews.set(s.transferId, view);
+    }
+
+    const { state, failReason, pct } = s;
+
+    if (view.fill) view.fill.style.width = `${(pct||0).toFixed(2)}%`;
+
+    if (view.statusEl) {
+      const labels = {
+        offering:     'waiting for accept…',
+        transferring: s.direction === 'send' ? '↑ sending' : '↓ receiving',
+        retrying:     '↺ reconnecting…',
+        paused:       '⏸ paused — waiting for peer',
+        complete:     s.direction === 'send' ? '✓ sent' : '✓ received',
+        failed:       `✗ ${failReason || 'failed'}`,
+      };
+      view.statusEl.textContent = labels[state] || state;
+      view.statusEl.className   = `tx-status tx-${state}`;
+    }
+
+    if (view.nerd && (state === 'complete' || state === 'failed' || state === 'paused')) {
+      view.nerd.textContent = state === 'complete'
+        ? `${fmtBytes(s.total)} — done`
+        : state === 'paused'
+        ? `${fmtBytes(s.bytes)} of ${fmtBytes(s.total)} transferred`
+        : failReason || '';
+    }
+
+    // Show retry button for send failures / pauses
+    if (view.retryBtn) {
+      view.retryBtn.style.display = (state === 'failed' || state === 'paused') ? '' : 'none';
+    }
+
+    // On complete, dim dismiss button label
+    if (state === 'complete' && view.actions) {
+      const db = view.actions.querySelector('.tx-dismiss');
+      if (db) db.textContent = '✕ clear';
+    }
+  }
+
+  _onTransferError(err) {
+    this._flash(`transfer ${err.direction === 'send' ? '↑' : '↓'} ${err.fileName}: ${err.error}`);
+    const view = this.transferViews.get(err.transferId);
+    if (view?.statusEl) {
+      view.statusEl.textContent = `✗ ${err.error}`;
+      view.statusEl.className   = 'tx-status tx-failed';
+    }
   }
 
   /* ═══════════════════════════ TOOLS ══════════════════════════ */
@@ -1546,13 +1649,14 @@ export class TurquoiseApp {
     if (ex) {
       ex.name = name || ex.name;
       if (members?.length) {
-        // Merge: add new members, don't remove existing
+        // Merge: add new members, don't remove own fingerprint
         const set = new Set(ex.members);
-        members.forEach(fp => set.add(fp));
+        members.forEach(m => { if (m !== this.identity.fingerprint) set.add(m); });
         ex.members = [...set];
       }
     } else {
-      this.circles.push({ id, name: name || `circle ${this.circles.length + 1}`, members: Array.isArray(members) ? members : [] });
+      const filtered = Array.isArray(members) ? members.filter(m => m !== this.identity.fingerprint) : [];
+      this.circles.push({ id, name: name || `circle ${this.circles.length + 1}`, members: filtered });
     }
     this._saveCircles();
     this._renderSidebar();

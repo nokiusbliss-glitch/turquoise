@@ -94,7 +94,16 @@ function createTicTacToeRuntime(ctx) {
   }
 
   function applyMove(action) {
-    if (!action || action.type !== 'move') return;
+    if (!action) return;
+    if (action.type === 'reset') {
+      if (!seenActions.has(action.id)) {
+        seenActions.add(action.id);
+        resetGame(false);   // apply without re-broadcasting
+        if (root?._resetBtn) root._resetBtn.style.display = 'none';
+      }
+      return;
+    }
+    if (action.type !== 'move') return;
     if (seenActions.has(action.id)) return;
     seenActions.add(action.id);
 
@@ -124,12 +133,16 @@ function createTicTacToeRuntime(ctx) {
     ctx.broadcast(action);
   }
 
-  function resetGame() {
+  function resetGame(broadcast = true) {
     board.fill(null);
     turn   = players[0] || null;
     winner = null;
     seenActions.clear();
     render();
+    if (broadcast) {
+      const action = { id: `reset:${ctx.selfId}:${Date.now()}`, type: 'reset', by: ctx.selfId, ts: Date.now() };
+      ctx.broadcast(action);
+    }
   }
 
   return {
@@ -165,7 +178,7 @@ function createTicTacToeRuntime(ctx) {
       resetBtn.textContent = 'new game';
       resetBtn.style.cssText = 'margin-top:8px;border:1px solid #1e7068;background:transparent;color:#7ab8b2;cursor:pointer;padding:4px 10px;font-size:.65rem;display:none;';
       resetBtn.addEventListener('click', () => {
-        resetGame();
+        resetGame(true);
         resetBtn.style.display = 'none';
       });
       root.appendChild(resetBtn);
@@ -253,6 +266,7 @@ function createWhiteboardRuntime(ctx) {
         const action = { type: 'stroke', color: getColor(), width: getSize(), x0: lastX, y0: lastY, x1: x, y1: y };
         applyStroke(action);
         strokes.push(action);
+        if (strokes.length > 2000) strokes.splice(0, strokes.length - 2000);
         ctx.broadcast(action);
         [lastX, lastY] = [x, y];
       };
@@ -276,7 +290,7 @@ function createWhiteboardRuntime(ctx) {
     },
 
     apply(action) {
-      if (action.type === 'stroke') { applyStroke(action); strokes.push(action); }
+      if (action.type === 'stroke') { applyStroke(action); strokes.push(action); if (strokes.length > 2000) strokes.splice(0, strokes.length - 2000); }
       if (action.type === 'clear')  { strokes.length = 0; ctx2d?.clearRect(0, 0, canvas?.width || 400, canvas?.height || 260); }
     },
 
