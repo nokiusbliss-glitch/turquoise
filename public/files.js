@@ -1,305 +1,180 @@
-const CHUNK_SIZE = 48 * 1024;
-const FRAME_CHUNK = 1;
+/**
+ * files.js — Turquoise
+ * High-throughput file transfer with real-time nerdy stats.
+ *
+ * Flow control fix (was broken before):
+ *   LOW_WATER  = 64KB  ← bufferedAmountLowThreshold (event fires here)
+ *   HIGH_WATER = 1MB   ← pause sending above this
+ *   Previous: threshold=16MB = Chrome max → event never fired → overflow → abort
+ *
+ * Stats emitted per progress event:
+ *   { bytesTransferred, totalBytes, speedBps, etaSec, elapsedSec, pct }
+ */
 
-export class FileTransferEngine {
-  constructor(network, hooks = {}) {
-    this.network = network;
-    this.hooks = hooks;
-    this.offers = new Map();      // transferId -> { fp, offer }
-    this.outgoing = new Map();    // transferId -> state
-    this.incoming = new Map();    // transferId -> state
+const CHUNK      = 256 * 1024;   // 256KB — optimal for backpressure
+const HIGH_WATER = 1024 * 1024;  // 1MB   — pause threshold (must be << 16MB)
+
+export class FileTransfer {
+  constructor(sendCtrlFn, sendBinaryFn, waitBufferFn) {
+    this._sendCtrl   = sendCtrlFn;
+    this._sendBinary = sendBinaryFn;
+    this._waitBuf    = waitBufferFn || (() => Promise.resolve());
+
+    this._recv    = new Map();
+    this._queue   = new Map();
+    this._sending = new Set();
+
+    this.onProgress  = null;   // (id, pct, dir, fp, stats) => void
+    this.onFileReady = null;   // (f) => void
+    this.onError     = null;   // (id, msg, fp) => void
   }
 
-  handleCtrl(fp, msg) {
-    if (!msg?.type) return false;
+  send(file, fp, fileId) {
+    if (!file || !fp || !fileId) return;
+    if (!this._queue.has(fp)) this._queue.set(fp, []);
+    this._queue.get(fp).push({ file, fileId });
+    if (!this._sending.has(fp)) this._drain(fp);
+  }
 
-    if (msg.type === 'file-offer') {
-      this.offers.set(msg.id, { fp, offer: msg });
-      this.hooks.onOffer?.(fp, msg);
-      return true;
+  async _drain(fp) {
+    this._sending.add(fp);
+    const q = this._queue.get(fp) || [];
+    while (q.length) {
+      const { file, fileId } = q[0];
+      try { await this._sendOne(file, fp, fileId); }
+      catch (e) {
+        this.onError?.(fileId, e.message, fp);
+        try { this._sendCtrl(fp, { type: 'file-abort', fileId }); } catch {}
+      }
+      q.shift();
+    }
+    this._sending.delete(fp);
+  }
+
+  async _sendOne(file, fp, fileId) {
+    if (file.size === 0) {
+      this._sendCtrl(fp, { type: 'file-meta', fileId, name: file.name, size: 0, mimeType: file.type || 'application/octet-stream', totalChunks: 0 });
+      this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: 0 });
+      this.onProgress?.(fileId, 1, 'send', fp, { bytesTransferred: 0, totalBytes: 0, speedBps: 0, etaSec: 0, elapsedSec: 0 });
+      return;
     }
 
-    if (msg.type === 'file-accept') {
-      const st = this.outgoing.get(msg.id);
-      if (!st || st.fp !== fp) return true;
-      st.accepted = true;
-      this._sendLoop(st).catch(err => this._failOutgoing(st, err));
-      return true;
-    }
+    const totalChunks = Math.ceil(file.size / CHUNK);
+    const ok = this._sendCtrl(fp, { type: 'file-meta', fileId, name: file.name, size: file.size, mimeType: file.type || 'application/octet-stream', totalChunks });
+    if (!ok) throw new Error('Peer not connected');
 
-    if (msg.type === 'file-reject') {
-      const st = this.outgoing.get(msg.id);
-      if (!st) return true;
-      st.rejected = true;
-      this.hooks.onError?.({
-        direction: 'send',
-        transferId: st.id,
-        fp: st.fp,
-        fileName: st.file.name,
-        error: 'Receiver declined transfer',
-      });
-      this.outgoing.delete(st.id);
-      return true;
-    }
-
-    if (msg.type === 'file-complete') {
-      const st = this.incoming.get(msg.id);
-      if (!st) return true;
-      this._finishIncoming(st);
-      return true;
-    }
-
-    return false;
-  }
-
-  handleBinary(fp, ab) {
-    const parsed = parsePacket(ab);
-    if (!parsed || parsed.frameType !== FRAME_CHUNK) return false;
-
-    const st = this.incoming.get(parsed.transferId);
-    if (!st || st.fp !== fp) return true;
-
-    st.chunks.push(parsed.payload);
-    st.received += parsed.payload.byteLength;
-    this._emitProgress(st, 'recv');
-
-    return true;
-  }
-
-  async sendFile(fp, file, meta = {}) {
-    const id = crypto.randomUUID();
-
-    const st = {
-      id,
-      fp,
-      file,
-      sessionId: meta.sessionId || '',
-      startedAt: performance.now(),
-      lastTickAt: performance.now(),
-      lastBytes: 0,
-      sent: 0,
-      accepted: false,
-      rejected: false,
-    };
-
-    this.outgoing.set(id, st);
-
-    this.network.sendCtrl(fp, {
-      type: 'file-offer',
-      id,
-      name: file.name,
-      size: file.size,
-      mime: file.type || 'application/octet-stream',
-      sessionId: st.sessionId,
-      ts: Date.now(),
-    });
-
-    this._emitProgress(st, 'send');
-    return id;
-  }
-
-  acceptOffer(fp, transferId) {
-    const row = this.offers.get(transferId);
-    if (!row || row.fp !== fp) return;
-
-    const offer = row.offer;
-    this.offers.delete(transferId);
-
-    this.incoming.set(transferId, {
-      id: transferId,
-      fp,
-      fileName: offer.name,
-      mime: offer.mime,
-      total: offer.size,
-      sessionId: offer.sessionId || '',
-      chunks: [],
-      received: 0,
-      startedAt: performance.now(),
-      lastTickAt: performance.now(),
-      lastBytes: 0,
-    });
-
-    this.network.sendCtrl(fp, {
-      type: 'file-accept',
-      id: transferId,
-      ts: Date.now(),
-    });
-  }
-
-  rejectOffer(fp, transferId) {
-    const row = this.offers.get(transferId);
-    if (!row || row.fp !== fp) return;
-    this.offers.delete(transferId);
-
-    this.network.sendCtrl(fp, {
-      type: 'file-reject',
-      id: transferId,
-      ts: Date.now(),
-    });
-  }
-
-  async _sendLoop(st) {
-    const file = st.file;
-    let offset = 0;
+    const startTime    = Date.now();
+    let offset         = 0;
+    let chunkIdx       = 0;
+    let lastPctInt     = -1;
+    // Speed window: track bytes/time over last ~800ms
+    let windowStart    = startTime;
+    let windowBytes    = 0;
+    let smoothSpeed    = 0;  // EWMA smoothed speed (bytes/s)
 
     while (offset < file.size) {
-      if (st.rejected) throw new Error('transfer rejected');
-      await this.network.waitForBuffer(st.fp);
+      await this._waitBuf(fp);
+      if (!this._sendBinary) throw new Error('DataChannel closed');
 
-      const end = Math.min(file.size, offset + CHUNK_SIZE);
-      const chunk = await readSlice(file, offset, end);
-      const packet = buildPacket(st.id, chunk);
+      const end = Math.min(offset + CHUNK, file.size);
+      let buf;
+      try { buf = await file.slice(offset, end).arrayBuffer(); }
+      catch (e) { throw new Error('File read error: ' + e.message); }
 
-      if (!this.network.sendBinary(st.fp, packet)) {
-        throw new Error('data channel unavailable');
+      if (!this._sendBinary(fp, buf)) throw new Error('DataChannel closed during transfer');
+
+      offset    += buf.byteLength;
+      windowBytes += buf.byteLength;
+      chunkIdx++;
+
+      const now       = Date.now();
+      const elapsed   = (now - startTime) / 1000;
+      const windowAge = (now - windowStart) / 1000;
+
+      // Recalculate speed every 400ms window
+      if (windowAge >= 0.4 || offset >= file.size) {
+        const instantSpeed = windowAge > 0 ? windowBytes / windowAge : 0;
+        // Exponential weighted moving average: α=0.35 (recent weight)
+        smoothSpeed = smoothSpeed === 0 ? instantSpeed : 0.35 * instantSpeed + 0.65 * smoothSpeed;
+        windowStart = now; windowBytes = 0;
       }
 
-      offset = end;
-      st.sent = offset;
-      this._emitProgress(st, 'send');
+      const pct    = offset / file.size;
+      const pctInt = Math.floor(pct * 100);
+      if (pctInt !== lastPctInt || offset >= file.size) {
+        const remaining = file.size - offset;
+        const eta       = smoothSpeed > 0 ? remaining / smoothSpeed : 0;
+        this.onProgress?.(fileId, pct, 'send', fp, {
+          bytesTransferred: offset, totalBytes: file.size,
+          speedBps: smoothSpeed, etaSec: eta, elapsedSec: elapsed,
+        });
+        lastPctInt = pctInt;
+      }
+    }
+    this._sendCtrl(fp, { type: 'file-end', fileId, totalChunks: chunkIdx });
+  }
+
+  // ── Receive ─────────────────────────────────────────────────────────────────
+  handleCtrl(fp, msg) {
+    const { type, fileId } = msg; if (!fileId) return;
+    if (type === 'file-meta') {
+      this._recv.set(fp, {
+        fileId, name: msg.name || 'file', size: msg.size || 0,
+        mimeType: msg.mimeType || 'application/octet-stream',
+        total: msg.totalChunks || 0, chunks: [], bytes: 0, from: fp,
+        // Stats
+        startTime: Date.now(), windowStart: Date.now(), windowBytes: 0, smoothSpeed: 0, lastPctInt: -1,
+      });
+    } else if (type === 'file-end') {
+      this._finalize(fp, fileId);
+    } else if (type === 'file-abort') {
+      this._recv.delete(fp);
+      this.onError?.(fileId, 'Transfer aborted by sender', fp);
+    }
+  }
+
+  handleBinary(fp, buf) {
+    const s = this._recv.get(fp); if (!s) return;
+    s.chunks.push(buf);
+    s.bytes += buf.byteLength;
+    s.windowBytes += buf.byteLength;
+
+    const now       = Date.now();
+    const elapsed   = (now - s.startTime) / 1000;
+    const windowAge = (now - s.windowStart) / 1000;
+
+    if (windowAge >= 0.4) {
+      const instant   = windowAge > 0 ? s.windowBytes / windowAge : 0;
+      s.smoothSpeed   = s.smoothSpeed === 0 ? instant : 0.35 * instant + 0.65 * s.smoothSpeed;
+      s.windowStart   = now; s.windowBytes = 0;
     }
 
-    this.network.sendCtrl(st.fp, {
-      type: 'file-complete',
-      id: st.id,
-      ts: Date.now(),
-    });
-
-    this.hooks.onComplete?.({
-      direction: 'send',
-      transferId: st.id,
-      fp: st.fp,
-      fileName: st.file.name,
-      size: st.file.size,
-      sessionId: st.sessionId,
-      blob: st.file,
-    });
-
-    this.outgoing.delete(st.id);
+    const pct    = s.size > 0 ? Math.min(s.bytes / s.size, 0.999) : 0;
+    const pctInt = Math.floor(pct * 100);
+    if (pctInt !== s.lastPctInt) {
+      const remaining = s.size - s.bytes;
+      const eta       = s.smoothSpeed > 0 ? remaining / s.smoothSpeed : 0;
+      this.onProgress?.(s.fileId, pct, 'recv', fp, {
+        bytesTransferred: s.bytes, totalBytes: s.size,
+        speedBps: s.smoothSpeed, etaSec: eta, elapsedSec: elapsed,
+      });
+      s.lastPctInt = pctInt;
+    }
   }
 
-  _finishIncoming(st) {
-    const blob = new Blob(st.chunks, { type: st.mime || 'application/octet-stream' });
-
-    this.hooks.onComplete?.({
-      direction: 'recv',
-      transferId: st.id,
-      fp: st.fp,
-      fileName: st.fileName,
-      size: st.total,
-      sessionId: st.sessionId,
-      blob,
-    });
-
-    this.incoming.delete(st.id);
+  _finalize(fp, fileId) {
+    const s = this._recv.get(fp); if (!s || s.fileId !== fileId) return;
+    this._recv.delete(fp);
+    const elapsed = (Date.now() - s.startTime) / 1000;
+    const avgSpeed = elapsed > 0 ? s.bytes / elapsed : 0;
+    try {
+      const blob = new Blob(s.chunks, { type: s.mimeType });
+      const url  = URL.createObjectURL(blob);
+      this.onProgress?.(fileId, 1, 'recv', fp, {
+        bytesTransferred: s.bytes, totalBytes: s.size,
+        speedBps: avgSpeed, etaSec: 0, elapsedSec: elapsed, done: true,
+      });
+      this.onFileReady?.({ fileId, url, name: s.name, size: blob.size, mimeType: s.mimeType, from: fp });
+    } catch (e) { this.onError?.(fileId, 'Assembly failed: ' + e.message, fp); }
   }
-
-  _emitProgress(st, direction) {
-    const now = performance.now();
-    const bytes = direction === 'send' ? st.sent : st.received;
-    const total = direction === 'send' ? st.file.size : st.total;
-
-    const dt = Math.max(0.001, (now - st.lastTickAt) / 1000);
-    const db = bytes - st.lastBytes;
-    const speed = db / dt;
-
-    st.lastTickAt = now;
-    st.lastBytes = bytes;
-
-    const pct = total > 0 ? Math.min(100, (bytes / total) * 100) : 0;
-    const remaining = Math.max(0, total - bytes);
-    const etaSec = speed > 0 ? remaining / speed : Infinity;
-
-    this.hooks.onProgress?.({
-      direction,
-      transferId: st.id,
-      fp: st.fp,
-      fileName: direction === 'send' ? st.file.name : st.fileName,
-      sessionId: st.sessionId,
-      bytes,
-      total,
-      pct,
-      speed,
-      etaSec,
-      elapsedSec: (performance.now() - st.startedAt) / 1000,
-    });
-  }
-
-  _failOutgoing(st, err) {
-    this.hooks.onError?.({
-      direction: 'send',
-      transferId: st.id,
-      fp: st.fp,
-      fileName: st.file.name,
-      error: err?.message || String(err),
-    });
-    this.outgoing.delete(st.id);
-  }
-}
-
-function buildPacket(transferId, payloadAb) {
-  const encoder = new TextEncoder();
-  const idBytes = encoder.encode(transferId);
-
-  const headerLen = 1 + 2 + 4 + idBytes.length;
-  const out = new Uint8Array(headerLen + payloadAb.byteLength);
-  const view = new DataView(out.buffer);
-
-  out[0] = FRAME_CHUNK;
-  view.setUint16(1, idBytes.length);
-  view.setUint32(3, payloadAb.byteLength);
-
-  out.set(idBytes, 7);
-  out.set(new Uint8Array(payloadAb), headerLen);
-
-  return out.buffer;
-}
-
-function parsePacket(ab) {
-  if (!(ab instanceof ArrayBuffer) || ab.byteLength < 7) return null;
-  const u8 = new Uint8Array(ab);
-  const view = new DataView(ab);
-
-  const frameType = u8[0];
-  const idLen = view.getUint16(1);
-  const payloadLen = view.getUint32(3);
-
-  const expected = 7 + idLen + payloadLen;
-  if (ab.byteLength < expected) return null;
-
-  const idBytes = u8.slice(7, 7 + idLen);
-  const transferId = new TextDecoder().decode(idBytes);
-  const payload = ab.slice(7 + idLen, expected);
-
-  return { frameType, transferId, payload };
-}
-
-function readSlice(file, start, end) {
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(fr.result);
-    fr.onerror = () => reject(fr.error || new Error('slice read failed'));
-    fr.readAsArrayBuffer(file.slice(start, end));
-  });
-}
-
-export function fmtBytes(n) {
-  if (!Number.isFinite(n)) return '-';
-  if (n < 1024) return `${n.toFixed(0)} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
-}
-
-export function fmtRate(n) {
-  if (!Number.isFinite(n)) return '-';
-  return `${fmtBytes(n)}/s`;
-}
-
-export function fmtEta(sec) {
-  if (!Number.isFinite(sec)) return '∞';
-  const s = Math.max(0, Math.round(sec));
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return m > 0 ? `${m}m ${r}s` : `${r}s`;
 }

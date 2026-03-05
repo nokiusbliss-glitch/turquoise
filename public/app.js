@@ -1,1728 +1,1059 @@
 /**
- * app.js — Turquoise v5
- * UI layer: peers, circles, global mesh, chat, file transfer,
- * walkie, live stream, tools, nick editing, live status bar.
+ * app.js — Turquoise v10
+ *
+ * Changes from v9:
+ *  - "mesh" renamed to "circle" everywhere (CIRCLE_ID = 'circle')
+ *  - "you:" removed — own messages show actual nickname
+ *  - 3 call modes: walkie (live audio) | stream (live video) | memo (record→send)
+ *  - Voice memo via VoiceMemo from tqapps.js → sends as file
+ *  - File transfer: cards always stored in session → always visible on open
+ *  - State export (JSON bundle: identity + messages + peers)
+ *  - Reset dialog offers download before wipe
+ *  - State import from JSON file
+ *  - Games → tqapps.js (TicTacToe, VoiceMemo, AppRegistry)
+ *  - identity.js v3: extractable keys, localStorage fallback
  */
 
-import { loadPeers, savePeer, loadMessages, saveMessage, clearAllData } from './messages.js';
-import { resetIdentity } from './identity.js';
-import { FileTransferEngine, fmtBytes, fmtRate, fmtEta } from './files.js';
-import { TOOL_REGISTRY, getToolById } from './tools-registry.js';
-import { createToolRuntime } from './tools-modules.js';
+import { saveMessage, loadMessages, loadAllMessages, clearMessages, clearAllData, savePeer, loadPeers, restoreMessages, restorePeers } from './messages.js';
+import { resetIdentity, importIdentityData } from './identity.js';
+import { FileTransfer } from './files.js';
+import { TicTacToe, VoiceMemo, REGISTRY } from './tqapps.js';
 
-const CIRCLE_KEY_PREFIX = 'tq-circles:';
-const MESH_SESSION_ID   = 'mesh:global';
-const STATUS_LINGER_MS  = 3500;
+const $ = id => document.getElementById(id);
+const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const fmt = b => { if(!b||b<1)return'0 B'; if(b<1024)return b+' B'; if(b<1048576)return(b/1024).toFixed(1)+' KB'; if(b<1073741824)return(b/1048576).toFixed(1)+' MB'; return(b/1073741824).toFixed(2)+' GB'; };
+const fmtSpd = s => { if(!s||s<1)return'—'; if(s<1024)return s.toFixed(0)+' B/s'; if(s<1048576)return(s/1024).toFixed(1)+' KB/s'; return(s/1048576).toFixed(2)+' MB/s'; };
+const fmtEta = s => { if(!s||s<=0||!isFinite(s))return'—'; return s<60?Math.ceil(s)+'s':Math.floor(s/60)+'m'+Math.ceil(s%60)+'s'; };
+const clock  = () => new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+
+const CIRCLE_ID = 'circle';
 
 export class TurquoiseApp {
   constructor(identity, network) {
-    this.identity = identity;
-    this.network  = network;
+    this.id  = identity;
+    this.net = network;
+    this.peers        = new Map();   // fp → {nick, connected}
+    this.sessions     = new Map();   // sessionId → msg[]
+    this.active       = null;
+    this.unread       = new Map();
+    this.circleBlocked= new Set();
 
-    this.peers   = new Map();
-    this.circles = [];
-    this.currentChat = { kind: 'none', id: null };
+    // 1:1 call: {fp, type:'walkie'|'stream', phase, localStream, remoteStream, muted, camOff, inviteTimer}
+    this.call     = null;
+    // Circle call: {type, phase, localStream, remoteStreams:Map, audioEls:Map, muted, camOff}
+    this.circleCall = null;
 
-    this.pendingFileOffers   = new Map();
-    this.transferViews       = new Map();
-    this.pendingToolInvites  = new Map();
-    this.outgoingToolInvites = new Map();
-    this.toolSessions        = new Map();
+    // File blob URL cache: fileId → {url, name, from}
+    this._fileUrls = new Map();
 
-    this.callState     = null;
-    this.incomingCall  = null;
-    this.walkieRecorder = null;
-    this.walkieChunks  = [];
+    // Voice memo state
+    this._memo = null;
 
-    this.statsTicker    = null;
-    this.prevStats      = new Map();
-    this._statusTimer   = null;
-    this._sigState      = 'disconnected';
-    this._totalUp       = 0;
-    this._totalDown     = 0;
+    // 1:1 audio element
+    this._audioEl = Object.assign(document.createElement('audio'), { autoplay:true, playsInline:true });
+    this._audioEl.style.display = 'none';
+    document.body.appendChild(this._audioEl);
 
-    this.$ = {};
+    this._statsTimer = null;
+    this.games = new Map(); // fp → TicTacToe
+
+    this.ft = new FileTransfer(
+      (fp,msg) => network.sendCtrl(fp,msg),
+      (fp,buf) => network.sendBinary(fp,buf),
+      (fp)     => network.waitForBuffer(fp),
+    );
+    this.ft.onProgress  = (id,pct,dir,fp,stats) => this._onFileProg(id,pct,stats);
+    this.ft.onFileReady = f                      => this._onFileReady(f);
+    this.ft.onError     = (id,msg)               => this._onFileErr(id,msg);
   }
 
-  /* ═══════════════════════════ BOOT ═══════════════════════════ */
-
+  // ── Mount ──────────────────────────────────────────────────────────────────
   async mount() {
-    this._cacheDom();
-    this._bindUI();
-    this._wireNetwork();
+    const nd=$('nick-display'), ni=$('nick-input'), fp=$('full-fp');
+    if(nd) nd.textContent = this.id.nickname;
+    if(ni) ni.value       = this.id.nickname;
+    if(fp) fp.textContent = this.id.fingerprint;
 
-    this._renderNick();
-    this.$fullFp.textContent = this.identity.fingerprint;
-
-    await this._loadStoredPeers();
-    this._loadCircles();
-    this._renderSidebar();
-
-    this.fileEngine = new FileTransferEngine(this.network, {
-      onOffer:       (fp, offer) => this._onFileOffer(fp, offer),
-      onProgress:    (p)         => this._onTransferProgress(p),
-      onComplete:    (done)      => this._onTransferComplete(done),
-      onStateChange: (s)         => this._onTransferStateChange(s),
-      onError:       (err)       => this._onTransferError(err),
-    });
-
-    this._flash('ready', 2000);
-    this._startStatsTicker();
-
-    // First boot: prompt user to set a name
-    if (this.identity.isNewUser) {
-      setTimeout(() => this._editNick(), 600);
-    }
-  }
-
-  /* ═══════════════════════════ DOM ═══════════════════════════ */
-
-  _cacheDom() {
-    const $ = (id) => document.getElementById(id);
-    this.$app          = $('app');
-    this.$sidebar      = $('sidebar');
-    this.$peerList     = $('peer-list');
-    this.$circlesList  = $('circles-list');
-    this.$newCircleBtn = $('new-circle-btn');
-    this.$netLog       = $('net-log');
-
-    this.$nickDisplay  = $('nick-display');
-    this.$nickEditBtn  = $('nick-edit-btn');
-    this.$resetBtn     = $('reset-identity-btn');
-    this.$fullFp       = $('full-fp');
-
-    this.$chatHeader   = $('chat-header');
-    this.$chatTitle    = $('chat-title');
-    this.$chatSubtitle = $('chat-subtitle');
-    this.$messages     = $('messages');
-    this.$msgInput     = $('msg-input');
-    this.$sendBtn      = $('send-btn');
-    this.$statusLive   = $('status-live');
-    this.$statusMsg    = $('status-msg');
-
-    this.$fileBtn   = $('file-btn');
-    this.$plusMenu  = $('plus-menu');
-    this.$fileInput = $('__file-input');
-
-    this.$backBtn      = $('back-btn');
-    this.$walkieBtn    = $('walkie-btn');
-    this.$videoCallBtn = $('video-call-btn');
-    this.$callPanel    = $('call-panel');
-    this.$callIncoming = $('call-incoming');
-
-    this.$modalRoot = $('modal-root');
-  }
-
-  _bindUI() {
-    this.$sendBtn.addEventListener('click', () => this._sendText());
-    this.$msgInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._sendText(); }
-    });
-    // Auto-resize textarea
-    this.$msgInput.addEventListener('input', () => {
-      this.$msgInput.style.height = 'auto';
-      this.$msgInput.style.height = Math.min(this.$msgInput.scrollHeight, window.innerHeight * 0.28) + 'px';
-    });
-
-    this.$fileBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.$plusMenu.classList.toggle('hidden');
-    });
-
-    this.$plusMenu.addEventListener('click', (e) => {
-      const action = e.target?.dataset?.plus;
-      if (!action) return;
-      this.$plusMenu.classList.add('hidden');
-      if (action === 'file')   this.$fileInput.click();
-      if (action === 'tool')   this._openToolPicker();
-      if (action === 'circle') this._openCircleEditor(null);
-    });
-
-    document.addEventListener('click', (e) => {
-      if (!this.$plusMenu.contains(e.target) && e.target !== this.$fileBtn)
-        this.$plusMenu.classList.add('hidden');
-    });
-
-    this.$fileInput.addEventListener('change', (e) => this._onPickFiles(e));
-    this.$newCircleBtn.addEventListener('click', () => this._openCircleEditor(null));
-    this.$backBtn.addEventListener('click', () => this.$sidebar.classList.remove('hidden-mobile'));
-
-    this.$walkieBtn.addEventListener('click', () => this._toggleWalkie());
-    this.$videoCallBtn.addEventListener('click', () => this._startCall('video'));
-
-    this.$messages.addEventListener('click', (e) => this._onMessageActionClick(e));
-
-    // Nick editing
-    this.$nickDisplay.addEventListener('click', () => this._editNick());
-    this.$nickEditBtn.addEventListener('click', () => this._editNick());
-
-    // Reset identity
-    this.$resetBtn.addEventListener('click', () => this._confirmReset());
-  }
-
-  /* ═════════════════════════ NETWORK WIRING ════════════════════ */
-
-  _wireNetwork() {
-    this.network.onPeerConnected = (fp, nick) => {
-      this._upsertPeer(fp, nick || this.network.getPeerNick(fp), true);
-      this._log(`peer up ${short(fp)}`);
-      this._renderSidebar();
-      savePeer({ fingerprint: fp, nickname: nick || null }).catch(() => {});
-      this._updateLiveStats();
-      this.fileEngine?.onPeerReconnected(fp);
-    };
-
-    this.network.onPeerDisconnected = (fp) => {
-      const p = this.peers.get(fp);
-      if (p) p.online = false;
-      this._renderSidebar();
-      this._log(`peer down ${short(fp)}`);
-      this._detachCallPeer(fp);
-      this._updateLiveStats();
-      this.fileEngine?.onPeerDisconnected(fp);
-      this.prevStats.delete(fp);
-    };
-
-    this.network.onMessage   = (fp, msg) => this._onCtrlMessage(fp, msg);
-    this.network.onBinaryChunk = (fp, ab) => this.fileEngine?.handleBinary(fp, ab);
-
-    this.network.onLog = (text, isErr) => {
-      this._log(text, isErr);
-      this._updateLiveStats();
-    };
-
-    this.network.onSignalingConnected = () => {
-      this._sigState = 'connected';
-      this._flash('signaling connected', 2000);
-      this._updateLiveStats();
-    };
-
-    this.network.onSignalingDisconnected = () => {
-      this._sigState = 'disconnected';
-      this._flash('signaling disconnected');
-      this._updateLiveStats();
-    };
-  }
-
-  /* ═══════════════════════ IDENTITY / NICK ════════════════════ */
-
-  _renderNick() {
-    this.$nickDisplay.textContent = this.identity.nickname || short(this.identity.fingerprint);
-  }
-
-  async _editNick() {
-    const current = this.identity.nickname || '';
-    const box = document.createElement('div');
-    box.className = 'modal';
-    box.innerHTML = `
-      <h3>Edit Display Name</h3>
-      <div class="row">
-        <input id="nick-input" type="text" maxlength="32" placeholder="your name…" value="${escapeAttr(current)}" autocomplete="off">
-      </div>
-      <div style="font-size:.62rem;color:var(--tx2);margin-bottom:8px;">
-        Shown to peers. Max 32 chars. Leave blank to use your short ID.
-      </div>
-      <div class="actions">
-        <button id="nick-cancel">cancel</button>
-        <button id="nick-save">save</button>
-      </div>
-    `;
-
-    const save = async () => {
-      const val = box.querySelector('#nick-input').value.trim();
-      try {
-        const saved = await this.identity.saveNickname(val || this.identity.shortId);
-        this.identity.nickname = saved;
-        this._renderNick();
-        // Re-announce to connected peers
-        for (const fp of this.network.getConnectedPeers()) {
-          this.network.sendCtrl(fp, {
-            type: 'hello',
-            fingerprint: this.identity.fingerprint,
-            nick: saved,
-          });
-        }
-        this._flash('name saved');
-      } catch (e) {
-        this._flash('save failed: ' + e.message);
-      }
-      this._closeModal();
-    };
-
-    box.querySelector('#nick-cancel').addEventListener('click', () => this._closeModal());
-    box.querySelector('#nick-save').addEventListener('click', save);
-    box.querySelector('#nick-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') save();
-    });
-
-    this._openModal(box);
-    setTimeout(() => box.querySelector('#nick-input')?.focus(), 50);
-  }
-
-  async _confirmReset() {
-    const box = document.createElement('div');
-    box.className = 'modal';
-    box.innerHTML = `
-      <h3>⚠ Reset Identity</h3>
-      <div style="font-size:.72rem;color:var(--tx0);margin-bottom:10px;line-height:1.6">
-        This will permanently delete:<br>
-        <span style="color:var(--tx1)">· your keypair (fingerprint changes)<br>
-        · your nickname<br>
-        · all message history<br>
-        · all known peers<br>
-        · all circles</span>
-      </div>
-      <div style="font-size:.62rem;color:var(--err);margin-bottom:10px;">This cannot be undone.</div>
-      <div class="actions">
-        <button id="reset-cancel">cancel</button>
-        <button id="reset-confirm" style="border-color:var(--err);color:var(--err);">delete everything</button>
-      </div>
-    `;
-
-    box.querySelector('#reset-cancel').addEventListener('click', () => this._closeModal());
-    box.querySelector('#reset-confirm').addEventListener('click', async () => {
-      this._closeModal();
-      try {
-        clearInterval(this.statsTicker);
-        await resetIdentity();
-        await clearAllData();
-        localStorage.clear();
-        sessionStorage.clear();
-        this._flash('clearing cache…', 0);
-        // Clear all SW caches
-        if ('caches' in window) {
-          const keys = await caches.keys();
-          await Promise.all(keys.map(k => caches.delete(k)));
-        }
-        // Unregister service worker so fresh files load on reload
-        if ('serviceWorker' in navigator) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(regs.map(r => r.unregister()));
-        }
-        this._flash('identity reset — loading fresh…', 0);
-        setTimeout(() => location.reload(true), 600);
-      } catch (e) {
-        this._flash('reset failed: ' + e.message);
-      }
-    });
-
-    this._openModal(box);
-  }
-
-  async _loadStoredPeers() {
     try {
-      const rows = await loadPeers();
-      for (const p of rows) {
-        this.peers.set(p.fingerprint, {
-          fingerprint: p.fingerprint,
-          nick:    p.nickname || p.nick || short(p.fingerprint),
-          online:  false,
-          lastSeen: p.lastSeen || 0,
-        });
-      }
-    } catch {}
-  }
+      const saved = await loadPeers();
+      for (const p of saved) this.peers.set(p.fingerprint, { nick: p.nickname||p.shortId||p.fingerprint.slice(0,8), connected: false });
+    } catch(e) { this._log('peer history: '+e.message, true); }
 
-  _loadCircles() {
-    try {
-      const raw = localStorage.getItem(this._circleStorageKey());
-      const arr = raw ? JSON.parse(raw) : [];
-      this.circles = Array.isArray(arr) ? arr : [];
-    } catch { this.circles = []; }
-  }
+    try { this.sessions.set(CIRCLE_ID, await loadMessages(CIRCLE_ID)); }
+    catch { this.sessions.set(CIRCLE_ID, []); }
 
-  _saveCircles() {
-    try {
-      localStorage.setItem(this._circleStorageKey(), JSON.stringify(this.circles));
-    } catch {}
-  }
+    this._bind();
+    this._wire();
+    await this._openSession(CIRCLE_ID);
 
-  _circleStorageKey() {
-    return `${CIRCLE_KEY_PREFIX}${this.identity.fingerprint}`;
-  }
-
-  /* ═══════════════════════ SIDEBAR RENDER ═════════════════════ */
-
-  _upsertPeer(fp, nick, online) {
-    const prev = this.peers.get(fp);
-    this.peers.set(fp, {
-      fingerprint: fp,
-      nick: nick || prev?.nick || short(fp),
-      online: online ?? prev?.online ?? false,
-      lastSeen: Date.now(),
-    });
-  }
-
-  _renderSidebar() {
-    /* ── Network Mesh (global, always first) ── */
-    this.$peerList.innerHTML = '';
-
-    const meshEl = document.createElement('div');
-    const onlineCount = this.network.getConnectedPeers().length;
-    const isMeshActive = this.currentChat.kind === 'mesh' && this.currentChat.id === 'global';
-    meshEl.className = `peer-item${isMeshActive ? ' active' : ''} mesh-item`;
-    meshEl.innerHTML = `
-      <div class="peer-left">
-        <span class="dot ${onlineCount > 0 ? 'on' : ''}"></span>
-        <span class="peer-name">Network Mesh</span>
-      </div>
-      <span class="mini">${onlineCount} online</span>
-    `;
-    meshEl.addEventListener('click', () => this._openMeshChat());
-    this.$peerList.appendChild(meshEl);
-
-    /* ── Individual peers ── */
-    const peers = [...this.peers.values()]
-      .sort((a, b) => Number(b.online) - Number(a.online) || a.nick.localeCompare(b.nick));
-
-    for (const p of peers) {
-      const isActive    = this.currentChat.kind === 'peer' && this.currentChat.id === p.fingerprint;
-      const inCall      = this.callState && (this.callState.targets.has(p.fingerprint) || this.callState.accepted.has(p.fingerprint));
-      const el = document.createElement('div');
-      el.className = `peer-item${isActive ? ' active' : ''}`;
-      el.innerHTML = `
-        <div class="peer-left">
-          <span class="dot ${p.online ? 'on' : ''}"></span>
-          <span class="peer-name">${escapeHtml(p.nick)}</span>
-          ${inCall ? '<span class="call-badge">● live</span>' : ''}
-        </div>
-        <span class="mini">${short(p.fingerprint)}</span>
-      `;
-      el.addEventListener('click', () => this._openPeerChat(p.fingerprint));
-      this.$peerList.appendChild(el);
-    }
-
-    /* ── Circles ── */
-    this.$circlesList.innerHTML = '';
-    for (const c of this.circles) {
-      const isActive = this.currentChat.kind === 'circle' && this.currentChat.id === c.id;
-      const onlineMembers = (c.members || []).filter(fp => this.network.isReady(fp)).length;
-      const el = document.createElement('div');
-      el.className = `circle-item${isActive ? ' active' : ''}`;
-      el.innerHTML = `
-        <div class="peer-left">
-          <span class="dot ${onlineMembers > 0 ? 'on' : ''}"></span>
-          <span class="peer-name">${escapeHtml(c.name)}</span>
-        </div>
-        <div>
-          <span class="mini">${onlineMembers}/${(c.members || []).length}</span>
-          <button class="circle-edit" title="edit" data-circle-edit="${c.id}">✎</button>
-        </div>
-      `;
-      el.addEventListener('click', (e) => {
-        if (e.target?.dataset?.circleEdit) return;
-        this._openCircleChat(c.id);
-      });
-      el.querySelector('[data-circle-edit]')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCircleEditor(c.id);
-      });
-      this.$circlesList.appendChild(el);
-    }
-  }
-
-  /* ═══════════════════════ CHAT SESSIONS ══════════════════════ */
-
-  async _openMeshChat() {
-    this.currentChat = { kind: 'mesh', id: 'global' };
-    const count = this.network.getConnectedPeers().length;
-    this.$chatTitle.textContent = 'Network Mesh';
-    this.$chatSubtitle.textContent = `everyone · ${count} online`;
-    this.$sidebar.classList.add('hidden-mobile');
-    this._renderSidebar();
-    await this._renderChatMessages();
-    this._setActionEnabled(count > 0);
-  }
-
-  async _openPeerChat(fp) {
-    this.currentChat = { kind: 'peer', id: fp };
-    this.$chatTitle.textContent = this.peers.get(fp)?.nick || short(fp);
-    this.$chatSubtitle.textContent = `${short(fp)} · direct`;
-    this.$sidebar.classList.add('hidden-mobile');
-    this._renderSidebar();
-    await this._renderChatMessages();
-    this._setActionEnabled(this.network.isReady(fp));
-  }
-
-  async _openCircleChat(circleId) {
-    const c = this.circles.find(x => x.id === circleId);
-    if (!c) return;
-    this.currentChat = { kind: 'circle', id: circleId };
-    this.$chatTitle.textContent = c.name;
-    this.$chatSubtitle.textContent = `${c.members.length} members`;
-    this.$sidebar.classList.add('hidden-mobile');
-    this._renderSidebar();
-    await this._renderChatMessages();
-    this._setActionEnabled(true);
-  }
-
-  _setActionEnabled(ok) {
-    this.$walkieBtn.disabled    = !ok;
-    this.$videoCallBtn.disabled = !ok;
-    this.$sendBtn.disabled      = !ok;
-  }
-
-  _sessionId() {
-    if (this.currentChat.kind === 'peer')   return `peer:${this.currentChat.id}`;
-    if (this.currentChat.kind === 'circle') return `circle:${this.currentChat.id}`;
-    if (this.currentChat.kind === 'mesh')   return MESH_SESSION_ID;
-    return null;
-  }
-
-  _targetPeers() {
-    if (this.currentChat.kind === 'peer') return [this.currentChat.id].filter(fp => this.network.isReady(fp));
-
-    if (this.currentChat.kind === 'circle') {
-      const c = this.circles.find(x => x.id === this.currentChat.id);
-      if (!c) return [];
-      return c.members.filter(fp => this.network.isReady(fp));
-    }
-
-    if (this.currentChat.kind === 'mesh') {
-      return this.network.getConnectedPeers();
-    }
-
-    return [];
-  }
-
-  /* ═══════════════════════════ CHAT ═══════════════════════════ */
-
-  async _sendText() {
-    const sessionId = this._sessionId();
-    if (!sessionId) return;
-
-    const text = this.$msgInput.value.trim();
-    if (!text) return;
-    this.$msgInput.value = '';
-    this.$msgInput.style.height = '';
-
-    const ts = Date.now();
-    const localMsg = {
-      id: crypto.randomUUID(),
-      sessionId,
-      kind: 'text',
-      from: this.identity.fingerprint,
-      text,
-      ts,
-      mine: true,
-    };
-
-    await this._saveAndRender(localMsg, true);
-
-    const targets = this._targetPeers();
-
-    if (this.currentChat.kind === 'peer') {
-      if (targets[0]) this.network.sendCtrl(targets[0], { type: 'chat', text, ts, sessionId });
-      return;
-    }
-
-    if (this.currentChat.kind === 'circle') {
-      const circle = this.circles.find(c => c.id === this.currentChat.id);
-      for (const fp of targets) {
-        this.network.sendCtrl(fp, {
-          type: 'circle-chat', circleId: circle.id,
-          circleName: circle.name, members: circle.members, text, ts,
-        });
-      }
-      return;
-    }
-
-    if (this.currentChat.kind === 'mesh') {
-      for (const fp of targets) {
-        this.network.sendCtrl(fp, { type: 'mesh-chat', text, ts });
-      }
-    }
-  }
-
-  async _onCtrlMessage(fp, msg) {
-    if (!msg?.type) return;
-
-    if (this.fileEngine?.handleCtrl(fp, msg)) return;
-
-    if (msg.type === 'hello') {
-      this._upsertPeer(fp, msg.nick, true);
-      this._renderSidebar();
-      return;
-    }
-
-    if (msg.type === 'chat') {
-      const sid = msg.sessionId || `peer:${fp}`;
-      await this._saveAndRender({
-        id: crypto.randomUUID(), sessionId: `peer:${fp}`,
-        kind: 'text', from: fp, text: msg.text || '', ts: msg.ts || Date.now(), mine: false,
-      }, this._sessionId() === `peer:${fp}`);
-      return;
-    }
-
-    if (msg.type === 'circle-chat') {
-      this._upsertRemoteCircle(msg.circleId, msg.circleName, msg.members || []);
-      const sid = `circle:${msg.circleId}`;
-      await this._saveAndRender({
-        id: crypto.randomUUID(), sessionId: sid,
-        kind: 'text', from: fp, text: msg.text || '', ts: msg.ts || Date.now(), mine: false,
-      }, this._sessionId() === sid);
-      return;
-    }
-
-    if (msg.type === 'mesh-chat') {
-      await this._saveAndRender({
-        id: crypto.randomUUID(), sessionId: MESH_SESSION_ID,
-        kind: 'text', from: fp, text: msg.text || '', ts: msg.ts || Date.now(), mine: false,
-      }, this._sessionId() === MESH_SESSION_ID);
-      return;
-    }
-
-    if (msg.type === 'tool-invite') {
-      this.pendingToolInvites.set(msg.inviteId, { ...msg, from: fp });
-      this._appendInviteMessage(fp, msg);
-      return;
-    }
-
-    if (msg.type === 'tool-invite-response') { this._onToolInviteResponse(fp, msg); return; }
-    if (msg.type === 'tool-start')           { this._openToolSession({ toolSessionId: msg.toolSessionId, toolId: msg.toolId, participants: msg.participants || [], chatContext: msg.chatContext }); return; }
-
-    if (msg.type === 'tool-action') {
-      const sess = this.toolSessions.get(msg.toolSessionId);
-      if (sess?.runtime) sess.runtime.apply(msg.action);
-      return;
-    }
-
-    if (msg.type === 'call-invite')  { this._showIncomingCall(fp, msg);        return; }
-    if (msg.type === 'call-accept')  { await this._onCallAccepted(fp, msg);    return; }
-    if (msg.type === 'call-decline') { this._onCallDeclined(fp, msg);          return; }
-    if (msg.type === 'call-end')     { this._detachCallPeer(fp);               return; }
-    if (msg.type === 'offer-reneg')  { await this._answerRenegOffer(fp, msg);  return; }
-  }
-
-  /* ═══════════════════════ MESSAGE DOM ════════════════════════ */
-
-  async _renderChatMessages() {
-    const sessionId = this._sessionId();
-    this.$messages.innerHTML = '';
-    if (!sessionId) {
-      this.$messages.innerHTML = '<div class="sys-msg">select a peer, circle, or the mesh</div>';
-      return;
-    }
-
-    let rows = [];
-    try { rows = await loadMessages(sessionId); } catch {}
-
-    if (!rows.length) {
-      this.$messages.innerHTML = '<div class="sys-msg">no messages yet — say hello</div>';
+    if (this.id.isNewUser) {
+      this._status('tap your name to set it', 'info');
+      setTimeout(() => this._triggerNickEdit(), 500);
     } else {
-      for (const m of rows) this._appendMessageToDOM(m);
-    }
-
-    // Mount any tool sessions that belong to this chat
-    for (const [, sess] of this.toolSessions) {
-      if (this._sessionIdFromContext(sess.chatContext) === sessionId && !sess.mounted) {
-        this._mountToolSessionToDOM(sess);
-      }
-    }
-
-    this._scrollToBottom();
-  }
-
-  async _saveAndRender(msg, renderNow) {
-    try { await saveMessage(msg); } catch {}
-    if (renderNow) {
-      this._appendMessageToDOM(msg);
-      this._scrollToBottom();
+      this._status('connecting…', 'info');
     }
   }
 
-  _appendMessageToDOM(m) {
-    const row = document.createElement('div');
-    row.className = `msg-row${m.mine ? ' mine' : ''}`;
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = `${m.mine ? 'you' : this._peerNick(m.from)}  ·  ${fmtTime(m.ts)}`;
-    bubble.appendChild(meta);
-
-    const body = document.createElement('div');
-    body.className = 'msg-text';
-    if (m.kind === 'system') body.style.color = '#7ab8b2';
-    body.textContent = m.text || (m.kind !== 'text' && m.kind !== 'system' ? `[${m.kind}]` : '');
-    bubble.appendChild(body);
-
-    row.appendChild(bubble);
-    this.$messages.appendChild(row);
-  }
-
-  _appendInviteMessage(fromFp, invite) {
-    const sessionId = invite.chatContext?.kind === 'circle'
-      ? `circle:${invite.chatContext.id}`
-      : invite.chatContext?.kind === 'mesh'
-      ? MESH_SESSION_ID
-      : `peer:${fromFp}`;
-
-    const toolTitle = getToolById(invite.toolId)?.title || invite.toolId;
-
-    if (this._sessionId() === sessionId) {
-      const row = document.createElement('div');
-      row.className = 'msg-row';
-      row.innerHTML = `
-        <div class="msg-bubble">
-          <div class="msg-meta">${escapeHtml(this._peerNick(fromFp))} · invite</div>
-          <div class="msg-text">${escapeHtml(this._peerNick(fromFp))} invited you to <b>${escapeHtml(toolTitle)}</b></div>
-          <div class="msg-actions">
-            <button data-invite-accept="${invite.inviteId}">accept</button>
-            <button data-invite-reject="${invite.inviteId}">decline</button>
-          </div>
-        </div>
-      `;
-      this.$messages.appendChild(row);
-      this._scrollToBottom();
-    }
-
-    this._saveAndRender({
-      id: crypto.randomUUID(), sessionId,
-      kind: 'system', from: fromFp,
-      text: `${this._peerNick(fromFp)} invited you to ${toolTitle}`,
-      ts: Date.now(), mine: false,
-    }, false);
-  }
-
-  _onMessageActionClick(e) {
-    const inviteAccept = e.target?.dataset?.inviteAccept;
-    const inviteReject = e.target?.dataset?.inviteReject;
-    const fileAccept   = e.target?.dataset?.fileAccept;
-    const fileReject   = e.target?.dataset?.fileReject;
-    const fsTarget     = e.target?.dataset?.fullscreen;
-    const dlTarget     = e.target?.dataset?.download;
-
-    if (inviteAccept)  { this._respondToolInvite(inviteAccept, true);  return; }
-    if (inviteReject)  { this._respondToolInvite(inviteReject, false); return; }
-
-    if (fileAccept) {
-      const row = this.pendingFileOffers.get(fileAccept);
-      if (row) this.fileEngine.acceptOffer(row.fp, fileAccept);
-      this.pendingFileOffers.delete(fileAccept);
-      e.target.closest('.msg-row')?.remove();
-      return;
-    }
-
-    if (fileReject) {
-      const row = this.pendingFileOffers.get(fileReject);
-      if (row) this.fileEngine.rejectOffer(row.fp, fileReject);
-      this.pendingFileOffers.delete(fileReject);
-      e.target.closest('.msg-row')?.remove();
-      return;
-    }
-
-    if (fsTarget) {
-      document.getElementById(fsTarget)?.requestFullscreen?.();
-      return;
-    }
-
-    if (dlTarget) {
-      const view = this.transferViews.get(dlTarget);
-      if (view?.downloadUrl) {
-        const a = document.createElement('a');
-        a.href     = view.downloadUrl;
-        a.download = view.fileName || 'download';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }
-    }
-  }
-
-  /* ═════════════════════════ FILE TRANSFER ═══════════════════ */
-
-  async _onPickFiles(e) {
-    const files = [...(e.target.files || [])];
-    e.target.value = '';
-    if (!files.length) return;
-
-    const targets   = this._targetPeers();
-    const sessionId = this._sessionId();
-    if (!targets.length || !sessionId) {
-      this._flash('select a peer / circle first');
-      return;
-    }
-
-    for (const file of files) {
-      for (const fp of targets) {
-        await this.fileEngine.sendFile(fp, file, { sessionId });
-        this._flash(`offering ${file.name} to ${this._peerNick(fp)}…`);
-      }
-    }
-  }
-
-  _onFileOffer(fp, offer) {
-    this.pendingFileOffers.set(offer.id, { fp, offer });
-
-    const isAudio = (offer.mime || '').startsWith('audio/');
-    const label   = isAudio ? '🎙 voice note' : '📎 file request';
-
-    const row = document.createElement('div');
-    row.className = 'msg-row';
-    row.innerHTML = `
-      <div class="msg-bubble">
-        <div class="msg-meta">${escapeHtml(this._peerNick(fp))} · ${label}</div>
-        <div class="msg-text file-name">${escapeHtml(offer.name)}</div>
-        <div class="msg-text file-size">${fmtBytes(offer.size)}</div>
-        <div class="msg-actions">
-          <button data-file-accept="${offer.id}">accept</button>
-          <button data-file-reject="${offer.id}">decline</button>
-        </div>
-      </div>
-    `;
-
-    if (this._sessionId() === (offer.sessionId || `peer:${fp}`)) {
-      this.$messages.appendChild(row);
-      this._scrollToBottom();
-    }
-
-    this._saveAndRender({
-      id: crypto.randomUUID(), sessionId: offer.sessionId || `peer:${fp}`,
-      kind: 'system', from: fp,
-      text: `${this._peerNick(fp)} wants to send ${offer.name} (${fmtBytes(offer.size)})`,
-      ts: Date.now(), mine: false,
-    }, false);
-  }
-
-  _onTransferProgress(p) {
-    let view = this.transferViews.get(p.transferId);
-    if (!view) {
-      view = this._createTransferView(p);
-      this.transferViews.set(p.transferId, view);
-    }
-    if (view.fill) view.fill.style.width = `${p.pct.toFixed(2)}%`;
-    if (view.nerd) {
-      const dir = p.direction === 'send' ? '↑' : '↓';
-      view.nerd.textContent =
-        `${dir} ${fmtBytes(p.bytes)} / ${fmtBytes(p.total)}  ·  ${fmtRate(p.speed)}  ·  ETA ${fmtEta(p.etaSec)}`;
-    }
-    if (view.statusEl) { view.statusEl.textContent = 'transferring'; view.statusEl.className = 'tx-status tx-transferring'; }
-    if (view.retryBtn) view.retryBtn.style.display = 'none';
-  }
-
-  _createTransferView(p) {
-    const isAudio  = (p.mime || '').startsWith('audio/');
-    const isImage  = (p.mime || '').startsWith('image/');
-    const icon     = isAudio ? '🎙' : isImage ? '🖼' : '📁';
-    const sender   = p.direction === 'send' ? 'you' : escapeHtml(this._peerNick(p.fp));
-    const dirLabel = p.direction === 'send' ? '↑ sending' : '↓ receiving';
-
-    const row = document.createElement('div');
-    row.className = `msg-row${p.direction === 'send' ? ' mine' : ''}`;
-    row.innerHTML = `
-      <div class="msg-bubble">
-        <div class="msg-meta">${sender} · ${icon} ${escapeHtml(p.fileName)}</div>
-        <div class="transfer">
-          <div class="tx-status-row">
-            <span class="tx-status tx-transferring">${dirLabel}</span>
-            <span class="tx-size">${fmtBytes(p.total)}</span>
-          </div>
-          <div class="transfer-bar"><div class="transfer-fill"></div></div>
-          <div class="transfer-nerd"></div>
-          <div class="transfer-actions"></div>
-          <div class="transfer-media"></div>
-        </div>
-      </div>
-    `;
-
-    const fill    = row.querySelector('.transfer-fill');
-    const nerd    = row.querySelector('.transfer-nerd');
-    const media   = row.querySelector('.transfer-media');
-    const actions = row.querySelector('.transfer-actions');
-    const statusEl = row.querySelector('.tx-status');
-
-    // Dismiss button — always visible, removes card after confirmation
-    const dismissBtn = document.createElement('button');
-    dismissBtn.textContent = '✕ dismiss';
-    dismissBtn.className   = 'tx-btn tx-dismiss';
-    dismissBtn.addEventListener('click', () => {
-      this.fileEngine?.dismiss(p.transferId);
-      this.transferViews.delete(p.transferId);
-      row.remove();
-    });
-    actions.appendChild(dismissBtn);
-
-    // Retry button — only shown on fail/paused (send direction)
-    let retryBtn = null;
-    if (p.direction === 'send') {
-      retryBtn = document.createElement('button');
-      retryBtn.textContent = '↺ retry';
-      retryBtn.className   = 'tx-btn tx-retry';
-      retryBtn.style.display = 'none';
-      retryBtn.addEventListener('click', () => {
-        this.fileEngine?.retryOutgoing(p.transferId);
-      });
-      actions.appendChild(retryBtn);
-    }
-
-    const sessionId = p.sessionId || `peer:${p.fp}`;
-    if (this._sessionId() === sessionId) {
-      this.$messages.appendChild(row);
-      this._scrollToBottom();
-    }
-
-    return { row, fill, nerd, media, actions, statusEl, retryBtn, sessionId, fileName: p.fileName, mime: p.mime };
-  }
-
-  _onTransferComplete(done) {
-    const view = this.transferViews.get(done.transferId);
-    if (view) {
-      if (view.fill) view.fill.style.width = '100%';
-      if (view.nerd) view.nerd.textContent = `✓ ${done.direction === 'send' ? 'sent' : 'received'}  ·  ${fmtBytes(done.size)}`;
-
-      if (done.direction === 'recv' && done.blob && view.media) {
-        const url        = URL.createObjectURL(done.blob);
-        view.downloadUrl = url;
-
-        const isAudio = done.blob.type?.startsWith('audio/');
-        const isImage = done.blob.type?.startsWith('image/');
-
-        if (isAudio) {
-          const audio = document.createElement('audio');
-          audio.controls = true;
-          audio.src      = url;
-          audio.style.cssText = 'width:100%;margin-top:6px;accent-color:var(--tq);';
-          view.media.appendChild(audio);
-        } else if (isImage) {
-          const img = document.createElement('img');
-          img.src   = url;
-          img.style.cssText = 'max-width:100%;max-height:240px;margin-top:6px;border:1px solid var(--tq-low);';
-          view.media.appendChild(img);
-        }
-
-        // Download button for non-auto-rendered types or as fallback
-        const dlBtn = document.createElement('button');
-        dlBtn.dataset.download  = done.transferId;
-        dlBtn.style.cssText = 'border:1px solid var(--tq-mid);background:transparent;color:var(--tq);cursor:pointer;padding:3px 10px;font-size:.65rem;margin-top:6px;';
-        dlBtn.textContent = `↓ save ${done.fileName}`;
-        view.media.appendChild(dlBtn);
-
-        // Don't auto-revoke — user might download later
-        this.transferViews.get(done.transferId) && (this.transferViews.get(done.transferId).downloadUrl = url);
-      }
-    }
-
-    this._saveAndRender({
-      id: crypto.randomUUID(), sessionId: done.sessionId || `peer:${done.fp}`,
-      kind: 'system',
-      from: done.direction === 'send' ? this.identity.fingerprint : done.fp,
-      text: `${done.direction === 'send' ? 'sent' : 'received'} ${done.fileName} (${fmtBytes(done.size)})`,
-      ts: Date.now(), mine: done.direction === 'send',
-    }, false);
-  }
-
-  _onTransferStateChange(s) {
-    let view = this.transferViews.get(s.transferId);
-    if (!view) {
-      view = this._createTransferView(s);
-      this.transferViews.set(s.transferId, view);
-    }
-
-    const { state, failReason, pct } = s;
-
-    if (view.fill) view.fill.style.width = `${(pct||0).toFixed(2)}%`;
-
-    if (view.statusEl) {
-      const labels = {
-        offering:     'waiting for accept…',
-        transferring: s.direction === 'send' ? '↑ sending' : '↓ receiving',
-        retrying:     '↺ reconnecting…',
-        paused:       '⏸ paused — waiting for peer',
-        complete:     s.direction === 'send' ? '✓ sent' : '✓ received',
-        failed:       `✗ ${failReason || 'failed'}`,
+  // ── Bind UI ────────────────────────────────────────────────────────────────
+  _bind() {
+    // Nick edit
+    const row=$('identity-row'), disp=$('nick-display'), inp=$('nick-input');
+    if (row && disp && inp) {
+      row.addEventListener('click', () => this._triggerNickEdit());
+      const save = async () => {
+        if (!inp.classList.contains('visible')) return;
+        const saved = await this.id.saveNickname(inp.value).catch(() => this.id.nickname);
+        this.id.nickname = saved;
+        disp.textContent = saved; inp.value = saved;
+        disp.classList.remove('hidden'); inp.classList.remove('visible');
+        this.net.getConnectedPeers().forEach(fp => this.net.sendCtrl(fp, {type:'nick-update', nick:saved}));
+        this._status('name: '+saved, 'ok', 3000);
       };
-      view.statusEl.textContent = labels[state] || state;
-      view.statusEl.className   = `tx-status tx-${state}`;
+      inp.addEventListener('keydown', e => { if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();save();} });
+      inp.addEventListener('blur', save);
     }
 
-    if (view.nerd && (state === 'complete' || state === 'failed' || state === 'paused')) {
-      view.nerd.textContent = state === 'complete'
-        ? `${fmtBytes(s.total)} — done`
-        : state === 'paused'
-        ? `${fmtBytes(s.bytes)} of ${fmtBytes(s.total)} transferred`
-        : failReason || '';
+    // Send message
+    const mi=$('msg-input'), sb=$('send-btn');
+    if (mi) {
+      mi.addEventListener('keydown', e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();this._send();} });
+      mi.addEventListener('input', () => { mi.style.height='auto'; mi.style.height=Math.min(mi.scrollHeight,128)+'px'; });
     }
+    sb?.addEventListener('click', () => this._send());
 
-    // Show retry button for send failures / pauses
-    if (view.retryBtn) {
-      view.retryBtn.style.display = (state === 'failed' || state === 'paused') ? '' : 'none';
-    }
+    // + menu
+    $('plus-btn')?.addEventListener('click', e => { e.stopPropagation(); this._togglePlusMenu(); });
+    document.addEventListener('click', () => this._closePlusMenu());
 
-    // On complete, dim dismiss button label
-    if (state === 'complete' && view.actions) {
-      const db = view.actions.querySelector('.tx-dismiss');
-      if (db) db.textContent = '✕ clear';
-    }
-  }
+    // File input
+    $('__file-input')?.addEventListener('change', e => {
+      Array.from(e.target.files||[]).forEach(f => this._queueFile(f));
+      e.target.value = '';
+    });
 
-  _onTransferError(err) {
-    this._flash(`transfer ${err.direction === 'send' ? '↑' : '↓'} ${err.fileName}: ${err.error}`);
-    const view = this.transferViews.get(err.transferId);
-    if (view?.statusEl) {
-      view.statusEl.textContent = `✗ ${err.error}`;
-      view.statusEl.className   = 'tx-status tx-failed';
-    }
-  }
+    // Import state input
+    $('__import-input')?.addEventListener('change', e => {
+      const f = e.target.files?.[0]; if(f) this._importState(f);
+      e.target.value = '';
+    });
 
-  /* ═══════════════════════════ TOOLS ══════════════════════════ */
-
-  _openToolPicker() {
-    const targets = this._targetPeers();
-    if (!targets.length) { this._flash('no active targets in current chat'); return; }
-
-    const box = document.createElement('div');
-    box.className = 'modal';
-    box.innerHTML = `<h3>Start game / tool</h3>`;
-
-    for (const tool of TOOL_REGISTRY) {
-      const it = document.createElement('div');
-      it.className = 'tool-item';
-      it.innerHTML = `
-        <div style="font-size:.74rem;color:var(--tx0)">${escapeHtml(tool.title)}</div>
-        <div style="font-size:.62rem;color:var(--tx1);margin-top:2px">${escapeHtml(tool.description)}</div>
-        <div style="font-size:.58rem;color:var(--tx2);margin-top:4px">
-          ${tool.minPeers}–${tool.maxPeers} peers · ${tool.implemented ? '<span style="color:var(--ok)">ready</span>' : '<span style="color:var(--tx2)">placeholder</span>'}
-        </div>
-      `;
-      it.addEventListener('click', () => { this._closeModal(); this._inviteTool(tool.id); });
-      box.appendChild(it);
-    }
-
-    this._openModal(box);
-  }
-
-  _inviteTool(toolId) {
-    const tool = getToolById(toolId);
-    if (!tool) return;
-
-    const targets = this._targetPeers();
-    if (targets.length < tool.minPeers - 1) {
-      this._flash(`need ≥${tool.minPeers} peers for ${tool.title}`);
-      return;
-    }
-
-    const inviteId   = crypto.randomUUID();
-    const chatContext = { ...this.currentChat };
-    const track = { toolId, chatContext, accepted: new Set(), declined: new Set(), started: false };
-    this.outgoingToolInvites.set(inviteId, track);
-
-    for (const fp of targets) {
-      this.network.sendCtrl(fp, {
-        type: 'tool-invite', inviteId, toolId,
-        fromNick: this.identity.nickname, chatContext, ts: Date.now(),
+    // Drag/drop
+    const ca = $('chat-area');
+    if (ca) {
+      ca.addEventListener('dragover', e => { e.preventDefault(); ca.classList.add('drag-over'); });
+      ca.addEventListener('dragleave', () => ca.classList.remove('drag-over'));
+      ca.addEventListener('drop', e => {
+        e.preventDefault(); ca.classList.remove('drag-over');
+        if (!this.active) { this._sys('select a session first', true); return; }
+        Array.from(e.dataTransfer?.files||[]).forEach(f => this._queueFile(f));
       });
     }
 
-    this._saveAndRender({
-      id: crypto.randomUUID(), sessionId: this._sessionId(),
-      kind: 'system', from: this.identity.fingerprint,
-      text: `invited ${targets.length} peer(s) to ${tool.title}`,
-      ts: Date.now(), mine: true,
-    }, true);
+    $('back-btn')?.addEventListener('click', () => this._showSidebar());
+    $('reset-btn')?.addEventListener('click', () => this._confirmReset());
   }
 
-  _respondToolInvite(inviteId, accept) {
-    const invite = this.pendingToolInvites.get(inviteId);
-    if (!invite) return;
-    this.pendingToolInvites.delete(inviteId);
-
-    this.network.sendCtrl(invite.from, { type: 'tool-invite-response', inviteId, accept, ts: Date.now() });
-
-    const sid = this._sessionId()
-      || (invite.chatContext?.kind === 'circle' ? `circle:${invite.chatContext.id}`
-       : invite.chatContext?.kind === 'mesh'   ? MESH_SESSION_ID
-       : `peer:${invite.from}`);
-
-    this._saveAndRender({
-      id: crypto.randomUUID(), sessionId: sid, kind: 'system',
-      from: this.identity.fingerprint,
-      text: `${accept ? 'accepted' : 'declined'} ${getToolById(invite.toolId)?.title || invite.toolId}`,
-      ts: Date.now(), mine: true,
-    }, true);
+  _triggerNickEdit() {
+    const d=$('nick-display'), i=$('nick-input');
+    if(!d||!i||i.classList.contains('visible'))return;
+    d.classList.add('hidden'); i.classList.add('visible'); i.focus(); i.select();
   }
 
-  _onToolInviteResponse(fp, msg) {
-    const track = this.outgoingToolInvites.get(msg.inviteId);
-    if (!track || track.started) return;
-
-    if (msg.accept) track.accepted.add(fp);
-    else            track.declined.add(fp);
-
-    const tool = getToolById(track.toolId);
-    if (!tool) return;
-
-    if (track.accepted.size >= tool.minPeers - 1) {
-      track.started = true;
-      const participants  = [this.identity.fingerprint, ...track.accepted].slice(0, tool.maxPeers);
-      const toolSessionId = `tool:${crypto.randomUUID()}`;
-
-      for (const peer of participants) {
-        if (peer === this.identity.fingerprint) continue;
-        this.network.sendCtrl(peer, {
-          type: 'tool-start', toolSessionId, toolId: track.toolId,
-          participants, chatContext: track.chatContext, ts: Date.now(),
-        });
-      }
-
-      this._openToolSession({ toolSessionId, toolId: track.toolId, participants, chatContext: track.chatContext });
-    }
+  _togglePlusMenu() {
+    const m=$('plus-menu'); if(!m)return;
+    const showing = m.classList.contains('visible');
+    this._closePlusMenu();
+    if (!showing) { this._buildPlusMenu(); m.classList.add('visible'); }
   }
+  _closePlusMenu() { $('plus-menu')?.classList.remove('visible'); }
 
-  /**
-   * Always creates the runtime so game state is maintained regardless of
-   * which chat the user is currently viewing. DOM mounting happens
-   * separately in _mountToolSessionToDOM.
-   */
-  _openToolSession(session) {
-    if (this.toolSessions.has(session.toolSessionId)) return;
+  _buildPlusMenu() {
+    const menu = $('plus-menu'); if(!menu)return;
+    const fp   = this.active;
+    const isCircle   = fp === CIRCLE_ID;
+    const peerOnline = !isCircle && this.net.isReady(fp||'');
+    const anyOnline  = this.net.getConnectedPeers().length > 0;
 
-    const runtime = createToolRuntime(session.toolId, {
-      selfId:      this.identity.fingerprint,
-      participants: session.participants,
-      broadcast:   (action) => this._broadcastToolAction(session, action),
+    menu.innerHTML = `
+      <div class="pm-item" id="pmi-file">📎  file</div>
+      <div class="pm-item" id="pmi-memo">🎤  voice memo</div>
+      <div class="pm-sep"></div>
+      <div class="pm-label">◈ apps</div>
+      <div class="pm-item${!peerOnline||isCircle?' pm-dim':''}" id="pmi-ttt">⊞  tic tac toe</div>
+      <div class="pm-sep"></div>
+      <div class="pm-label">session</div>
+      <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
+      <div class="pm-item" id="pmi-import">⬆  import state</div>`;
+
+    $('pmi-file')?.addEventListener('click', () => {
+      this._closePlusMenu();
+      if (isCircle ? !anyOnline : !peerOnline) { this._sys('no peers available', true); return; }
+      $('__file-input')?.click();
     });
+    $('pmi-memo')?.addEventListener('click', () => {
+      this._closePlusMenu();
+      if (isCircle ? !anyOnline : !peerOnline) { this._sys('no peers available', true); return; }
+      this._startVoiceMemo();
+    });
+    $('pmi-ttt')?.addEventListener('click', () => {
+      if (!isCircle && peerOnline) this._startGame(fp, 'ttt');
+      else this._sys(isCircle ? 'games are 1:1 only' : 'peer offline', true);
+    });
+    $('pmi-export')?.addEventListener('click', () => { this._closePlusMenu(); this._exportState(); });
+    $('pmi-import')?.addEventListener('click', () => { this._closePlusMenu(); $('__import-input')?.click(); });
+  }
 
-    const sess = { ...session, runtime, mounted: false, row: null };
-    this.toolSessions.set(session.toolSessionId, sess);
+  // ── Wire network ───────────────────────────────────────────────────────────
+  _wire() {
+    const n = this.net;
+    n.onPeerConnected         = (fp,nick) => this._onConnect(fp,nick);
+    n.onPeerDisconnected      = (fp)      => this._onDisconnect(fp);
+    n.onMessage               = (fp,msg)  => { try{ this._dispatch(fp,msg); }catch(e){ this._log('msg:'+e.message,true); } };
+    n.onBinaryChunk           = (fp,buf)  => { try{ this.ft.handleBinary(fp,buf); }catch(e){ this._log('bin:'+e.message,true); } };
+    n.onLog                   = (t,e)     => this._log(t,e);
+    n.onSignalingConnected    = ()        => this._status('signaling ✓ — searching…', 'ok', 4000);
+    n.onSignalingDisconnected = ()        => this._status('signaling lost — reconnecting…', 'warn');
+  }
 
-    const targetSid = this._sessionIdFromContext(session.chatContext);
-    if (this._sessionId() === targetSid) {
-      this._mountToolSessionToDOM(sess);
+  _onConnect(fp, nick) {
+    const ex = this.peers.get(fp);
+    const name = nick||ex?.nick||fp.slice(0,8);
+    this.peers.set(fp, { nick:name, connected:true });
+    savePeer({ fingerprint:fp, shortId:fp.slice(0,8), nickname:name }).catch(()=>{});
+    if (!this.sessions.has(fp)) {
+      loadMessages(fp).then(msgs => { this.sessions.set(fp,msgs); this._renderPeers(); if(this.active===fp)this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
+    } else this._renderPeers();
+    if (this.active===fp) this._renderHeader();
+    this._status(name+' joined', 'ok', 3000);
+  }
+
+  _onDisconnect(fp) {
+    const p = this.peers.get(fp); const name = p?.nick||fp.slice(0,8);
+    if (p) p.connected = false;
+    if (this.call?.fp===fp)   this._endCallLocal(false);
+    if (this.circleCall)      this._removeCirclePeer(fp);
+    this.games.get(fp)?.destroy?.(); this.games.delete(fp);
+    this._renderPeers(); if(this.active===fp)this._renderHeader();
+    this._status(name+' disconnected', 'warn', 5000);
+  }
+
+  // ── Dispatch ───────────────────────────────────────────────────────────────
+  _dispatch(fp, msg) {
+    const { type } = msg;
+    if (type==='hello') {
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();} return;
+    }
+    if (type==='nick-update') {
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});} return;
+    }
+    if (type==='chat') { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
+
+    // ── File ──────────────────────────────────────────────────────────────
+    if (type==='file-meta') {
+      const sessionId = msg.circle ? CIRCLE_ID : fp;
+      const nick = this.peers.get(fp)?.nick||fp.slice(0,8);
+      const fileMsg = {
+        id: msg.fileId+'_recv', sessionId, from:fp, fromNick:nick, own:false,
+        type:'file', fileId:msg.fileId, name:msg.name||'file', size:msg.size||0,
+        mimeType:msg.mimeType, ts:Date.now(), status:'receiving',
+      };
+      if (!this.sessions.has(sessionId)) this.sessions.set(sessionId,[]);
+      this.sessions.get(sessionId).push(fileMsg);
+      if (this.active===sessionId) this._appendFileCard(fileMsg);
+      else { this.unread.set(sessionId,(this.unread.get(sessionId)||0)+1); this._renderPeers(); }
+      this.ft.handleCtrl(fp,msg);
+      this._status('receiving '+msg.name+' from '+nick+'…','info');
+      return;
+    }
+    if (type==='file-end'||type==='file-abort') { this.ft.handleCtrl(fp,msg); return; }
+
+    // ── Calls ─────────────────────────────────────────────────────────────
+    if (type==='call-invite')  { msg.circle?this._onCircleCallInvite(fp,msg):this._onCallInvite(fp,msg); return; }
+    if (type==='call-accept')  { msg.circle?this._onCircleCallAccepted(fp):this._onCallAccepted(fp); return; }
+    if (type==='call-decline') { msg.circle?this._onCircleCallDeclined(fp):this._onCallDeclined(fp); return; }
+    if (type==='offer-reneg')  { msg.circle?this._onCircleOfferReneg(fp,msg):this._onOfferReneg(fp,msg); return; }
+    if (type==='call-end') {
+      if (this.circleCall) this._removeCirclePeer(fp);
+      if (this.call?.fp===fp) { this._endCallLocal(false); this._status('call ended','info',3000); }
+      this._hideCallIncoming(); return;
+    }
+    if (type==='permission-denied') {
+      const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
+      this._status(nick+': '+( msg.media||'mic')+' permission denied', 'err', 8000);
+      if (this.call?.fp===fp) this._endCallLocal(false);
+      this._hideCallIncoming(); return;
+    }
+
+    // ── Games ─────────────────────────────────────────────────────────────
+    if (type==='game') { this._dispatchGame(fp,msg); return; }
+  }
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
+  _recv1to1(fp, ev) {
+    if (!ev.text) return;
+    const msg = { id:ev.id||crypto.randomUUID(), sessionId:fp, from:fp, fromNick:ev.nick||this.peers.get(fp)?.nick||fp.slice(0,8), text:String(ev.text), ts:ev.ts||Date.now(), type:'text', own:false };
+    if (!this.sessions.has(fp)) this.sessions.set(fp,[]);
+    this.sessions.get(fp).push(msg); saveMessage(msg).catch(()=>{});
+    if (this.active!==fp) { this.unread.set(fp,(this.unread.get(fp)||0)+1); this._renderPeers(); }
+    else this._appendMsg(msg);
+  }
+
+  _recvCircle(fp, ev) {
+    if (!ev.text||this.circleBlocked.has(fp)) return;
+    const msg = { id:ev.id||crypto.randomUUID(), sessionId:CIRCLE_ID, from:fp, fromNick:ev.nick||this.peers.get(fp)?.nick||fp.slice(0,8), text:String(ev.text), ts:ev.ts||Date.now(), type:'text', own:false };
+    if (!this.sessions.has(CIRCLE_ID)) this.sessions.set(CIRCLE_ID,[]);
+    this.sessions.get(CIRCLE_ID).push(msg); saveMessage(msg).catch(()=>{});
+    if (this.active!==CIRCLE_ID) { this.unread.set(CIRCLE_ID,(this.unread.get(CIRCLE_ID)||0)+1); this._renderPeers(); }
+    else this._appendMsg(msg);
+  }
+
+  _send() {
+    const inp=$('msg-input'); const text=inp?.value?.trim();
+    if (!text||!this.active) return;
+    const id=crypto.randomUUID(), ts=Date.now();
+    if (this.active===CIRCLE_ID) {
+      const fps = this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp));
+      if (!fps.length) { this._sys('no peers in circle', true); return; }
+      fps.forEach(fp => this.net.sendCtrl(fp, {type:'chat',circle:true,id,nick:this.id.nickname,text,ts}));
+      const msg = { id, sessionId:CIRCLE_ID, from:this.id.fingerprint, fromNick:this.id.nickname, text, ts, type:'text', own:true };
+      if (!this.sessions.has(CIRCLE_ID)) this.sessions.set(CIRCLE_ID,[]);
+      this.sessions.get(CIRCLE_ID).push(msg); saveMessage(msg).catch(()=>{}); this._appendMsg(msg); this._renderPeers();
     } else {
-      this._flash(`tool session ready: ${getToolById(session.toolId)?.title || session.toolId}`);
+      const fp = this.active;
+      if (!this.net.isReady(fp)) { this._sys('peer offline — not sent', true); return; }
+      if (!this.net.sendCtrl(fp, {type:'chat',id,nick:this.id.nickname,text,ts})) { this._sys('send failed',true); return; }
+      const msg = { id, sessionId:fp, from:this.id.fingerprint, fromNick:this.id.nickname, text, ts, type:'text', own:true };
+      if (!this.sessions.has(fp)) this.sessions.set(fp,[]);
+      this.sessions.get(fp).push(msg); saveMessage(msg).catch(()=>{}); this._appendMsg(msg); this._renderPeers();
     }
+    if (inp) { inp.value=''; inp.style.height='auto'; }
   }
 
-  _mountToolSessionToDOM(sess) {
-    if (sess.mounted) return;
-    sess.mounted = true;
-
-    const row = document.createElement('div');
-    row.className = 'msg-row';
-    row.innerHTML = `
-      <div class="msg-bubble" style="width:100%;max-width:100%">
-        <div class="msg-meta">tool · ${escapeHtml(getToolById(sess.toolId)?.title || sess.toolId)}</div>
-        <div class="tool-wrap">
-          <div class="tool-title">${escapeHtml(getToolById(sess.toolId)?.title || sess.toolId)}</div>
-          <div class="tool-host"></div>
-        </div>
-      </div>
-    `;
-
-    const host = row.querySelector('.tool-host');
-    sess.runtime.mount(host);
-    sess.row = row;
-    this.$messages.appendChild(row);
-    this._scrollToBottom();
+  // ── Files ──────────────────────────────────────────────────────────────────
+  _queueFile(file) {
+    if (!file||!this.active) return;
+    const sessionId = this.active;
+    const isCircle  = sessionId === CIRCLE_ID;
+    const peers = isCircle
+      ? this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp))
+      : (this.net.isReady(sessionId) ? [sessionId] : []);
+    if (!peers.length) { this._sys(isCircle?'no peers in circle':'peer offline', true); return; }
+    const fileId = crypto.randomUUID();
+    const fileMsg = {
+      id:fileId+'_send', sessionId, from:this.id.fingerprint, fromNick:this.id.nickname,
+      type:'file', fileId, name:file.name, size:file.size, mimeType:file.type||'application/octet-stream',
+      ts:Date.now(), own:true, status:'sending',
+    };
+    if (!this.sessions.has(sessionId)) this.sessions.set(sessionId,[]);
+    this.sessions.get(sessionId).push(fileMsg);
+    this._appendFileCard(fileMsg);
+    this._status('sending '+file.name+'…','info');
+    peers.forEach(fp => this.ft.send(file, fp, fileId));
   }
 
-  _broadcastToolAction(session, action) {
-    const envelope = { type: 'tool-action', toolSessionId: session.toolSessionId, action, ts: Date.now() };
-    for (const fp of session.participants) {
-      if (fp === this.identity.fingerprint) continue;
-      this.network.sendCtrl(fp, envelope);
-    }
-    // Do NOT re-apply locally — the caller (createTicTacToeRuntime) already applied via onLocalMove
+  _onFileProg(fileId, pct, stats) {
+    document.querySelectorAll(`[data-fcid="${fileId}"] .prog-fill`).forEach(el => {
+      el.style.width = (pct*100).toFixed(1)+'%';
+    });
+    document.querySelectorAll(`[data-fcid="${fileId}"] .file-stats`).forEach(el => {
+      if (!stats) return;
+      const p = (pct*100).toFixed(1);
+      el.innerHTML = `<span class="fs-pct">${p}%</span><span class="fs-sep">·</span><span class="fs-bytes">${fmt(stats.bytesTransferred)} / ${fmt(stats.totalBytes)}</span><span class="fs-sep">·</span><span class="fs-spd">${fmtSpd(stats.speedBps)}</span><span class="fs-sep">·</span><span class="fs-eta">${fmtEta(stats.etaSec)}</span>`;
+    });
   }
 
-  /* ═══════════════════════════ WALKIE ════════════════════════ */
-
-  async _toggleWalkie() {
-    if (this.walkieRecorder) {
-      this.walkieRecorder.stop();
-      return;
+  _onFileReady(f) {
+    this._fileUrls.set(f.fileId, f);
+    for (const msgs of this.sessions.values()) {
+      const m = msgs.find(m => m.fileId===f.fileId); if(m) m.status='done';
     }
-
-    const targets   = this._targetPeers();
-    const sessionId = this._sessionId();
-    if (!targets.length || !sessionId) { this._flash('select a peer / circle first'); return; }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      this.walkieChunks    = [];
-      this.$walkieBtn.classList.add('recording');
-
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus' : 'audio/webm';
-
-      this.walkieRecorder = new MediaRecorder(stream, { mimeType });
-
-      this.walkieRecorder.ondataavailable = (ev) => {
-        if (ev.data?.size) this.walkieChunks.push(ev.data);
-      };
-
-      this.walkieRecorder.onstop = async () => {
-        this.$walkieBtn.classList.remove('recording');
-        const blob = new Blob(this.walkieChunks, { type: mimeType });
-        const file = new File([blob], `voice-${Date.now()}.webm`, { type: mimeType });
-
-        for (const fp of targets) {
-          await this.fileEngine.sendFile(fp, file, { sessionId });
+    const cards = document.querySelectorAll(`[data-fcid="${f.fileId}"]`);
+    cards.forEach(card => {
+      card.querySelector('.prog-track')?.remove();
+      card.querySelector('.file-stats')?.remove();
+      if (!card.querySelector('.dl-btn')) {
+        const mime = f.mimeType||'';
+        // Audio files: show inline player
+        if (mime.startsWith('audio/')) {
+          const au = document.createElement('audio');
+          au.controls=true; au.src=f.url; au.style.cssText='max-width:100%;margin-top:4px;height:32px';
+          card.appendChild(au);
+        } else {
+          const a = document.createElement('a');
+          a.className='dl-btn'; a.href=f.url; a.download=f.name||'file';
+          a.textContent='↓ save'; card.appendChild(a);
         }
-
-        stream.getTracks().forEach(t => t.stop());
-        this.walkieRecorder = null;
-        this.walkieChunks   = [];
-        this._flash('voice note sent');
-      };
-
-      this.walkieRecorder.start();
-      this._flash('recording… tap again to send');
-    } catch (e) {
-      this.$walkieBtn.classList.remove('recording');
-      this._flash(`walkie error: ${e.message}`);
+        // Always add a download link for audio too
+        if (mime.startsWith('audio/')) {
+          const a = document.createElement('a');
+          a.className='dl-btn'; a.href=f.url; a.download=f.name||'memo.webm';
+          a.style.marginTop='4px'; a.textContent='↓ save'; card.appendChild(a);
+        }
+      }
+    });
+    if (!cards.length) {
+      const nick = this.peers.get(f.from)?.nick||f.from?.slice(0,8)||'?';
+      this._status(f.name+' from '+nick+' — open chat to download','ok',8000);
+    } else {
+      this._status(f.name+' received','ok',4000);
     }
   }
 
-  /* ═══════════════════════════ CALLS ════════════════════════ */
-
-  async _startCall(mode) {
-    const targets = this._targetPeers();
-    if (!targets.length) { this._flash('no active peers in this chat'); return; }
-    if (this.callState)  { this._flash('already in a call'); return; }
-
-    // Initialise call state immediately so panel shows "calling…"
-    this.callState = {
-      id:          `call:${crypto.randomUUID()}`,
-      mode,
-      targets:     new Set(targets),
-      accepted:    new Set(),
-      localStream: null,
-      remote:      new Map(),
-      calling:     true,  // outgoing, not yet accepted
-    };
-
-    // Render calling panel immediately (shows local preview + calling overlay)
-    try {
-      this.callState.localStream = await this.network.getLocalStream(mode === 'video');
-    } catch (e) {
-      this.callState = null;
-      this._flash(`media error: ${e.message}`);
-      return;
+  _onFileErr(fileId, errMsg) {
+    for (const msgs of this.sessions.values()) {
+      const m=msgs.find(m=>m.fileId===fileId); if(m){m.status='error';m.error=errMsg;}
     }
-
-    this._renderCallPanel();
-
-    for (const fp of targets) {
-      this.network.sendCtrl(fp, {
-        type: 'call-invite', callId: this.callState.id, mode,
-        chatContext: this.currentChat, ts: Date.now(),
-      });
-    }
-
-    this._flash(`calling ${targets.length} peer(s)…`);
+    document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card => {
+      card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove();
+      const d=document.createElement('div'); d.className='file-err'; d.textContent='⚠ '+errMsg; card.appendChild(d);
+    });
+    this._status('file error: '+errMsg,'err',5000);
   }
 
-  _showIncomingCall(fp, msg) {
-    this.incomingCall = { from: fp, ...msg };
-
-    this.$callIncoming.innerHTML = `
-      <div class="ci-card">
-        <div class="ci-title">incoming ${escapeHtml(msg.mode || 'stream')} call</div>
-        <div class="ci-name">${escapeHtml(this._peerNick(fp))}</div>
-        <div class="ci-btns">
-          <button class="ci-accept" id="ci-accept">accept</button>
-          <button class="ci-decline" id="ci-decline">decline</button>
-        </div>
-      </div>
-    `;
-    this.$callIncoming.classList.add('visible');
-
-    // Single-shot listeners prevent double-accept
-    const acceptBtn  = this.$callIncoming.querySelector('#ci-accept');
-    const declineBtn = this.$callIncoming.querySelector('#ci-decline');
-
-    const cleanup = () => {
-      acceptBtn.disabled  = true;
-      declineBtn.disabled = true;
-      this.$callIncoming.classList.remove('visible');
-    };
-
-    acceptBtn.addEventListener('click', async () => {
-      cleanup();
-      await this._acceptIncomingCall();
-    }, { once: true });
-
-    declineBtn.addEventListener('click', () => {
-      cleanup();
-      this.network.sendCtrl(fp, { type: 'call-decline', callId: msg.callId, ts: Date.now() });
-      this.incomingCall = null;
-    }, { once: true });
+  // ── Voice Memo ─────────────────────────────────────────────────────────────
+  _startVoiceMemo() {
+    const panel = $('memo-panel'); if(!panel)return;
+    if (this._memo) { this._memo.cancel(); this._memo=null; }
+    panel.classList.add('visible');
+    const memo = new VoiceMemo(
+      (file) => { // onFile
+        panel.classList.remove('visible'); panel.innerHTML='';
+        this._memo=null;
+        this._queueFile(file);
+        this._status('voice memo sent','ok',3000);
+      },
+      () => { // onCancel
+        panel.classList.remove('visible'); panel.innerHTML='';
+        this._memo=null;
+      }
+    );
+    this._memo=memo; memo.start(panel);
   }
 
-  async _acceptIncomingCall() {
-    if (!this.incomingCall) return;
-    const inc = this.incomingCall;
-    this.incomingCall = null;
-
-    if (this.callState) {
-      // Already in a call, auto-decline
-      this.network.sendCtrl(inc.from, { type: 'call-decline', callId: inc.callId, ts: Date.now() });
-      return;
-    }
-
-    this.callState = {
-      id:       inc.callId,
-      mode:     inc.mode || 'video',
-      targets:  new Set([inc.from]),
-      accepted: new Set([inc.from]),
-      localStream: null,
-      remote:   new Map(),
-      calling:  false,
-    };
-
-    try {
-      this.callState.localStream = await this.network.getLocalStream(inc.mode === 'video');
-      this.network.sendCtrl(inc.from, { type: 'call-accept', callId: inc.callId, mode: inc.mode, ts: Date.now() });
-      this._attachCallPeer(inc.from);
-      this._renderCallPanel();
-      this._flash(`connecting to ${this._peerNick(inc.from)}…`);
-    } catch (e) {
-      this.network.sendCtrl(inc.from, { type: 'call-decline', callId: inc.callId, ts: Date.now() });
-      this.callState = null;
-      this._flash(`call failed: ${e.message}`);
-    }
+  // ── 1:1 Call ──────────────────────────────────────────────────────────────
+  async _startCall(fp, callType) {
+    if (!this.net.isReady(fp)) { this._sys('peer offline',true); return; }
+    if (this.call)             { this._sys('already in a call',true); return; }
+    if (this.circleCall?.phase==='active') { this._sys('end circle call first',true); return; }
+    const peerName=this.peers.get(fp)?.nick||fp.slice(0,8), video=callType==='stream';
+    this._status('getting '+(video?'camera/mic':'mic')+'…','info');
+    let s; try { s=await this.net.getLocalStream(video); } catch(e){ return this._handleMediaError(e,fp); }
+    this.call = { fp, type:callType, phase:'inviting', localStream:s, remoteStream:null, muted:false, camOff:false,
+      inviteTimer: setTimeout(()=>this._onCallTimeout(fp),45000) };
+    this.net.sendCtrl(fp, {type:'call-invite',callType,nick:this.id.nickname});
+    this._status(callType+' — calling '+peerName+'…','info');
+    this._renderHeader(); this._renderCallPanel();
   }
 
-  async _onCallAccepted(fp, msg) {
-    if (!this.callState || this.callState.id !== msg.callId) return;
+  _onCallInvite(fp,msg) {
+    if (this.call&&this.call.fp!==fp) { this.net.sendCtrl(fp,{type:'call-decline'}); return; }
+    if (this.circleCall?.phase==='active') { this.net.sendCtrl(fp,{type:'call-decline'}); return; }
+    this.call = { fp, type:msg.callType==='stream'?'stream':'walkie', phase:'ringing', localStream:null, remoteStream:null, muted:false, camOff:false };
+    this._showCallIncoming(fp, msg.callType||'walkie', msg.nick, false);
+  }
 
-    this.callState.accepted.add(fp);
-    this.callState.calling = false;
-
-    try {
-      await this.network.offerWithStream(fp, this.callState.localStream);
-      this._attachCallPeer(fp);
-      this._renderCallPanel();
-      this._flash(`call connected: ${this._peerNick(fp)}`);
-    } catch (e) {
-      this._flash(`offer failed: ${e.message}`);
-    }
+  _onCallAccepted(fp) {
+    if (!this.call||this.call.fp!==fp||this.call.phase!=='inviting') return;
+    clearTimeout(this.call.inviteTimer); this.call.phase='connecting';
+    this._status(this.call.type+' — connecting…','info');
+    this.net.offerWithStream(fp, this.call.localStream, false)
+      .then(()=>this._attachRemote1to1(fp))
+      .catch(e=>{this._status('call setup failed: '+e.message,'err',5000);this._endCallLocal(true);});
   }
 
   _onCallDeclined(fp) {
-    this._flash(`${this._peerNick(fp)} declined`);
-    if (!this.callState) return;
-    this.callState.targets.delete(fp);
-    // If no one accepted and no one left to accept, cancel call
-    if (this.callState.accepted.size === 0 && this.callState.targets.size === 0) {
-      this._endCallLocalOnly();
-    } else {
-      this._renderCallPanel();
+    if (!this.call||this.call.fp!==fp) return;
+    clearTimeout(this.call.inviteTimer);
+    this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null;
+    this._renderCallPanel(); this._renderHeader();
+    this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' declined','warn',5000);
+  }
+
+  _onCallTimeout(fp) {
+    if (!this.call||this.call.fp!==fp) return;
+    this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null;
+    this._renderCallPanel(); this._renderHeader();
+    this._status('no answer — timed out','warn',5000);
+  }
+
+  async _acceptCall(fp) {
+    if (!this.call||this.call.fp!==fp||this.call.phase!=='ringing') return;
+    this._hideCallIncoming();
+    const video=this.call.type==='stream';
+    let s; try { s=await this.net.getLocalStream(video); }
+    catch(e) { this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this.call=null; return this._handleMediaError(e,fp); }
+    this.call.localStream=s; this.call.phase='connecting';
+    this.net.sendCtrl(fp,{type:'call-accept'}); // no circle flag — plain 1:1
+    this._status(this.call.type+' — waiting for '+( this.peers.get(fp)?.nick||fp.slice(0,8))+'…','info');
+    await this._openSession(fp); this._renderCallPanel();
+  }
+
+  _declineCall(fp) {
+    this._hideCallIncoming();
+    if (this.call?.fp===fp) { this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null; }
+    this.net.sendCtrl(fp,{type:'call-decline'}); this._renderCallPanel();
+  }
+
+  _onOfferReneg(fp, msg) {
+    if (this.call?.fp===fp && (this.call.phase==='connecting'||this.call.phase==='ringing')) {
+      if (!this.call.localStream) { this.call.inviteSdp=msg.sdp; return; }
+      this.net.answerWithStream(fp,msg.sdp,this.call.localStream)
+        .then(()=>this._attachRemote1to1(fp))
+        .catch(e=>{this._status('call answer failed: '+e.message,'err',5000);this._endCallLocal(true);});
     }
   }
 
-  async _answerRenegOffer(fp, msg) {
-    const mode = msg.callType === 'stream' ? 'video' : 'audio';
-
-    if (!this.callState) {
-      this.callState = {
-        id:          `call:${crypto.randomUUID()}`,
-        mode,
-        targets:     new Set([fp]),
-        accepted:    new Set([fp]),
-        localStream: null,
-        remote:      new Map(),
-        calling:     false,
-      };
-    }
-
-    try {
-      if (!this.callState.localStream) {
-        this.callState.localStream = await this.network.getLocalStream(mode === 'video');
+  _attachRemote1to1(fp) {
+    this.net.setRemoteStreamHandler(fp, stream => {
+      if (!stream) return;
+      this._audioEl.srcObject=stream;
+      if (typeof this._audioEl.setSinkId==='function') this._audioEl.setSinkId('').catch(()=>{});
+      this._audioEl.play().catch(()=>{});
+      if (this.call?.fp===fp) {
+        this.call.remoteStream=stream; this.call.phase='active';
+        this._renderCallPanel(); this._renderHeader();
+        this._startStatsPolling(fp);
+        this._status(this.call.type+' on · '+(this.peers.get(fp)?.nick||fp.slice(0,8)),'ok');
       }
-      await this.network.answerWithStream(fp, msg.sdp, this.callState.localStream);
-      this._attachCallPeer(fp);
-      this._renderCallPanel();
-    } catch (e) {
-      this._flash(`answer failed: ${e.message}`);
-    }
-  }
-
-  _attachCallPeer(fp) {
-    this.network.setRemoteStreamHandler(fp, (stream) => {
-      if (!this.callState) return;
-      this.callState.remote.set(fp, stream);
-      this._renderCallPanel();
     });
   }
 
-  _detachCallPeer(fp) {
-    if (!this.callState) return;
-    this.callState.remote.delete(fp);
-    this.callState.targets.delete(fp);
-    this.callState.accepted.delete(fp);
-    this.prevStats.delete(fp);
-
-    if (this.callState.targets.size === 0 && this.callState.remote.size === 0) {
-      this._endCallLocalOnly();
-      return;
-    }
-    this._renderCallPanel();
-    this._renderSidebar();
+  async _endCallLocal(sendEnd=true) {
+    if (!this.call)return;
+    const fp=this.call.fp;
+    clearTimeout(this.call.inviteTimer);
+    this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null;
+    this._stopStatsPolling();
+    if (sendEnd) await this.net.stopMedia(fp).catch(()=>{});
+    this._audioEl.srcObject=null; this._renderCallPanel(); this._renderHeader();
   }
 
-  async _endCall() {
-    if (!this.callState) return;
-    const peers = new Set([...this.callState.targets, ...this.callState.accepted]);
-    for (const fp of peers) {
-      this.network.sendCtrl(fp, { type: 'call-end', callId: this.callState.id, ts: Date.now() });
-      await this.network.stopMedia(fp).catch(() => {});
-    }
-    this._endCallLocalOnly();
+  // ── Circle Call ────────────────────────────────────────────────────────────
+  async _startCircleCall(callType) {
+    if (this.call) { this._sys('end 1:1 call first',true); return; }
+    if (this.circleCall?.phase==='active') { this._endCircleCall(); return; }
+    const fps = this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp));
+    if (!fps.length) { this._sys('no peers in circle',true); return; }
+    const video=callType==='stream';
+    this._status('getting '+(video?'camera/mic':'mic')+' for circle…','info');
+    let s; try{ s=await this.net.getLocalStream(video); }catch(e){ return this._handleMediaError(e,null); }
+    this.circleCall = { type:callType, phase:'connecting', localStream:s, remoteStreams:new Map(), audioEls:new Map(), muted:false, camOff:false };
+    fps.forEach(fp => {
+      this.net.sendCtrl(fp, {type:'call-invite',callType,nick:this.id.nickname,circle:true});
+      this._attachCircleRemote(fp);
+    });
+    this._status('circle '+callType+' — inviting '+fps.length+' peer'+(fps.length>1?'s':'')+'…','info');
+    this._renderCircleCallPanel(); this._renderHeader();
   }
 
-  _endCallLocalOnly() {
-    if (this.callState?.localStream) {
-      this.callState.localStream.getTracks().forEach(t => t.stop());
+  _onCircleCallInvite(fp,msg) {
+    if (this.call) { this.net.sendCtrl(fp,{type:'call-decline',circle:true}); return; }
+    const callType=msg.callType==='stream'?'stream':'walkie';
+    if (!this.circleCall) {
+      this.circleCall={type:callType,phase:'ringing',localStream:null,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false};
     }
-    this.callState = null;
-    this.$callPanel.classList.remove('active');
-    this.$callPanel.innerHTML = '';
-    this._flash('call ended');
-    this._renderSidebar();
-    this._updateLiveStats();
+    const nick=msg.nick||this.peers.get(fp)?.nick||fp.slice(0,8);
+    this._showCallIncoming(fp,callType,nick,true);
   }
 
-  /* ════════════════════════ CALL PANEL ════════════════════════ */
+  async _acceptCircleCall(fp) {
+    if (!this.circleCall) return;
+    this._hideCallIncoming();
+    const video=this.circleCall.type==='stream';
+    let s;
+    if (this.circleCall.localStream) { s=this.circleCall.localStream; }
+    else {
+      try { s=await this.net.getLocalStream(video); }
+      catch(e) { this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); return this._handleMediaError(e,null); }
+      this.circleCall.localStream=s;
+    }
+    this.circleCall.phase='active';
+    this.net.sendCtrl(fp, {type:'call-accept',circle:true});
+    this._attachCircleRemote(fp);
+    this._renderCircleCallPanel(); this._renderHeader();
+    this._status('circle '+this.circleCall.type+' active','ok');
+  }
 
+  _declineCircleCall(fp) {
+    this._hideCallIncoming();
+    this.net.sendCtrl(fp,{type:'call-decline',circle:true});
+    if (this.circleCall?.remoteStreams.size===0&&this.circleCall?.phase!=='active') {
+      this.circleCall=null; this._renderCircleCallPanel();
+    }
+  }
+
+  // Initiator: peer accepted → send offer
+  _onCircleCallAccepted(fp) {
+    if (!this.circleCall?.localStream) { this._log('circle accept but no stream',true); return; }
+    this.circleCall.phase='active';
+    this.net.offerWithStream(fp, this.circleCall.localStream, true)
+      .then(() => this._attachCircleRemote(fp))
+      .catch(e => this._log('circle offer failed: '+e.message,true));
+    this._renderCircleCallPanel(); this._renderHeader();
+  }
+
+  _onCircleCallDeclined(fp) {
+    const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
+    this._status(nick+' declined circle call','warn',3000);
+  }
+
+  // Receiver: incoming offer-reneg for circle call (msg.circle===true)
+  _onCircleOfferReneg(fp, msg) {
+    if (!this.circleCall?.localStream) { this._log('circle offer-reneg but no stream',true); return; }
+    this.net.answerWithStream(fp, msg.sdp, this.circleCall.localStream)
+      .then(()=>this._attachCircleRemote(fp))
+      .catch(e=>this._status('circle answer failed: '+e.message,'err',5000));
+    this.circleCall.phase='active';
+    this._renderCircleCallPanel(); this._renderHeader();
+  }
+
+  _attachCircleRemote(fp) {
+    this.net.setRemoteStreamHandler(fp, stream => {
+      if (!stream||!this.circleCall)return;
+      this.circleCall.remoteStreams.set(fp,stream);
+      let el=this.circleCall.audioEls.get(fp);
+      if (!el) { el=Object.assign(document.createElement('audio'),{autoplay:true,playsInline:true}); el.style.display='none'; document.body.appendChild(el); this.circleCall.audioEls.set(fp,el); }
+      el.srcObject=stream;
+      if (typeof el.setSinkId==='function') el.setSinkId('').catch(()=>{});
+      el.play().catch(()=>{});
+      this.circleCall.phase='active';
+      this._renderCircleCallPanel(); this._renderHeader();
+    });
+  }
+
+  _removeCirclePeer(fp) {
+    if (!this.circleCall)return;
+    this.circleCall.remoteStreams.delete(fp);
+    const el=this.circleCall.audioEls.get(fp);
+    if (el) { el.srcObject=null; try{el.remove();}catch{} this.circleCall.audioEls.delete(fp); }
+    if (this.circleCall.remoteStreams.size===0) this._endCircleCall();
+    else this._renderCircleCallPanel();
+  }
+
+  _endCircleCall() {
+    if (!this.circleCall)return;
+    this.circleCall.localStream?.getTracks().forEach(t=>t.stop());
+    this.circleCall.audioEls.forEach(el=>{try{el.srcObject=null;el.remove();}catch{}});
+    this.net.getConnectedPeers().forEach(fp=>{this.net.sendCtrl(fp,{type:'call-end'});this.net.stopMedia(fp).catch(()=>{});});
+    this.circleCall=null;
+    this._renderCircleCallPanel(); this._renderHeader();
+    this._status('circle call ended','info',3000);
+  }
+
+  // ── Games ──────────────────────────────────────────────────────────────────
+  _startGame(fp, type) {
+    if (!this.net.isReady(fp)) { this._sys('peer offline',true); return; }
+    this._closePlusMenu();
+    if (type==='ttt') {
+      this.games.get(fp)?.destroy?.();
+      const g = new TicTacToe(fp, this.id.fingerprint, msg=>this.net.sendCtrl(fp,{type:'game',...msg}), ()=>{this.games.delete(fp);this._renderGamePanel(fp);});
+      this.games.set(fp,g);
+      this.net.sendCtrl(fp,{type:'game',gameType:'ttt',action:'invite',nick:this.id.nickname});
+      this._openSession(fp); this._renderGamePanel(fp);
+      this._status('tic tac toe invite sent','info');
+    }
+  }
+
+  _dispatchGame(fp, msg) {
+    if (msg.gameType==='ttt') {
+      if (msg.action==='invite') {
+        const g=new TicTacToe(fp,this.id.fingerprint,m=>this.net.sendCtrl(fp,{type:'game',...m}),()=>{this.games.delete(fp);this._renderGamePanel(fp);});
+        this.games.set(fp,g); g.handleMsg(msg);
+        this._openSession(fp); this._renderGamePanel(fp);
+        this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' challenges you to tic tac toe!','info',5000);
+        return;
+      }
+      const g=this.games.get(fp); if(g){ g.handleMsg(msg); if(this.active===fp)this._renderGamePanel(fp); }
+    }
+  }
+
+  _renderGamePanel(fp) {
+    const panel=$('game-panel'); if(!panel)return;
+    const game=this.games.get(fp);
+    if (!game||this.active!==fp) { panel.innerHTML=''; panel.classList.remove('visible'); return; }
+    panel.classList.add('visible'); game.render(panel);
+  }
+
+  // ── Call incoming overlay ──────────────────────────────────────────────────
+  _showCallIncoming(fp,callType,nick,isCircle=false) {
+    const panel=$('call-incoming'); if(!panel)return;
+    const name=nick||this.peers.get(fp)?.nick||fp.slice(0,8);
+    const icon=callType==='stream'?'📷':'🎙';
+    panel.innerHTML=`
+      <div class="ci-icon">${icon}</div>
+      ${isCircle?'<div class="ci-circle">◯ circle</div>':''}
+      <div class="ci-label">${callType}</div>
+      <div class="ci-name">${esc(name)}</div>
+      <div class="ci-sub">${isCircle?'invited you to circle '+callType:'wants to '+callType+' with you'}</div>
+      <div class="ci-btns">
+        <div class="ci-btn accept" id="ci-acc">accept</div>
+        <div class="ci-btn decline" id="ci-dec">decline</div>
+      </div>`;
+    panel.classList.add('visible');
+    $('ci-acc')?.addEventListener('click',()=>isCircle?this._acceptCircleCall(fp):this._acceptCall(fp));
+    $('ci-dec')?.addEventListener('click',()=>isCircle?this._declineCircleCall(fp):this._declineCall(fp));
+  }
+  _hideCallIncoming() { $('call-incoming')?.classList.remove('visible'); }
+
+  // ── Render: 1:1 call panel ─────────────────────────────────────────────────
   _renderCallPanel() {
-    if (!this.callState) {
-      this.$callPanel.classList.remove('active');
-      this.$callPanel.innerHTML = '';
+    const panel=$('call-panel'); if(!panel)return;
+    if (!this.call) { panel.innerHTML=''; panel.classList.remove('visible'); return; }
+    const {fp,type,phase,muted,camOff,localStream,remoteStream}=this.call;
+    const peer=this.peers.get(fp)?.nick||fp.slice(0,8);
+    panel.classList.add('visible');
+    if (phase==='inviting'||phase==='connecting') {
+      const lbl=phase==='inviting'?'calling '+esc(peer)+'…':'connecting…';
+      panel.innerHTML=`<div class="call-waiting"><div class="call-type-badge">${type==='stream'?'📷':'🎙'} ${type}</div><div class="call-state">${lbl}</div><div class="call-controls"><div class="call-btn end" id="cb-end">✕ cancel</div></div></div>`;
+      $('cb-end')?.addEventListener('click',()=>{this.net.sendCtrl(fp,{type:'call-end'});this._endCallLocal(false);this._status('cancelled','info',2000);});
       return;
     }
-
-    this.$callPanel.classList.add('active');
-
-    const wrap = document.createElement('div');
-
-    // ── top bar ──
-    const top = document.createElement('div');
-    top.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;';
-
-    const statusText = this.callState.calling
-      ? `calling ${[...this.callState.targets].map(fp => this._peerNick(fp)).join(', ')}…`
-      : `${this.callState.mode === 'video' ? 'stream' : 'audio'} · ${this.callState.remote.size} connected`;
-
-    top.innerHTML = `
-      <div style="font-size:.65rem;letter-spacing:.14em;color:var(--tq);text-transform:uppercase">
-        ${escapeHtml(statusText)}
-      </div>
-      <button id="call-end-btn" style="border:1px solid var(--err);background:transparent;color:var(--err);cursor:pointer;padding:4px 10px;font-size:.65rem;">
-        end
-      </button>
-    `;
-    wrap.appendChild(top);
-
-    // ── calling overlay (waiting for answer) ──
-    if (this.callState.calling && this.callState.accepted.size === 0) {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'padding:10px 0;font-size:.68rem;color:var(--tx1);letter-spacing:.08em;display:flex;align-items:center;gap:8px;';
-      overlay.innerHTML = `<span class="calling-pulse"></span> ringing…`;
-      wrap.appendChild(overlay);
-    }
-
-    // ── video grid ──
-    const grid = document.createElement('div');
-    grid.className = 'call-grid';
-    wrap.appendChild(grid);
-
-    if (this.callState.localStream) {
-      grid.appendChild(this._makeCallTile({
-        fp: this.identity.fingerprint, label: 'you',
-        stream: this.callState.localStream, muted: true,
-      }));
-    }
-
-    for (const [fp, stream] of this.callState.remote.entries()) {
-      grid.appendChild(this._makeCallTile({
-        fp, label: this._peerNick(fp), stream, muted: false,
-      }));
-    }
-
-    // ── calling peers without stream yet ──
-    if (!this.callState.calling) {
-      for (const fp of this.callState.accepted) {
-        if (!this.callState.remote.has(fp)) {
-          const ph = document.createElement('div');
-          ph.className = 'call-tile';
-          ph.style.display = 'flex;align-items:center;justify-content:center;';
-          ph.innerHTML = `
-            <div class="call-label">${escapeHtml(this._peerNick(fp))}</div>
-            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:.65rem;color:var(--tx2);">connecting…</div>
-          `;
-          grid.appendChild(ph);
-        }
-      }
-    }
-
-    this.$callPanel.innerHTML = '';
-    this.$callPanel.appendChild(wrap);
-    this.$callPanel.querySelector('#call-end-btn')?.addEventListener('click', () => this._endCall());
-
-    this._renderSidebar();
+    const isStream=type==='stream';
+    panel.innerHTML=
+      (isStream
+        ?`<div class="video-grid"><div class="video-wrap" id="vw-r"><video id="vid-r" autoplay playsinline></video><div class="video-label">${esc(peer)}</div><div class="vid-stats-overlay" id="vid-stats"></div></div><div class="video-wrap local"><video id="vid-l" autoplay playsinline muted></video><div class="video-label">${esc(this.id.nickname)}</div></div></div>`
+        :`<div class="walkie-active"><span class="wk-pulse">🎙</span> walkie · <span class="wk-peer">${esc(peer)}</span><div class="waveform"><span></span><span></span><span></span><span></span><span></span></div></div>`)
+      +`<div class="call-controls">
+          <div class="call-btn${muted?' muted':''}" id="cb-mute">🎙 ${muted?'muted':'mic'}</div>
+          ${isStream?`<div class="call-btn${camOff?' muted':''}" id="cb-cam">📷 ${camOff?'off':'cam'}</div><div class="call-btn" id="cb-fs">⛶</div>`:''}
+          <div class="call-btn end" id="cb-end">✕ end</div>
+        </div>
+        <div class="call-stats-bar" id="call-stats-bar">connecting…</div>`;
+    const vr=$('vid-r'), vl=$('vid-l');
+    if(vr&&remoteStream){vr.srcObject=remoteStream;vr.addEventListener('dblclick',()=>{document.fullscreenElement?document.exitFullscreen().catch(()=>{}):vr.requestFullscreen?.().catch(()=>{});});}
+    if(vl&&localStream) vl.srcObject=localStream;
+    $('cb-mute')?.addEventListener('click',()=>{if(!this.call)return;this.call.muted=!this.call.muted;this.call.localStream?.getAudioTracks().forEach(t=>{t.enabled=!this.call.muted;});this._renderCallPanel();});
+    $('cb-cam')?.addEventListener('click',()=>{if(!this.call)return;this.call.camOff=!this.call.camOff;this.call.localStream?.getVideoTracks().forEach(t=>{t.enabled=!this.call.camOff;});this._renderCallPanel();});
+    $('cb-fs')?.addEventListener('click',()=>{const v=$('vid-r');if(v)document.fullscreenElement?document.exitFullscreen().catch(()=>{}):v.requestFullscreen?.().catch(()=>{});});
+    $('cb-end')?.addEventListener('click',()=>{this.net.sendCtrl(fp,{type:'call-end'});this._endCallLocal(false);this._status('call ended','info',3000);});
   }
 
-  _makeCallTile({ fp, label, stream, muted }) {
-    const id   = `tile-${fp}`;
-    const tile = document.createElement('div');
-    tile.className = 'call-tile';
-    tile.id = id;
-
-    const video    = document.createElement('video');
-    video.className   = 'call-video';
-    video.autoplay    = true;
-    video.playsInline = true;
-    video.muted       = !!muted;
-    video.srcObject   = stream;
-    tile.appendChild(video);
-
-    const nameEl = document.createElement('div');
-    nameEl.className = 'call-label';
-    nameEl.textContent = label;
-    tile.appendChild(nameEl);
-
-    const actions = document.createElement('div');
-    actions.className = 'call-actions';
-    actions.innerHTML = `<button data-fullscreen="${id}" title="fullscreen">⤢</button>`;
-    tile.appendChild(actions);
-
-    const tech = document.createElement('div');
-    tech.className   = 'call-tech';
-    tech.dataset.fp  = fp;
-    tech.textContent = 'rtt — ms  ↑ —  ↓ —';
-    tile.appendChild(tech);
-
-    return tile;
-  }
-
-  /* ══════════════════════ LIVE STATS ══════════════════════════ */
-
-  _startStatsTicker() {
-    clearInterval(this.statsTicker);
-    this.statsTicker = setInterval(() => {
-      this._refreshCallStats().catch(() => {});
-      this._updateLiveStats();
-    }, 1000);
-  }
-
-  _updateLiveStats() {
-    const connected = this.network.getConnectedPeers().length;
-    const sigDot    = this._sigState === 'connected' ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--err)">○</span>';
-    const sigLabel  = this._sigState === 'connected' ? 'sig' : 'disconnected';
-
-    let parts = [`${sigDot} ${sigLabel}`, `${connected}p`];
-
-    if (this.callState) {
-      const remoteCount = this.callState.remote.size;
-      if (this.callState.calling) {
-        parts.push('calling…');
-      } else {
-        parts.push(`${this.callState.mode}:${remoteCount}`);
-      }
+  // ── Render: circle call panel ──────────────────────────────────────────────
+  _renderCircleCallPanel() {
+    const panel=$('circle-call-panel'); if(!panel)return;
+    if (!this.circleCall) { panel.innerHTML=''; panel.classList.remove('visible'); return; }
+    const {type,phase,muted,camOff,localStream,remoteStreams}=this.circleCall;
+    panel.classList.add('visible');
+    if (phase==='connecting'||phase==='ringing') {
+      panel.innerHTML=`<div class="call-waiting"><div class="call-type-badge">◯ circle ${type==='stream'?'📷 stream':'🎙 walkie'}</div><div class="call-state">inviting peers…</div><div class="call-controls"><div class="call-btn end" id="ccb-end">✕ end</div></div></div>`;
+      $('ccb-end')?.addEventListener('click',()=>this._endCircleCall()); return;
     }
-
-    // Aggregate stats from call tiles
-    let totalRtt = null, totalUp = 0, totalDown = 0;
-    let hasStats = false;
-    for (const fp of (this.callState?.remote?.keys() || [])) {
-      const prev = this.prevStats.get(fp);
-      if (prev?.rtt != null) { totalRtt = (totalRtt ?? 0) + prev.rtt; hasStats = true; }
-      if (prev?.upRate)   totalUp   += prev.upRate;
-      if (prev?.downRate) totalDown += prev.downRate;
-    }
-
-    if (hasStats) {
-      if (totalRtt != null) parts.push(`rtt ${Math.round(totalRtt)}ms`);
-      if (totalUp > 0)      parts.push(`↑ ${fmtRate(totalUp)}`);
-      if (totalDown > 0)    parts.push(`↓ ${fmtRate(totalDown)}`);
-    }
-
-    this.$statusLive.innerHTML = parts.join('<span class="stat-sep"> · </span>');
-  }
-
-  async _refreshCallStats() {
-    if (!this.callState) return;
-    for (const fp of this.callState.remote.keys()) {
-      const stats = await this.network.getPeerStats(fp);
-      if (!stats) continue;
-
-      const prev = this.prevStats.get(fp) || {};
-      this.prevStats.set(fp, {
-        rtt:      stats.connection.rttMs,
-        upRate:   (stats.audio.outKbps + stats.video.outKbps) * 125, // kbps -> B/s
-        downRate: (stats.audio.inKbps  + stats.video.inKbps)  * 125,
-        ...prev,
-      });
-
-      const tech = this.$callPanel.querySelector(`.call-tech[data-fp="${fp}"]`);
-      if (tech) {
-        const rtt = stats.connection.rttMs != null ? `rtt ${Math.round(stats.connection.rttMs)}ms` : 'rtt —';
-        const up  = stats.audio.outKbps + stats.video.outKbps > 0 ? `↑ ${fmtRate((stats.audio.outKbps + stats.video.outKbps) * 125)}` : '↑ —';
-        const dn  = stats.audio.inKbps  + stats.video.inKbps  > 0 ? `↓ ${fmtRate((stats.audio.inKbps  + stats.video.inKbps)  * 125)}` : '↓ —';
-        const via = stats.connection.local || '—';
-        tech.textContent = `${rtt}  ${up}  ${dn}  ${via}`;
-      }
-    }
-  }
-
-  /* ═══════════════════════ STATUS BAR ════════════════════════ */
-
-  /** Show a transient message that fades after `ms` (default 3500). */
-  _flash(text, ms = STATUS_LINGER_MS) {
-    this.$statusMsg.textContent = text;
-    clearTimeout(this._statusTimer);
-    if (ms > 0) {
-      this._statusTimer = setTimeout(() => { this.$statusMsg.textContent = ''; }, ms);
-    }
-  }
-
-  /* ═════════════════════ CIRCLE EDITOR ════════════════════════ */
-
-  _openCircleEditor(circleId) {
-    const editing  = circleId ? this.circles.find(c => c.id === circleId) : null;
-    const allPeers = [...this.peers.values()].filter(p => p.online);
-
-    const box = document.createElement('div');
-    box.className = 'modal';
-    box.innerHTML = `
-      <h3>${editing ? 'Edit' : 'New'} Short Mesh Circle</h3>
-      <div class="row">
-        <input id="circle-name" type="text" maxlength="40" placeholder="circle name…" value="${escapeAttr(editing?.name || '')}">
-      </div>
-      <div class="check-list" id="circle-checks"></div>
-      <div class="actions">
-        ${editing ? '<button id="circle-delete" style="color:var(--err);border-color:var(--err);">delete</button>' : ''}
-        <button id="circle-cancel">cancel</button>
-        <button id="circle-save">save</button>
-      </div>
-    `;
-
-    const checks = box.querySelector('#circle-checks');
-    if (!allPeers.length) {
-      checks.innerHTML = '<div style="font-size:.68rem;color:var(--tx2);padding:4px">no online peers</div>';
-    }
-    for (const p of allPeers) {
-      const label = document.createElement('label');
-      label.style.cssText = 'display:flex;gap:8px;align-items:center;font-size:.72rem;cursor:pointer;';
-      label.innerHTML = `
-        <input type="checkbox" value="${p.fingerprint}" ${editing?.members?.includes(p.fingerprint) ? 'checked' : ''}>
-        <span>${escapeHtml(p.nick)} <span style="color:var(--tx2)">${short(p.fingerprint)}</span></span>
-      `;
-      checks.appendChild(label);
-    }
-
-    box.querySelector('#circle-cancel')?.addEventListener('click', () => this._closeModal());
-    box.querySelector('#circle-delete')?.addEventListener('click', () => {
-      this.circles = this.circles.filter(c => c.id !== circleId);
-      this._saveCircles();
-      this._renderSidebar();
-      this._closeModal();
-    });
-    box.querySelector('#circle-save')?.addEventListener('click', () => {
-      const name    = box.querySelector('#circle-name').value.trim();
-      const members = [...checks.querySelectorAll('input[type="checkbox"]:checked')].map(x => x.value);
-      if (!name)           return this._flash('circle name required');
-      if (!members.length) return this._flash('select at least 1 member');
-
-      if (editing) {
-        editing.name    = name;
-        editing.members = members;
-      } else {
-        this.circles.push({ id: `circle:${crypto.randomUUID()}`, name, members });
-      }
-      this._saveCircles();
-      this._renderSidebar();
-      this._closeModal();
-      this._flash('circle saved');
-    });
-
-    this._openModal(box);
-  }
-
-  _upsertRemoteCircle(id, name, members) {
-    if (!id) return;
-    const ex = this.circles.find(c => c.id === id);
-    if (ex) {
-      ex.name = name || ex.name;
-      if (members?.length) {
-        // Merge: add new members, don't remove own fingerprint
-        const set = new Set(ex.members);
-        members.forEach(m => { if (m !== this.identity.fingerprint) set.add(m); });
-        ex.members = [...set];
-      }
+    const isStream=type==='stream', count=remoteStreams.size;
+    let html='';
+    if (isStream) {
+      html='<div class="video-grid">';
+      html+=`<div class="video-wrap local"><video id="cvid-l" autoplay playsinline muted></video><div class="video-label">${esc(this.id.nickname)}</div></div>`;
+      remoteStreams.forEach((_,fp)=>{const n=this.peers.get(fp)?.nick||fp.slice(0,8);html+=`<div class="video-wrap"><video id="cvid-${fp.slice(0,8)}" autoplay playsinline></video><div class="video-label">${esc(n)}</div></div>`;});
+      html+='</div>';
     } else {
-      const filtered = Array.isArray(members) ? members.filter(m => m !== this.identity.fingerprint) : [];
-      this.circles.push({ id, name: name || `circle ${this.circles.length + 1}`, members: filtered });
+      const names=[...remoteStreams.keys()].map(fp=>this.peers.get(fp)?.nick||fp.slice(0,8)).join(', ')||'—';
+      html=`<div class="walkie-active"><span class="wk-pulse">◯🎙</span> circle · <span class="wk-peer">${count} peer${count!==1?'s':''}: ${esc(names)}</span><div class="waveform"><span></span><span></span><span></span><span></span><span></span></div></div>`;
     }
-    this._saveCircles();
-    this._renderSidebar();
+    html+=`<div class="call-controls"><div class="call-btn${muted?' muted':''}" id="ccb-mute">🎙 ${muted?'muted':'mic'}</div>${isStream?`<div class="call-btn${camOff?' muted':''}" id="ccb-cam">📷 ${camOff?'off':'cam'}</div>`:''}<div class="call-btn end" id="ccb-end">✕ end</div></div>`;
+    panel.innerHTML=html;
+    const vl=$('cvid-l'); if(vl&&localStream)vl.srcObject=localStream;
+    remoteStreams.forEach((stream,fp)=>{const v=$(`cvid-${fp.slice(0,8)}`);if(v)v.srcObject=stream;});
+    $('ccb-mute')?.addEventListener('click',()=>{if(!this.circleCall)return;this.circleCall.muted=!this.circleCall.muted;this.circleCall.localStream?.getAudioTracks().forEach(t=>{t.enabled=!this.circleCall.muted;});this._renderCircleCallPanel();});
+    $('ccb-cam')?.addEventListener('click',()=>{if(!this.circleCall)return;this.circleCall.camOff=!this.circleCall.camOff;this.circleCall.localStream?.getVideoTracks().forEach(t=>{t.enabled=!this.circleCall.camOff;});this._renderCircleCallPanel();});
+    $('ccb-end')?.addEventListener('click',()=>this._endCircleCall());
   }
 
-  /* ══════════════════════ MODAL HELPERS ════════════════════════ */
+  // ── Stats polling ──────────────────────────────────────────────────────────
+  _startStatsPolling(fp) {
+    this._stopStatsPolling();
+    this._statsTimer=setInterval(async()=>{
+      const s=await this.net.getStats(fp); if(!s)return;
+      const bar=$('call-stats-bar'); if(!bar)return;
+      const parts=[];
+      if(s.videoWidth)parts.push(`${s.videoWidth}×${s.videoHeight} ${s.fps}fps`);
+      if(s.videoKbps)parts.push(`↓${s.videoKbps}kbps`);
+      if(s.audioKbps)parts.push(`🎙${s.audioKbps}kbps`);
+      if(s.rttMs!=null)parts.push(`rtt ${s.rttMs}ms`);
+      if(s.bytesSent)parts.push(`↑${fmt(s.bytesSent)}`);
+      if(s.bytesRecv)parts.push(`↓${fmt(s.bytesRecv)}`);
+      bar.textContent=parts.join(' · ')||'active';
+    },2000);
+  }
+  _stopStatsPolling(){ clearInterval(this._statsTimer); this._statsTimer=null; }
 
-  _openModal(node) {
-    this.$modalRoot.innerHTML = '';
-    this.$modalRoot.appendChild(node);
-    this.$modalRoot.classList.add('visible');
-    this.$modalRoot.addEventListener('click', this._modalBg = (e) => {
-      if (e.target === this.$modalRoot) this._closeModal();
+  // ── Session ────────────────────────────────────────────────────────────────
+  async _openSession(fp) {
+    if (!fp)return;
+    this.active=fp; this.unread.delete(fp);
+    if (!this.sessions.has(fp)) { try{this.sessions.set(fp,await loadMessages(fp));}catch{this.sessions.set(fp,[]);} }
+    this._renderHeader(); this._renderMsgs(); this._renderPeers();
+    this._renderCallPanel(); this._renderCircleCallPanel();
+    this._renderGamePanel(fp);
+    const ib=$('input-bar'); if(ib)ib.classList.add('visible');
+    $('msg-input')?.focus(); this._showChat();
+    this._buildPlusMenu();
+  }
+
+  async _clearChat(fp) {
+    const lbl=fp===CIRCLE_ID?'circle':('chat with '+(this.peers.get(fp)?.nick||fp.slice(0,8)));
+    if (!confirm('Clear '+lbl+'?'))return;
+    try{await clearMessages(fp);this.sessions.set(fp,[]);this._renderMsgs();this._status('cleared','ok',2000);}
+    catch(e){this._status('clear failed','err',4000);}
+  }
+
+  // ── State export / import ──────────────────────────────────────────────────
+  async _exportState() {
+    this._status('preparing export…','info');
+    try {
+      const keyData = await this.id.exportKeyData();
+      const messages = await loadAllMessages();
+      const peers    = await loadPeers();
+      const state = {
+        tqVersion: 10,
+        exportedAt: new Date().toISOString(),
+        identity: keyData ? { ...keyData, nickname: this.id.nickname, fingerprint: this.id.fingerprint } : null,
+        peers,
+        messages,
+      };
+      const json  = JSON.stringify(state, null, 2);
+      const blob  = new Blob([json], { type:'application/json' });
+      const url   = URL.createObjectURL(blob);
+      const a     = Object.assign(document.createElement('a'), { href:url, download:`turquoise-${this.id.shortId}-${Date.now()}.json` });
+      a.click(); URL.revokeObjectURL(url);
+      this._status('state exported ✓','ok',4000);
+    } catch(e) {
+      this._status('export failed: '+e.message,'err',5000);
+    }
+  }
+
+  async _importState(file) {
+    this._status('reading import file…','info');
+    try {
+      const text  = await file.text();
+      const state = JSON.parse(text);
+      if (!state?.tqVersion) throw new Error('Not a valid Turquoise state file');
+      const confirmed = confirm(
+        'Import Turquoise state?\n\n'
+        +(state.identity?'• Identity: '+state.identity.fingerprint?.slice(0,16)+'…\n':'• No identity (messages only)\n')
+        +'• '+( state.messages?.length||0)+' messages\n'
+        +'• '+(state.peers?.length||0)+' peers\n\n'
+        +(state.identity?'This will REPLACE your current identity. Current data will be lost.\n':'Messages will be merged.')
+        +'\nContinue?'
+      );
+      if (!confirmed) { this._status('import cancelled','info',2000); return; }
+      if (state.identity?.privJwk) {
+        await clearAllData();
+        await resetIdentity();
+        await importIdentityData(state.identity);
+      }
+      if (state.messages?.length) await restoreMessages(state.messages);
+      if (state.peers?.length)    await restorePeers(state.peers);
+      this._status('import complete — reloading…','ok');
+      setTimeout(()=>location.reload(), 1200);
+    } catch(e) {
+      this._status('import failed: '+e.message,'err',6000);
+    }
+  }
+
+  async _confirmReset() {
+    const choice = await this._resetDialog();
+    if (choice==='cancel') return;
+    if (choice==='export-reset') await this._exportState();
+    this._status('resetting…','warn');
+    try {
+      await clearAllData(); await resetIdentity();
+      if ('caches' in window) { const ks=await caches.keys(); await Promise.all(ks.map(k=>caches.delete(k))); }
+    } catch(e) { console.warn('reset:', e); }
+    location.reload();
+  }
+
+  _resetDialog() {
+    return new Promise(res => {
+      const overlay=document.createElement('div');
+      overlay.className='reset-overlay';
+      overlay.innerHTML=`<div class="reset-box">
+        <div class="reset-title">reset turquoise</div>
+        <div class="reset-body">This will delete your identity and all messages.<br>Consider exporting your state first.</div>
+        <div class="reset-btns">
+          <div class="reset-btn cancel" id="rd-cancel">cancel</div>
+          <div class="reset-btn export" id="rd-export">export then reset</div>
+          <div class="reset-btn danger" id="rd-reset">reset without export</div>
+        </div>
+      </div>`;
+      document.body.appendChild(overlay);
+      const close=(val)=>{overlay.remove();res(val);};
+      overlay.querySelector('#rd-cancel')?.addEventListener('click',()=>close('cancel'));
+      overlay.querySelector('#rd-export')?.addEventListener('click',()=>close('export-reset'));
+      overlay.querySelector('#rd-reset')?.addEventListener('click',()=>close('reset'));
     });
   }
 
-  _closeModal() {
-    this.$modalRoot.classList.remove('visible');
-    this.$modalRoot.innerHTML = '';
-    if (this._modalBg) {
-      this.$modalRoot.removeEventListener('click', this._modalBg);
-      this._modalBg = null;
+  _toggleCircle(fp, e) {
+    e.stopPropagation();
+    this.circleBlocked.has(fp)?this.circleBlocked.delete(fp):this.circleBlocked.add(fp);
+    this._renderPeers();
+    this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' '+(this.circleBlocked.has(fp)?'removed from':'in')+' circle','info',2000);
+  }
+
+  // ── Render: peer list ─────────────────────────────────────────────────────
+  _renderPeers() {
+    const list=$('peer-list'); if(!list)return;
+    const circleOnline=this.net.getConnectedPeers().length>0;
+    const cUnread=this.unread.get(CIRCLE_ID)||0;
+    const cMsgs=this.sessions.get(CIRCLE_ID)||[];
+    const cLast=cMsgs[cMsgs.length-1];
+    const cPrev=cLast?(cLast.type==='file'?'📎 '+esc(cLast.name||'file'):esc(cLast.text?.slice(0,42)||'')):'group · everyone';
+    const cBadge=this.circleCall?`<div class="peer-badge call-badge">${this.circleCall.type==='stream'?'📷':'🎙'}</div>`:cUnread?`<div class="peer-badge">${cUnread>9?'9+':cUnread}</div>`:'';
+    const cActive=this.active===CIRCLE_ID?' active':'';
+    const circleTile=`<div class="peer-tile circle-tile${cActive}" data-fp="${CIRCLE_ID}"><div class="circle-icon${circleOnline?' online':''}">◯</div><div class="peer-info"><div class="peer-nick">circle</div><div class="peer-preview">${cPrev}</div></div>${cBadge}</div>`;
+
+    if (!this.peers.size) {
+      list.innerHTML=circleTile+'<div id="no-peers">waiting for peers…</div>';
+      list.querySelector('.circle-tile')?.addEventListener('click',()=>this._openSession(CIRCLE_ID));
+      return;
     }
+    const sorted=[...this.peers.entries()].sort(([,a],[,b])=>{if(a.connected!==b.connected)return a.connected?-1:1;return(a.nick||'').localeCompare(b.nick||'');});
+    const peerTiles=sorted.map(([fp,p])=>{
+      const active=fp===this.active?' active':'';
+      const dot=p.connected?'online':'offline';
+      const unread=this.unread.get(fp)||0;
+      const msgs=this.sessions.get(fp)||[];
+      const last=msgs[msgs.length-1];
+      const prev=last?(last.type==='file'?'📎 '+esc(last.name||'file'):esc(last.text?.slice(0,42)||'')):'';
+      const blocked=this.circleBlocked.has(fp);
+      const inCall=this.call?.fp===fp;
+      const hasGame=this.games.has(fp);
+      const badge=inCall?`<div class="peer-badge call-badge">${this.call.type==='stream'?'📷':'🎙'}</div>`:hasGame?`<div class="peer-badge game-badge">⊞</div>`:unread?`<div class="peer-badge">${unread>9?'9+':unread}</div>`:'';
+      return `<div class="peer-tile${active}" data-fp="${fp}"><div class="peer-dot ${dot}"></div><div class="peer-info"><div class="peer-nick">${esc(p.nick||fp.slice(0,8))}</div>${prev?`<div class="peer-preview">${prev}</div>`:''}</div><div class="circle-toggle${blocked?' blocked':''}" data-fp="${fp}" title="${blocked?'add to circle':'remove from circle'}">◯</div>${badge}</div>`;
+    }).join('');
+    list.innerHTML=circleTile+peerTiles;
+    list.querySelectorAll('.peer-tile').forEach(t=>t.addEventListener('click',()=>{const fp=t.dataset.fp;if(fp)this._openSession(fp);}));
+    list.querySelectorAll('.circle-toggle').forEach(b=>b.addEventListener('click',e=>{const fp=b.dataset.fp;if(fp)this._toggleCircle(fp,e);}));
   }
 
-  /* ═══════════════════════ LOG / HELPERS ══════════════════════ */
-
-  _sessionIdFromContext(ctx) {
-    if (!ctx) return null;
-    if (ctx.kind === 'peer')   return `peer:${ctx.id}`;
-    if (ctx.kind === 'circle') return `circle:${ctx.id}`;
-    if (ctx.kind === 'mesh')   return MESH_SESSION_ID;
-    return null;
+  // ── Render: chat header ───────────────────────────────────────────────────
+  _renderHeader() {
+    const h=$('chat-header'); if(!h)return;
+    const fp=this.active;
+    const back='<span class="back-btn" id="back-btn">←</span>';
+    if (fp===CIRCLE_ID) {
+      const connected=this.net.getConnectedPeers().length;
+      const ccActive=this.circleCall?.phase==='active';
+      h.innerHTML=`${back}<div class="circle-icon-hdr">◯</div><div class="chat-peer-info"><div class="chat-peer-name">circle</div><div class="chat-peer-fp">${connected} peer${connected!==1?'s':''} · broadcast</div></div><div class="chat-actions"><div class="action-btn${ccActive&&this.circleCall?.type==='walkie'?' active-call':''}" id="hbtn-cw" title="circle walkie">🎙</div><div class="action-btn${ccActive&&this.circleCall?.type==='stream'?' active-call':''}" id="hbtn-cs" title="circle stream">📷</div><div class="action-btn danger" id="hbtn-cl" title="clear circle">🗑</div></div>`;
+      $('back-btn')?.addEventListener('click',()=>this._showSidebar());
+      $('hbtn-cw')?.addEventListener('click',()=>{if(ccActive)this._endCircleCall();else this._startCircleCall('walkie');});
+      $('hbtn-cs')?.addEventListener('click',()=>{if(ccActive)this._endCircleCall();else this._startCircleCall('stream');});
+      $('hbtn-cl')?.addEventListener('click',()=>this._clearChat(CIRCLE_ID));
+      return;
+    }
+    const p=fp?this.peers.get(fp):null;
+    if (!fp||!p) {
+      h.innerHTML=`${back}<span id="chat-placeholder">select a peer</span>`;
+      $('back-btn')?.addEventListener('click',()=>this._showSidebar()); return;
+    }
+    const inCall=this.call?.fp===fp&&this.call.phase==='active';
+    h.innerHTML=`${back}<div class="peer-dot ${p.connected?'online':'offline'}"></div><div class="chat-peer-info"><div class="chat-peer-name">${esc(p.nick||fp.slice(0,8))}</div><div class="chat-peer-fp">${fp}</div></div><div class="chat-actions"><div class="action-btn${inCall&&this.call?.type==='walkie'?' active-call':''}" id="hbtn-w" title="walkie">🎙</div><div class="action-btn${inCall&&this.call?.type==='stream'?' active-call':''}" id="hbtn-s" title="stream">📷</div><div class="action-btn danger" id="hbtn-cl" title="clear">🗑</div></div>`;
+    $('back-btn')?.addEventListener('click',()=>this._showSidebar());
+    $('hbtn-w')?.addEventListener('click',()=>{if(inCall){this.net.sendCtrl(fp,{type:'call-end'});this._endCallLocal(false);}else this._startCall(fp,'walkie');});
+    $('hbtn-s')?.addEventListener('click',()=>{if(inCall){this.net.sendCtrl(fp,{type:'call-end'});this._endCallLocal(false);}else this._startCall(fp,'stream');});
+    $('hbtn-cl')?.addEventListener('click',()=>this._clearChat(fp));
   }
 
-  _peerNick(fp) {
-    if (fp === this.identity.fingerprint) return 'you';
-    return this.peers.get(fp)?.nick || short(fp);
+  // ── Render: messages ──────────────────────────────────────────────────────
+  _renderMsgs() {
+    const msgs=$('messages'); if(!msgs)return;
+    msgs.innerHTML='';
+    const session=this.sessions.get(this.active)||[];
+    if (!session.length) {
+      msgs.innerHTML=`<div class="sys-msg">${this.active===CIRCLE_ID?'circle — messages go to everyone':'no messages yet'}</div>`;
+      return;
+    }
+    const frag=document.createDocumentFragment();
+    session.forEach(m=>{
+      if (m.type==='text') frag.appendChild(this._msgEl(m));
+      else if (m.type==='file') frag.appendChild(this._fileCardEl(m));
+    });
+    msgs.appendChild(frag); this._scroll();
   }
 
-  _log(text, isErr = false) {
-    const line = document.createElement('div');
-    line.textContent = `${new Date().toLocaleTimeString([], { hour12: false })} · ${text}`;
-    line.style.color = isErr ? '#e05040' : '#1e6b64';
-    this.$netLog.prepend(line);
-    // Cap log at 80 entries
-    while (this.$netLog.children.length > 80) this.$netLog.lastChild.remove();
+  _appendMsg(msg) {
+    const msgs=$('messages'); if(!msgs)return;
+    const e=msgs.querySelector('.sys-msg'); if(e&&msgs.children.length===1)e.remove();
+    msgs.appendChild(this._msgEl(msg)); this._scroll();
   }
 
-  _scrollToBottom() {
-    this.$messages.scrollTop = this.$messages.scrollHeight;
+  _appendFileCard(fileMsg) {
+    const msgs=$('messages'); if(!msgs||!fileMsg?.fileId)return;
+    if (document.querySelector(`[data-fcid="${fileMsg.fileId}"]`))return;
+    const e=msgs.querySelector('.sys-msg'); if(e&&msgs.children.length===1)e.remove();
+    msgs.appendChild(this._fileCardEl(fileMsg)); this._scroll();
+  }
+
+  _msgEl(msg) {
+    const d=document.createElement('div'); d.className='msg '+(msg.own?'own':'peer');
+    const time=new Date(msg.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    // "you:" removed — show actual nickname for own messages too
+    const who=esc(msg.own?this.id.nickname:msg.fromNick||'?');
+    d.innerHTML=`<div class="meta">${who} · ${time}</div><div class="bubble">${esc(msg.text)}</div>`;
+    return d;
+  }
+
+  _fileCardEl(msg) {
+    const w=document.createElement('div'); w.className='msg '+(msg.own?'own':'peer');
+    const time=new Date(msg.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    const who=esc(msg.own?this.id.nickname:msg.fromNick||'?');
+    const cached=this._fileUrls.get(msg.fileId);
+    const mime=msg.mimeType||'';
+    let inner=`<div class="file-name">📎 ${esc(msg.name||'file')}</div><div class="file-size">${fmt(msg.size)}</div>`;
+    if (cached) {
+      if (mime.startsWith('audio/')) {
+        inner+=`<audio controls src="${cached.url}" style="max-width:100%;height:32px;margin-top:4px"></audio>`;
+        inner+=`<a class="dl-btn" href="${cached.url}" download="${esc(msg.name||'memo.webm')}">↓ save</a>`;
+      } else {
+        inner+=`<a class="dl-btn" href="${cached.url}" download="${esc(msg.name||'file')}">↓ save</a>`;
+      }
+    } else if (msg.status==='error') {
+      inner+=`<div class="file-err">⚠ ${esc(msg.error||'failed')}</div>`;
+    } else {
+      inner+=`<div class="prog-track"><div class="prog-fill" style="width:0%"></div></div>`;
+      inner+=`<div class="file-stats"><span class="fs-pct">0%</span> <span class="fs-sep">·</span> <span class="fs-bytes">—</span></div>`;
+    }
+    w.innerHTML=`<div class="meta">${who} · ${time}</div><div class="file-card" data-fcid="${msg.fileId}">${inner}</div>`;
+    return w;
+  }
+
+  _handleMediaError(e,fp) {
+    if (e.message.startsWith('permission-denied:')) {
+      const media=e.message.split(':')[1];
+      this._status(media+' permission denied — allow in browser settings','err',8000);
+      if (fp) this.net.sendCtrl(fp,{type:'permission-denied',media});
+    } else if (e.message.startsWith('no-device:')) {
+      this._status('no '+e.message.split(':')[1]+' found','err',6000);
+    } else { this._status('media error: '+e.message,'err',5000); }
+    if (this.call){this.call.localStream?.getTracks().forEach(t=>t.stop());this.call=null;}
+    this._renderCallPanel(); this._renderHeader();
+  }
+
+  // ── Narrow screen ─────────────────────────────────────────────────────────
+  _showChat()    { $('sidebar')?.classList.add('slide-left');    $('chat-area')?.classList.add('slide-in'); }
+  _showSidebar() { $('sidebar')?.classList.remove('slide-left'); $('chat-area')?.classList.remove('slide-in'); }
+
+  // ── Status bar ────────────────────────────────────────────────────────────
+  _status(text, type='info', duration=0) {
+    const bar=$('status-bar'); if(!bar)return;
+    clearTimeout(this._statusTimer);
+    bar.textContent=text; bar.className='s-'+type;
+    if (duration) this._statusTimer=setTimeout(()=>{bar.className='';},duration);
+  }
+
+  _scroll() { const m=$('messages'); if(m)m.scrollTop=m.scrollHeight; }
+
+  _sys(text, isErr=false) {
+    const msgs=$('messages'); if(!msgs)return;
+    const d=document.createElement('div'); d.className='sys-msg'+(isErr?' err':''); d.textContent=text;
+    msgs.appendChild(d); this._scroll();
+    setTimeout(()=>{try{d.remove();}catch{}},5000);
+  }
+
+  _log(text, isErr=false) {
+    const log=$('net-log'); if(!log)return;
+    const d=document.createElement('div'); d.className='entry'+(isErr?' err':''); d.textContent=text;
+    log.appendChild(d); log.scrollTop=log.scrollHeight;
+    while(log.children.length>120) log.removeChild(log.firstChild);
   }
 }
-
-/* ═══════════════════════ PURE HELPERS ═══════════════════════ */
-
-function short(v) { return (v || '?').slice(0, 8); }
-
-function fmtTime(ts) {
-  return new Date(ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
-}
-
-function escapeAttr(s) { return escapeHtml(s ?? ''); }

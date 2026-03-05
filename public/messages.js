@@ -3,157 +3,118 @@
  * IndexedDB persistence for messages and peer metadata.
  */
 
-const DB_NAME = 'tq-messages';
-const DB_VERSION = 2;
-let _db = null;
+const DB_NAME    = 'tq-messages';
+const DB_VERSION = 1;
+let   _db        = null;
 
 function getDB() {
   if (_db) return Promise.resolve(_db);
-
-  return new Promise((resolve, reject) => {
+  return new Promise((res, rej) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-
-    req.onupgradeneeded = () => {
-      const db = req.result;
-
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
       if (!db.objectStoreNames.contains('messages')) {
         const ms = db.createObjectStore('messages', { keyPath: 'id' });
         ms.createIndex('by-session', 'sessionId');
-        ms.createIndex('by-session-ts', ['sessionId', 'ts']);
-      } else {
-        const ms = req.transaction.objectStore('messages');
-        if (!ms.indexNames.contains('by-session')) ms.createIndex('by-session', 'sessionId');
-        if (!ms.indexNames.contains('by-session-ts')) ms.createIndex('by-session-ts', ['sessionId', 'ts']);
+        ms.createIndex('by-ts', 'ts');
       }
-
       if (!db.objectStoreNames.contains('peers')) {
-        const ps = db.createObjectStore('peers', { keyPath: 'fingerprint' });
-        ps.createIndex('by-lastSeen', 'lastSeen');
-      } else {
-        const ps = req.transaction.objectStore('peers');
-        if (!ps.indexNames.contains('by-lastSeen')) ps.createIndex('by-lastSeen', 'lastSeen');
+        db.createObjectStore('peers', { keyPath: 'fingerprint' });
       }
     };
-
-    req.onsuccess = () => {
-      _db = req.result;
-      _db.onversionchange = () => {
-        _db.close();
-        _db = null;
-      };
-      resolve(_db);
-    };
-
-    req.onerror = () => reject(new Error(`messages DB failed: ${req.error?.message || 'unknown'}`));
-    req.onblocked = () => reject(new Error('messages DB blocked by another tab'));
+    req.onsuccess = (e) => { _db = e.target.result; res(_db); };
+    req.onerror   = () => rej(new Error('messages DB: ' + req.error?.message));
+    req.onblocked = () => rej(new Error('messages DB blocked'));
   });
 }
 
-function validMessage(msg) {
-  return (
-    msg &&
-    typeof msg === 'object' &&
-    typeof msg.id === 'string' &&
-    msg.id.length > 0 &&
-    typeof msg.sessionId === 'string' &&
-    msg.sessionId.length > 0
-  );
-}
-
 export async function saveMessage(msg) {
-  if (!validMessage(msg)) throw new Error('Invalid message payload');
   const db = await getDB();
-  return new Promise((resolve, reject) => {
+  return new Promise((res, rej) => {
     const tx = db.transaction('messages', 'readwrite');
     const req = tx.objectStore('messages').put(msg);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => res(); req.onerror = () => rej(req.error);
   });
 }
 
 export async function loadMessages(sessionId) {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('messages', 'readonly');
-    const store = tx.objectStore('messages');
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('messages', 'readonly');
+    const req = tx.objectStore('messages').index('by-session').getAll(IDBKeyRange.only(sessionId));
+    req.onsuccess = () => res((req.result || []).sort((a, b) => a.ts - b.ts));
+    req.onerror   = () => rej(req.error);
+  });
+}
 
-    let req;
-    if (store.indexNames.contains('by-session-ts')) {
-      const idx = store.index('by-session-ts');
-      req = idx.getAll(IDBKeyRange.bound([sessionId, 0], [sessionId, Number.MAX_SAFE_INTEGER]));
-    } else {
-      const idx = store.index('by-session');
-      req = idx.getAll(IDBKeyRange.only(sessionId));
-    }
-
-    req.onsuccess = () => {
-      const msgs = (req.result || []).sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      resolve(msgs);
-    };
-    req.onerror = () => reject(req.error);
+// Load ALL messages for state export
+export async function loadAllMessages() {
+  const db = await getDB();
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('messages', 'readonly');
+    const req = tx.objectStore('messages').getAll();
+    req.onsuccess = () => res((req.result || []).sort((a, b) => a.ts - b.ts));
+    req.onerror   = () => rej(req.error);
   });
 }
 
 export async function clearMessages(sessionId) {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('messages', 'readwrite');
-    const idx = tx.objectStore('messages').index('by-session');
-    const req = idx.openCursor(IDBKeyRange.only(sessionId));
-
-    req.onsuccess = (e) => {
-      const cursor = e.target.result;
-      if (!cursor) {
-        resolve();
-        return;
-      }
-      cursor.delete();
-      cursor.continue();
-    };
-
-    req.onerror = () => reject(req.error);
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('messages', 'readwrite');
+    const req = tx.objectStore('messages').index('by-session').openCursor(IDBKeyRange.only(sessionId));
+    req.onsuccess = (e) => { const c=e.target.result; if(c){c.delete();c.continue();}else res(); };
+    req.onerror   = () => rej(req.error);
   });
 }
 
 export async function clearAllData() {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(['messages', 'peers'], 'readwrite');
+  return new Promise((res, rej) => {
+    const tx = db.transaction(['messages','peers'], 'readwrite');
     tx.objectStore('messages').clear();
     tx.objectStore('peers').clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
   });
 }
 
 export async function savePeer(peer) {
-  if (!peer || typeof peer.fingerprint !== 'string') throw new Error('Invalid peer payload');
   const db = await getDB();
-
-  const payload = {
-    fingerprint: peer.fingerprint,
-    shortId: peer.shortId || peer.fingerprint.slice(0, 8),
-    nickname: peer.nickname || peer.shortId || peer.fingerprint.slice(0, 8),
-    lastSeen: Date.now(),
-  };
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('peers', 'readwrite');
-    const req = tx.objectStore('peers').put(payload);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('peers', 'readwrite');
+    const req = tx.objectStore('peers').put({ ...peer, lastSeen: Date.now() });
+    req.onsuccess = () => res(); req.onerror = () => rej(req.error);
   });
 }
 
 export async function loadPeers() {
   const db = await getDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('peers', 'readonly');
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('peers', 'readonly');
     const req = tx.objectStore('peers').getAll();
-    req.onsuccess = () => {
-      const peers = (req.result || []).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-      resolve(peers);
-    };
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => res(req.result || []); req.onerror = () => rej(req.error);
+  });
+}
+
+// Restore all messages from export bundle
+export async function restoreMessages(msgs) {
+  if (!msgs?.length) return;
+  const db = await getDB();
+  return new Promise((res, rej) => {
+    const tx  = db.transaction('messages', 'readwrite');
+    const store = tx.objectStore('messages');
+    msgs.forEach(m => { try { store.put(m); } catch {} });
+    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+  });
+}
+
+export async function restorePeers(peers) {
+  if (!peers?.length) return;
+  const db = await getDB();
+  return new Promise((res, rej) => {
+    const tx    = db.transaction('peers', 'readwrite');
+    const store = tx.objectStore('peers');
+    peers.forEach(p => { try { store.put(p); } catch {} });
+    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
   });
 }
