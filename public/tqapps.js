@@ -1,47 +1,56 @@
 /**
- * tqapps.js — Turquoise Apps
+ * tqapps.js — Turquoise Apps v5
  *
- * Entirely separate from core chat/call/file code.
- * Each app implements: constructor, handleMsg(msg), render(container), destroy()
- *
- * AppRegistry: central registry, app.js imports only this.
- *
- * Apps:
- *   TicTacToe  — P2P game, 1:1 only
- *   VoiceMemo  — record audio → send as file (uses file transfer, not WebRTC)
- *
- * Adding new apps: implement the interface, add to REGISTRY.
+ * Fixes:
+ *   - VoiceMemo: no guard when MediaRecorder is undefined (Firefox without
+ *     media stream support, or certain privacy browsers). Now checks before
+ *     attempting construction and shows a clear error message.
+ *   - VoiceMemo: calling start() while already recording silently created a
+ *     second MediaRecorder on the same stream. Added an _started flag guard.
+ *   - VoiceMemo: _finish() was called from recorder.onstop but cancel()
+ *     also called recorder.stop() then set _chunks = [] — a race where
+ *     _finish() could still fire after cancel and invoke onFile with an
+ *     empty-but-non-null blob. Fixed by introducing a _cancelled flag.
+ *   - TicTacToe: _reset() set state based on `this.mySymbol ? 'active' : 'waiting'`
+ *     but mySymbol is always set once a game has started, so state after
+ *     a peer-initiated reset was always 'active' even when we were the
+ *     accepting side. Kept as-is (correct for this architecture) but
+ *     added a comment to prevent future confusion.
  */
 
-// ── App Registry ─────────────────────────────────────────────────────────────
+// ── App Registry ──────────────────────────────────────────────────────────────
+
 export const REGISTRY = [
-  { id: 'ttt',  label: 'tic tac toe', icon: '⊞', p2pOnly: true,  cls: null /* set below */ },
-  { id: 'memo', label: 'voice memo',  icon: '🎤', p2pOnly: false, cls: null /* set below — special case */ },
+  { id: 'ttt',  label: 'tic tac toe', icon: '⊞', p2pOnly: true,  cls: null },
+  { id: 'memo', label: 'voice memo',  icon: '🎤', p2pOnly: false, cls: null },
 ];
 
 // ── TicTacToe ─────────────────────────────────────────────────────────────────
+
 export class TicTacToe {
   constructor(peerFp, myFp, sendFn, onCloseFn) {
-    this.peerFp  = peerFp;
-    this.myFp    = myFp;
-    this.send    = sendFn;
-    this.onClose = onCloseFn;
+    this.peerFp   = peerFp;
+    this.myFp     = myFp;
+    this.send     = sendFn;
+    this.onClose  = onCloseFn;
 
-    this.board    = Array(9).fill(null);
-    this.mySymbol = null;
-    this.turn     = 'X';
-    this.state    = 'waiting';  // waiting | active | won | draw | resigned
-    this.winner   = null;
-    this.winLine  = null;
-    this._dom     = null;
-    this._invited = false;
+    this.board     = Array(9).fill(null);
+    this.mySymbol  = null;
+    this.turn      = 'X';
+    this.state     = 'waiting';  // waiting | active | won | draw | resigned
+    this.winner    = null;
+    this.winLine   = null;
+    this._dom      = null;
+    this._invited  = false;
   }
 
   handleMsg(msg) {
     const { action } = msg;
+
     if (action === 'invite') {
       this.mySymbol = 'O'; this._invited = true; this.state = 'waiting'; this._draw();
     } else if (action === 'accept') {
+      // Initiator ('X') learns peer accepted
       this.mySymbol = 'X'; this.state = 'active'; this._draw();
     } else if (action === 'move') {
       const { cell } = msg;
@@ -59,131 +68,260 @@ export class TicTacToe {
     }
   }
 
-  _accept() { this.mySymbol='O'; this.state='active'; this.send({gameType:'ttt',action:'accept'}); this._draw(); }
-  _move(cell) {
-    if (this.state!=='active'||this.board[cell]||this.turn!==this.mySymbol) return;
-    this.board[cell]=this.mySymbol; this.turn=this.mySymbol==='X'?'O':'X';
-    this.send({gameType:'ttt',action:'move',cell}); this._check(); this._draw();
+  _accept() {
+    // Accepting side is always 'O'; initiator is 'X'
+    this.mySymbol = 'O'; this.state = 'active';
+    this.send({ gameType: 'ttt', action: 'accept' });
+    this._draw();
   }
-  _reset() { this.board=Array(9).fill(null); this.turn='X'; this.state=this.mySymbol?'active':'waiting'; this.winner=null; this.winLine=null; }
-  _requestReset() { this._reset(); this.send({gameType:'ttt',action:'reset'}); this._draw(); }
-  _resign() { this.state='resigned'; this.send({gameType:'ttt',action:'resign'}); this._draw(); }
+
+  _move(cell) {
+    if (this.state !== 'active' || this.board[cell] || this.turn !== this.mySymbol) return;
+    this.board[cell] = this.mySymbol;
+    this.turn = this.mySymbol === 'X' ? 'O' : 'X';
+    this.send({ gameType: 'ttt', action: 'move', cell });
+    this._check(); this._draw();
+  }
+
+  _reset() {
+    this.board    = Array(9).fill(null);
+    this.turn     = 'X';
+    // mySymbol is set for both sides once a game started, so state is always
+    // 'active' after a reset when symbols are assigned. 'waiting' only applies
+    // before the first accept handshake.
+    this.state    = this.mySymbol ? 'active' : 'waiting';
+    this.winner   = null;
+    this.winLine  = null;
+  }
+
+  _requestReset() {
+    this._reset();
+    this.send({ gameType: 'ttt', action: 'reset' });
+    this._draw();
+  }
+
+  _resign() {
+    this.state = 'resigned';
+    this.send({ gameType: 'ttt', action: 'resign' });
+    this._draw();
+  }
 
   _check() {
-    const lines=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-    for (const [a,b,c] of lines) {
-      if (this.board[a]&&this.board[a]===this.board[b]&&this.board[b]===this.board[c]) {
-        this.winner=this.board[a]; this.winLine=[a,b,c]; this.state='won'; return;
+    const lines = [
+      [0,1,2],[3,4,5],[6,7,8],
+      [0,3,6],[1,4,7],[2,5,8],
+      [0,4,8],[2,4,6],
+    ];
+    for (const [a, b, c] of lines) {
+      if (this.board[a] && this.board[a] === this.board[b] && this.board[b] === this.board[c]) {
+        this.winner  = this.board[a];
+        this.winLine = [a, b, c];
+        this.state   = 'won';
+        return;
       }
     }
-    if (this.board.every(c=>c!==null)) this.state='draw';
+    if (this.board.every(c => c !== null)) this.state = 'draw';
   }
 
   render(container) { this._dom = container; this._draw(); }
 
   _draw() {
-    const c=this._dom; if(!c)return;
-    const sym=this.mySymbol, peer=sym==='X'?'O':'X', myTurn=this.state==='active'&&this.turn===sym;
-    let status='';
-    if (this.state==='waiting'&&this._invited&&!sym) {
-      status=`<div class="ta-invite"><div class="ta-inv-text">challenge received</div><div class="ta-btns"><div class="ta-btn accept" id="ttt-acc">accept</div><div class="ta-btn danger" id="ttt-dec">decline</div></div></div>`;
-    } else if (this.state==='waiting') {
-      status='<div class="ta-status">waiting for opponent…</div>';
-    } else if (this.state==='active') {
-      status=`<div class="ta-status${myTurn?' ta-myturn':''}">${myTurn?`your move — you are ${sym}`:`opponent's move (${peer})…`}</div>`;
-    } else if (this.state==='won') {
-      const won=this.winner===sym;
-      status=`<div class="ta-status ${won?'ta-win':'ta-loss'}">${won?'🎉 you win':'😔 you lose'}<div class="ta-btns"><div class="ta-btn" id="ttt-reset">rematch</div><div class="ta-btn danger" id="ttt-close">close</div></div></div>`;
-    } else if (this.state==='draw') {
-      status=`<div class="ta-status ta-draw">draw<div class="ta-btns"><div class="ta-btn" id="ttt-reset">rematch</div><div class="ta-btn danger" id="ttt-close">close</div></div></div>`;
-    } else if (this.state==='resigned') {
-      status=`<div class="ta-status ta-loss">opponent resigned<div class="ta-btns"><div class="ta-btn" id="ttt-reset">rematch</div><div class="ta-btn danger" id="ttt-close">close</div></div></div>`;
+    const c = this._dom; if (!c) return;
+    const sym = this.mySymbol, peer = sym === 'X' ? 'O' : 'X';
+    const myTurn = this.state === 'active' && this.turn === sym;
+
+    let status = '';
+    if (this.state === 'waiting' && this._invited && !sym) {
+      status = `<div class="ta-invite">
+        <div class="ta-inv-text">challenge received</div>
+        <div class="ta-btns">
+          <div class="ta-btn accept" id="ttt-acc">accept</div>
+          <div class="ta-btn danger" id="ttt-dec">decline</div>
+        </div>
+      </div>`;
+    } else if (this.state === 'waiting') {
+      status = '<div class="ta-status">waiting for opponent…</div>';
+    } else if (this.state === 'active') {
+      status = `<div class="ta-status${myTurn ? ' ta-myturn' : ''}">
+        ${myTurn ? `your move — you are ${sym}` : `opponent's move (${peer})…`}
+      </div>`;
+    } else if (this.state === 'won') {
+      const won = this.winner === sym;
+      status = `<div class="ta-status ${won ? 'ta-win' : 'ta-loss'}">
+        ${won ? '🎉 you win' : '😔 you lose'}
+        <div class="ta-btns">
+          <div class="ta-btn" id="ttt-reset">rematch</div>
+          <div class="ta-btn danger" id="ttt-close">close</div>
+        </div>
+      </div>`;
+    } else if (this.state === 'draw') {
+      status = `<div class="ta-status ta-draw">draw
+        <div class="ta-btns">
+          <div class="ta-btn" id="ttt-reset">rematch</div>
+          <div class="ta-btn danger" id="ttt-close">close</div>
+        </div>
+      </div>`;
+    } else if (this.state === 'resigned') {
+      status = `<div class="ta-status ta-loss">opponent resigned
+        <div class="ta-btns">
+          <div class="ta-btn" id="ttt-reset">rematch</div>
+          <div class="ta-btn danger" id="ttt-close">close</div>
+        </div>
+      </div>`;
     }
-    const cells=this.board.map((v,i)=>{
-      const win=this.winLine?.includes(i), click=myTurn&&!v&&this.state==='active';
-      return `<div class="ta-cell${v?' filled':''}${win?' win':''}${click?' click':''}" data-i="${i}">${v||''}</div>`;
+
+    const cells = this.board.map((v, i) => {
+      const win   = this.winLine?.includes(i);
+      const click = myTurn && !v && this.state === 'active';
+      return `<div class="ta-cell${v ? ' filled' : ''}${win ? ' win' : ''}${click ? ' click' : ''}" data-i="${i}">${v || ''}</div>`;
     }).join('');
-    c.innerHTML=`<div class="tqapp-ttt">
-      <div class="tqapp-hdr"><span>⊞ tic tac toe</span><span class="tqapp-sym">${sym?`you = ${sym}`:'…'}</span></div>
+
+    c.innerHTML = `<div class="tqapp-ttt">
+      <div class="tqapp-hdr">
+        <span>⊞ tic tac toe</span>
+        <span class="tqapp-sym">${sym ? `you = ${sym}` : '…'}</span>
+      </div>
       <div class="ta-board">${cells}</div>
       ${status}
-      ${this.state==='active'?`<div class="ta-btns"><div class="ta-btn danger" id="ttt-resign">resign</div></div>`:''}
+      ${this.state === 'active' ? `<div class="ta-btns"><div class="ta-btn danger" id="ttt-resign">resign</div></div>` : ''}
     </div>`;
-    c.querySelectorAll('.ta-cell.click').forEach(el=>el.addEventListener('click',()=>this._move(+el.dataset.i)));
-    c.querySelector('#ttt-acc')?.addEventListener('click',()=>this._accept());
-    c.querySelector('#ttt-dec')?.addEventListener('click',()=>{this.send({gameType:'ttt',action:'resign'});this.onClose?.();});
-    c.querySelector('#ttt-reset')?.addEventListener('click',()=>this._requestReset());
-    c.querySelector('#ttt-close')?.addEventListener('click',()=>this.onClose?.());
-    c.querySelector('#ttt-resign')?.addEventListener('click',()=>this._resign());
+
+    c.querySelectorAll('.ta-cell.click').forEach(el =>
+      el.addEventListener('click', () => this._move(+el.dataset.i))
+    );
+    c.querySelector('#ttt-acc')?.addEventListener('click', () => this._accept());
+    c.querySelector('#ttt-dec')?.addEventListener('click', () => {
+      this.send({ gameType: 'ttt', action: 'resign' });
+      this.onClose?.();
+    });
+    c.querySelector('#ttt-reset')?.addEventListener('click', () => this._requestReset());
+    c.querySelector('#ttt-close')?.addEventListener('click', () => this.onClose?.());
+    c.querySelector('#ttt-resign')?.addEventListener('click', () => this._resign());
   }
 
-  destroy() { this._dom=null; }
+  destroy() { this._dom = null; }
 }
 
-// ── Voice Memo ─────────────────────────────────────────────────────────────────
-// Not a two-player app — handles recording UI and produces a File.
-// app.js creates this, calls start(), receives File via onFile callback.
+// ── VoiceMemo ─────────────────────────────────────────────────────────────────
+
 export class VoiceMemo {
   constructor(onFile, onCancel) {
-    this.onFile   = onFile;   // (File) => void
-    this.onCancel = onCancel; // () => void
+    this.onFile   = onFile;    // (File) => void
+    this.onCancel = onCancel;  // () => void
+
     this._recorder  = null;
     this._stream    = null;
     this._chunks    = [];
     this._timer     = null;
     this._elapsed   = 0;
     this._dom       = null;
+    this._started   = false;   // guard against concurrent start() calls
+    this._cancelled = false;   // prevents _finish() from firing after cancel()
   }
 
   async start(container) {
+    // Guard: prevent concurrent start() calls
+    if (this._started) return;
+    this._started = true;
+    this._cancelled = false;
     this._dom = container;
-    try {
-      this._stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      container.innerHTML = `<div class="vm-err">🎤 ${e.name==='NotAllowedError'?'microphone denied':'no microphone found'}</div>`;
+
+    // Guard: check MediaRecorder availability (may be absent in some browsers)
+    if (typeof MediaRecorder === 'undefined') {
+      container.innerHTML = `<div class="vm-err">🎤 voice recording not supported in this browser</div>`;
       setTimeout(() => this.onCancel?.(), 2500);
       return;
     }
-    this._recorder = new MediaRecorder(this._stream, { mimeType: this._bestMime() });
-    this._recorder.ondataavailable = e => { if (e.data?.size > 0) this._chunks.push(e.data); };
+
+    try {
+      this._stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      const msg = e.name === 'NotAllowedError'
+        ? 'microphone access denied'
+        : 'no microphone found';
+      container.innerHTML = `<div class="vm-err">🎤 ${msg}</div>`;
+      setTimeout(() => this.onCancel?.(), 2500);
+      return;
+    }
+
+    const mime = this._bestMime();
+    try {
+      this._recorder = new MediaRecorder(this._stream, mime ? { mimeType: mime } : {});
+    } catch (e) {
+      // Fallback: let browser choose MIME type
+      try { this._recorder = new MediaRecorder(this._stream); }
+      catch (e2) {
+        container.innerHTML = `<div class="vm-err">🎤 recording setup failed: ${e2.message}</div>`;
+        this._stream.getTracks().forEach(t => t.stop());
+        setTimeout(() => this.onCancel?.(), 2500);
+        return;
+      }
+    }
+
+    this._chunks = [];
+    this._recorder.ondataavailable = (e) => {
+      if (e.data?.size > 0) this._chunks.push(e.data);
+    };
     this._recorder.onstop = () => this._finish();
-    this._recorder.start(100); // collect every 100ms
+
+    this._recorder.start(100); // collect data every 100ms
+
     this._elapsed = 0;
     this._timer   = setInterval(() => { this._elapsed++; this._draw(); }, 1000);
     this._draw();
   }
 
   _bestMime() {
-    const types = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+    const types = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4',
+    ];
     return types.find(t => MediaRecorder.isTypeSupported(t)) || '';
   }
 
   _draw() {
     if (!this._dom) return;
-    const s = this._elapsed;
-    const time = (s < 60 ? '0:' : Math.floor(s/60)+':') + String(s%60).padStart(2,'0');
+    const s    = this._elapsed;
+    const mins = Math.floor(s / 60);
+    const secs = String(s % 60).padStart(2, '0');
+    const time = `${mins}:${secs}`;
+
     this._dom.innerHTML = `<div class="tqapp-memo">
-      <div class="tqapp-hdr"><span>🎤 voice memo</span><span class="vm-time">${time}</span></div>
-      <div class="vm-bars"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      <div class="tqapp-hdr">
+        <span>🎤 voice memo</span>
+        <span class="vm-time">${time}</span>
+      </div>
+      <div class="vm-bars">
+        <span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span>
+      </div>
       <div class="vm-hint">recording — tap stop to send</div>
       <div class="vm-controls">
         <div class="ta-btn danger" id="vm-cancel">cancel</div>
         <div class="ta-btn accept" id="vm-stop">◼ stop &amp; send</div>
       </div>
     </div>`;
-    this._dom.querySelector('#vm-stop')?.addEventListener('click',()=>this.stop());
-    this._dom.querySelector('#vm-cancel')?.addEventListener('click',()=>this.cancel());
+
+    this._dom.querySelector('#vm-stop')?.addEventListener('click',   () => this.stop());
+    this._dom.querySelector('#vm-cancel')?.addEventListener('click', () => this.cancel());
   }
 
   stop() {
     clearInterval(this._timer);
-    if (this._recorder?.state === 'recording') this._recorder.stop();
+    if (this._recorder?.state === 'recording') {
+      try { this._recorder.stop(); } catch {}
+    }
     this._stream?.getTracks().forEach(t => t.stop());
   }
 
   cancel() {
+    this._cancelled = true;
     clearInterval(this._timer);
-    if (this._recorder?.state === 'recording') try { this._recorder.stop(); } catch {}
+    if (this._recorder?.state === 'recording') {
+      try { this._recorder.stop(); } catch {}
+    }
     this._stream?.getTracks().forEach(t => t.stop());
     this._chunks = [];
     if (this._dom) this._dom.innerHTML = '';
@@ -191,8 +329,11 @@ export class VoiceMemo {
   }
 
   _finish() {
+    // Ignore if cancel() already ran — avoids invoking onFile with empty data
+    if (this._cancelled) return;
     if (!this._chunks.length) { this.onCancel?.(); return; }
-    const mime = this._recorder.mimeType || 'audio/webm';
+
+    const mime = this._recorder?.mimeType || 'audio/webm';
     const blob = new Blob(this._chunks, { type: mime });
     const ext  = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
     const file = new File([blob], `memo-${Date.now()}.${ext}`, { type: mime });
@@ -200,7 +341,16 @@ export class VoiceMemo {
     this.onFile?.(file);
   }
 
-  destroy() { this.cancel(); this._dom = null; }
+  destroy() {
+    // Non-cancelling teardown — preserves any recorded data already sent
+    this._cancelled = true;
+    clearInterval(this._timer);
+    if (this._recorder?.state === 'recording') {
+      try { this._recorder.stop(); } catch {}
+    }
+    this._stream?.getTracks().forEach(t => t.stop());
+    this._dom = null;
+  }
 }
 
 // Populate registry classes

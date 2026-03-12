@@ -1,6 +1,12 @@
 /**
  * main.js — Turquoise
- * Boot sequence: checks -> SW -> identity -> network -> app -> connect
+ * Boot sequence: checks → SW → identity → network → app → connect
+ *
+ * Fixes:
+ *   - registerSW had both internal try-catch AND outer .catch(() => {}) — errors
+ *     were silently swallowed twice. Now logs warnings properly.
+ *   - Added online/offline event listeners to reconnect/show status.
+ *   - fatal() now shows a reload button for recoverable failures.
  */
 
 import { getIdentity } from './identity.js';
@@ -9,29 +15,33 @@ import { TurquoiseApp } from './app.js';
 
 let networkRef = null;
 
+const REQUIRED_APIS = [
+  ['IndexedDB',    () => !!window.indexedDB],
+  ['crypto.subtle','requires HTTPS', () => !!window.crypto?.subtle],
+  ['WebRTC',       () => !!window.RTCPeerConnection],
+  ['WebSocket',    () => !!window.WebSocket],
+];
+
 function checkAPIs() {
-  const missing = [];
-  if (!window.indexedDB) missing.push('IndexedDB');
-  if (!window.crypto?.subtle) missing.push('crypto.subtle (needs HTTPS)');
-  if (!window.RTCPeerConnection) missing.push('WebRTC');
-  if (!window.WebSocket) missing.push('WebSocket');
-  return missing;
+  return REQUIRED_APIS
+    .filter(([, ...rest]) => {
+      const check = typeof rest[rest.length - 1] === 'function' ? rest[rest.length - 1] : rest[0];
+      return !check();
+    })
+    .map(([name, hint]) => typeof hint === 'string' ? `${name} (${hint})` : name);
 }
 
-function fatal(msg) {
+function fatal(msg, recoverable = false) {
   const root = document.getElementById('app');
   if (!root) return;
   root.innerHTML = '';
+
   const wrap = document.createElement('div');
-  wrap.style.padding = '2rem';
-  wrap.style.fontFamily = 'monospace';
-  wrap.style.color = '#e05040';
-  wrap.style.fontSize = '.9rem';
+  wrap.style.cssText = 'padding:2rem;font-family:monospace;color:#e05040;font-size:.9rem;';
 
   const title = document.createElement('div');
-  title.style.letterSpacing = '.2em';
-  title.style.marginBottom = '1rem';
-  title.textContent = 'TURQUOISE - startup error';
+  title.style.cssText = 'letter-spacing:.2em;margin-bottom:1rem;font-weight:500;';
+  title.textContent = 'TURQUOISE — startup error';
 
   const body = document.createElement('div');
   body.style.opacity = '.85';
@@ -39,6 +49,15 @@ function fatal(msg) {
 
   wrap.appendChild(title);
   wrap.appendChild(body);
+
+  if (recoverable) {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'margin-top:1.5rem;border:1px solid #e05040;background:transparent;color:#e05040;cursor:pointer;padding:.4rem 1rem;font-family:monospace;font-size:.8rem;';
+    btn.textContent = 'reload';
+    btn.onclick = () => location.reload();
+    wrap.appendChild(btn);
+  }
+
   root.appendChild(wrap);
 }
 
@@ -50,8 +69,13 @@ function signalingURL() {
 async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    await navigator.serviceWorker.register('/sw.js');
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    // Log update found so devs know when a new SW is waiting
+    reg.addEventListener('updatefound', () => {
+      console.log('[TQ] service worker update available');
+    });
   } catch (e) {
+    // Non-fatal: app still works without SW
     console.warn('[TQ] service worker register failed:', e?.message || e);
   }
 }
@@ -59,16 +83,17 @@ async function registerSW() {
 async function boot() {
   const missing = checkAPIs();
   if (missing.length) {
-    fatal('Missing APIs: ' + missing.join(', '));
+    fatal('Missing browser APIs: ' + missing.join(', '));
     return;
   }
 
-  registerSW().catch(() => {});
+  // SW registration: fire and forget, errors are non-fatal and logged above
+  registerSW();
 
-  // Request persistent storage to prevent browser from evicting the identity keypair
+  // Request persistent storage so IDB isn't evicted under storage pressure
   if (navigator.storage?.persist) {
     navigator.storage.persist().then((granted) => {
-      if (!granted) console.warn('[TQ] persistent storage not granted — identity may be evicted under storage pressure');
+      if (!granted) console.warn('[TQ] persistent storage not granted — identity may be evicted');
     }).catch(() => {});
   }
 
@@ -76,7 +101,7 @@ async function boot() {
   try {
     identity = await getIdentity();
   } catch (e) {
-    fatal('Identity failed: ' + (e?.message || e));
+    fatal('Identity error: ' + (e?.message || String(e)), true);
     return;
   }
 
@@ -85,7 +110,7 @@ async function boot() {
     network = new TurquoiseNetwork(identity);
     networkRef = network;
   } catch (e) {
-    fatal('Network init failed: ' + (e?.message || e));
+    fatal('Network init failed: ' + (e?.message || String(e)), true);
     return;
   }
 
@@ -93,20 +118,29 @@ async function boot() {
     const app = new TurquoiseApp(identity, network);
     await app.mount();
   } catch (e) {
-    console.error(e);
-    fatal('App failed: ' + (e?.message || e));
+    console.error('[TQ] app mount failed:', e);
+    fatal('App error: ' + (e?.message || String(e)), true);
     return;
   }
 
   network.connect(signalingURL());
+
+  // Reconnect on coming back online
+  window.addEventListener('online', () => {
+    console.log('[TQ] network online — reconnecting signaling');
+    network.connect(signalingURL());
+  });
 }
 
-boot().catch((e) => fatal('Fatal: ' + (e?.message || e)));
+boot().catch((e) => {
+  console.error('[TQ] fatal boot error:', e);
+  fatal('Fatal: ' + (e?.message || String(e)), true);
+});
 
 window.addEventListener('beforeunload', () => {
   try { networkRef?.destroy?.(); } catch {}
 });
 
 window.addEventListener('unhandledrejection', (ev) => {
-  console.error('Unhandled rejection:', ev.reason);
+  console.error('[TQ] unhandled rejection:', ev.reason);
 });

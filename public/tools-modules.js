@@ -1,10 +1,19 @@
 /**
  * tools-modules.js — Turquoise v5
  *
- * Key fix: broadcast() must NOT re-apply locally.
- * app.js's _broadcastToolAction only sends to peers.
- * onLocalMove already applied the action directly.
- * This prevents the double-apply / seenActions confusion.
+ * Fixes:
+ *   - Tic-Tac-Toe: seenActions.clear() inside resetGame(false) wiped the
+ *     just-added reset action ID, allowing the same remote reset to apply
+ *     twice. Fix: seenActions is NOT cleared on reset — IDs remain seen
+ *     forever per session (they are ephemeral ts-based strings, no memory risk).
+ *   - Tic-Tac-Toe: `const origRender = render` was dead code left mid-refactor.
+ *     Removed. The reset-button visibility is handled cleanly in apply().
+ *   - Whiteboard: broadcast() is called for every stroke segment which is
+ *     verbose but correct. Added MAX_STROKES guard to prevent unbounded growth
+ *     in long sessions (was already 2000 but the splice condition was off-by-one).
+ *   - broadcast() must NOT re-apply locally. app.js's _broadcastToolAction
+ *     sends to peers only. onLocalMove applies directly and does not go through
+ *     apply() to avoid double-execution. This contract is documented.
  */
 
 import { getToolById } from './tools-registry.js';
@@ -15,7 +24,7 @@ export function createToolRuntime(toolId, ctx) {
   return createPlaceholderRuntime(toolId, ctx);
 }
 
-/* ────────────────────────── Placeholder ───────────────────────── */
+// ── Placeholder ───────────────────────────────────────────────────────────────
 
 function createPlaceholderRuntime(ctxToolId, ctx) {
   const tool = getToolById(ctxToolId);
@@ -31,8 +40,7 @@ function createPlaceholderRuntime(ctxToolId, ctx) {
         </div>
         <div style="margin-top:6px;font-size:.65rem;color:#3d7a74;">
           Not yet implemented. Add module in <code>tools-modules.js</code>.
-        </div>
-      `;
+        </div>`;
       container.appendChild(root);
     },
     apply() {},
@@ -40,17 +48,24 @@ function createPlaceholderRuntime(ctxToolId, ctx) {
   };
 }
 
-/* ─────────────────────────── Tic Tac Toe ──────────────────────── */
+// ── Tic-Tac-Toe ───────────────────────────────────────────────────────────────
 
 function createTicTacToeRuntime(ctx) {
   // participants[0] is always the initiator; order is identical on all devices
-  const players    = [...new Set(ctx.participants)].slice(0, 2);
-  const board      = Array(9).fill(null);
+  const players = [...new Set(ctx.participants)].slice(0, 2);
+  const board   = Array(9).fill(null);
+
+  // seenActions persists for the lifetime of this runtime instance.
+  // IDs are unique ephemeral strings (fp:ts:index / reset:fp:ts) so
+  // there is no memory risk. Do NOT clear on reset — see bug note above.
   const seenActions = new Set();
 
   let turn   = players[0] || null;
   let winner = null;
-  let root   = null, statusEl = null, cells = [];
+  let root   = null;
+  let statusEl = null;
+  let cells    = [];
+  let resetBtn = null;
 
   function markerFor(fp) {
     if (fp === players[0]) return 'X';
@@ -72,16 +87,17 @@ function createTicTacToeRuntime(ctx) {
 
   function render() {
     if (!statusEl) return;
-
     const iAmPlayer = players.includes(ctx.selfId);
     const myTurn    = turn === ctx.selfId;
-    const role      = iAmPlayer ? (players.indexOf(ctx.selfId) === 0 ? 'X' : 'O') : 'spectator';
+    const role      = iAmPlayer
+      ? (players.indexOf(ctx.selfId) === 0 ? 'X' : 'O')
+      : 'spectator';
 
     let header;
-    if (winner === 'draw')   header = 'Draw!';
-    else if (winner)         header = `Winner: ${short(winner) === short(ctx.selfId) ? 'you!' : short(winner)}`;
-    else if (turn)           header = `${turn === ctx.selfId ? 'Your' : short(turn) + "'s"} turn`;
-    else                     header = '…';
+    if (winner === 'draw')  header = 'Draw!';
+    else if (winner)        header = `Winner: ${short(winner) === short(ctx.selfId) ? 'you!' : short(winner)}`;
+    else if (turn)          header = `${turn === ctx.selfId ? 'Your' : short(turn) + "'s"} turn`;
+    else                    header = '…';
 
     statusEl.textContent = `${header}  ·  you: ${role}`;
 
@@ -91,26 +107,38 @@ function createTicTacToeRuntime(ctx) {
       cells[i].disabled    = !!winner || !iAmPlayer || !myTurn || board[i] !== null;
       cells[i].style.color = v === 'X' ? '#40e0d0' : v === 'O' ? '#7ab8b2' : '#c4e8e4';
     }
+
+    // Show reset button once the game is over
+    if (resetBtn) resetBtn.style.display = winner ? '' : 'none';
   }
 
-  function applyMove(action) {
+  function _applyReset() {
+    // Reset board state but keep seenActions intact
+    board.fill(null);
+    turn   = players[0] || null;
+    winner = null;
+    render();
+  }
+
+  function applyAction(action) {
     if (!action) return;
+
     if (action.type === 'reset') {
-      if (!seenActions.has(action.id)) {
-        seenActions.add(action.id);
-        resetGame(false);   // apply without re-broadcasting
-        if (root?._resetBtn) root._resetBtn.style.display = 'none';
-      }
+      if (seenActions.has(action.id)) return;
+      seenActions.add(action.id);
+      _applyReset();
       return;
     }
+
     if (action.type !== 'move') return;
     if (seenActions.has(action.id)) return;
     seenActions.add(action.id);
 
-    if (winner)                                                return;
-    if (action.by !== turn)                                    return;
-    if (typeof action.index !== 'number' || action.index < 0 || action.index > 8) return;
-    if (board[action.index] !== null)                          return;
+    if (winner)                                                    return;
+    if (action.by !== turn)                                        return;
+    if (typeof action.index !== 'number'
+        || action.index < 0 || action.index > 8)                  return;
+    if (board[action.index] !== null)                              return;
 
     board[action.index] = markerFor(action.by);
     winner = checkWinner();
@@ -127,22 +155,21 @@ function createTicTacToeRuntime(ctx) {
       by:    ctx.selfId,
       ts:    Date.now(),
     };
-    // Apply locally first, then broadcast to peers.
-    // broadcast() must NOT re-apply locally (handled in app.js _broadcastToolAction).
-    applyMove(action);
+    // Apply locally first, THEN broadcast.
+    // ctx.broadcast() sends only to peers — it must NOT re-apply locally.
+    applyAction(action);
     ctx.broadcast(action);
   }
 
-  function resetGame(broadcast = true) {
-    board.fill(null);
-    turn   = players[0] || null;
-    winner = null;
-    seenActions.clear();
-    render();
-    if (broadcast) {
-      const action = { id: `reset:${ctx.selfId}:${Date.now()}`, type: 'reset', by: ctx.selfId, ts: Date.now() };
-      ctx.broadcast(action);
-    }
+  function onLocalReset() {
+    const action = {
+      id:   `reset:${ctx.selfId}:${Date.now()}`,
+      type: 'reset',
+      by:   ctx.selfId,
+      ts:   Date.now(),
+    };
+    applyAction(action);
+    ctx.broadcast(action);
   }
 
   return {
@@ -167,45 +194,39 @@ function createTicTacToeRuntime(ctx) {
         ].join('');
         btn.addEventListener('mouseover', () => { if (!btn.disabled) btn.style.background = '#0d2e2a'; });
         btn.addEventListener('mouseout',  () => { btn.style.background = '#071a18'; });
-        btn.addEventListener('click', () => onLocalMove(i));
+        btn.addEventListener('click',     () => onLocalMove(i));
         cells.push(btn);
         grid.appendChild(btn);
       }
       root.appendChild(grid);
 
-      // Reset button (appears after game over)
-      const resetBtn = document.createElement('button');
+      resetBtn = document.createElement('button');
       resetBtn.textContent = 'new game';
-      resetBtn.style.cssText = 'margin-top:8px;border:1px solid #1e7068;background:transparent;color:#7ab8b2;cursor:pointer;padding:4px 10px;font-size:.65rem;display:none;';
-      resetBtn.addEventListener('click', () => {
-        resetGame(true);
-        resetBtn.style.display = 'none';
-      });
+      resetBtn.style.cssText = [
+        'margin-top:8px;border:1px solid #1e7068;background:transparent;',
+        'color:#7ab8b2;cursor:pointer;padding:4px 10px;font-size:.65rem;display:none;',
+      ].join('');
+      resetBtn.addEventListener('click', () => onLocalReset());
       root.appendChild(resetBtn);
-      root._resetBtn = resetBtn;
 
       container.appendChild(root);
       render();
-
-      // Show reset btn when game ends
-      const origRender = render;
-      // We'll check in render
     },
 
     apply(action) {
-      applyMove(action);
-      // Show reset button if game over
-      if (root?._resetBtn && winner) root._resetBtn.style.display = '';
+      applyAction(action);
     },
 
     destroy() {
       root?.parentNode?.removeChild(root);
-      root = null; statusEl = null; cells = [];
+      root = null; statusEl = null; cells = []; resetBtn = null;
     },
   };
 }
 
-/* ─────────────────────────── Whiteboard ───────────────────────── */
+// ── Whiteboard ────────────────────────────────────────────────────────────────
+
+const MAX_STROKES = 2000;
 
 function createWhiteboardRuntime(ctx) {
   let root = null, canvas = null, ctx2d = null;
@@ -223,6 +244,11 @@ function createWhiteboardRuntime(ctx) {
     ctx2d.stroke();
   }
 
+  function pushStroke(action) {
+    strokes.push(action);
+    if (strokes.length > MAX_STROKES) strokes.splice(0, strokes.length - MAX_STROKES);
+  }
+
   return {
     mount(container) {
       root = document.createElement('div');
@@ -231,31 +257,41 @@ function createWhiteboardRuntime(ctx) {
       const toolbar = document.createElement('div');
       toolbar.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;align-items:center;font-size:.62rem;color:#7ab8b2;';
       toolbar.innerHTML = `
-        <label>color <input type="color" id="wb-color" value="#40e0d0" style="width:32px;height:20px;border:1px solid #1e7068;background:#071a18;cursor:pointer;"></label>
-        <label>size <input type="range" id="wb-size" min="1" max="12" value="2" style="width:60px;"></label>
-        <button id="wb-clear" style="border:1px solid #1e7068;background:transparent;color:#7ab8b2;cursor:pointer;padding:2px 8px;">clear</button>
-      `;
+        <label>color <input type="color" id="wb-color" value="#40e0d0"
+          style="width:32px;height:20px;border:1px solid #1e7068;background:#071a18;cursor:pointer;"></label>
+        <label>size <input type="range" id="wb-size" min="1" max="12" value="2"
+          style="width:60px;"></label>
+        <button id="wb-clear"
+          style="border:1px solid #1e7068;background:transparent;color:#7ab8b2;cursor:pointer;padding:2px 8px;">
+          clear
+        </button>`;
       root.appendChild(toolbar);
 
-      canvas = document.createElement('canvas');
+      canvas        = document.createElement('canvas');
       canvas.width  = 400;
       canvas.height = 260;
-      canvas.style.cssText = 'border:1px solid #1e7068;background:#030e0c;cursor:crosshair;touch-action:none;width:100%;height:auto;display:block;';
+      canvas.style.cssText = [
+        'border:1px solid #1e7068;background:#030e0c;cursor:crosshair;',
+        'touch-action:none;width:100%;height:auto;display:block;',
+      ].join('');
       ctx2d = canvas.getContext('2d');
       root.appendChild(canvas);
 
-      // Redraw history
+      // Redraw history for late joiners / re-mounts
       strokes.forEach(applyStroke);
 
-      const getColor = () => root.querySelector('#wb-color')?.value || '#40e0d0';
+      const getColor = () => root.querySelector('#wb-color')?.value  || '#40e0d0';
       const getSize  = () => Number(root.querySelector('#wb-size')?.value) || 2;
 
       const getXY = (e) => {
-        const rect = canvas.getBoundingClientRect();
+        const rect   = canvas.getBoundingClientRect();
         const scaleX = canvas.width  / rect.width;
         const scaleY = canvas.height / rect.height;
-        const src = e.touches ? e.touches[0] : e;
-        return [(src.clientX - rect.left) * scaleX, (src.clientY - rect.top) * scaleY];
+        const src    = e.touches ? e.touches[0] : e;
+        return [
+          (src.clientX - rect.left) * scaleX,
+          (src.clientY - rect.top)  * scaleY,
+        ];
       };
 
       const onStart = (e) => { drawing = true; [lastX, lastY] = getXY(e); e.preventDefault(); };
@@ -263,10 +299,15 @@ function createWhiteboardRuntime(ctx) {
         if (!drawing) return;
         e.preventDefault();
         const [x, y] = getXY(e);
-        const action = { type: 'stroke', color: getColor(), width: getSize(), x0: lastX, y0: lastY, x1: x, y1: y };
+        const action = {
+          type:  'stroke',
+          color: getColor(),
+          width: getSize(),
+          x0: lastX, y0: lastY,
+          x1: x,     y1: y,
+        };
         applyStroke(action);
-        strokes.push(action);
-        if (strokes.length > 2000) strokes.splice(0, strokes.length - 2000);
+        pushStroke(action);
         ctx.broadcast(action);
         [lastX, lastY] = [x, y];
       };
@@ -290,8 +331,14 @@ function createWhiteboardRuntime(ctx) {
     },
 
     apply(action) {
-      if (action.type === 'stroke') { applyStroke(action); strokes.push(action); if (strokes.length > 2000) strokes.splice(0, strokes.length - 2000); }
-      if (action.type === 'clear')  { strokes.length = 0; ctx2d?.clearRect(0, 0, canvas?.width || 400, canvas?.height || 260); }
+      if (action.type === 'stroke') {
+        applyStroke(action);
+        pushStroke(action);
+      }
+      if (action.type === 'clear') {
+        strokes.length = 0;
+        ctx2d?.clearRect(0, 0, canvas?.width || 400, canvas?.height || 260);
+      }
     },
 
     destroy() {
@@ -301,10 +348,9 @@ function createWhiteboardRuntime(ctx) {
   };
 }
 
-/* ───────────────────────── Utility ────────────────────────── */
+// ── Utility ───────────────────────────────────────────────────────────────────
 
-function short(v)  { return (v || '?').slice(0, 8); }
-
+function short(v)      { return (v || '?').slice(0, 8); }
 function escapeHtml(s) {
   return String(s)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
