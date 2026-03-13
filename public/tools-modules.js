@@ -1,226 +1,128 @@
 /**
- * tools-modules.js — Turquoise v5
+ * tools-modules.js — Turquoise v7
  *
- * Fixes:
- *   - Tic-Tac-Toe: seenActions.clear() inside resetGame(false) wiped the
- *     just-added reset action ID, allowing the same remote reset to apply
- *     twice. Fix: seenActions is NOT cleared on reset — IDs remain seen
- *     forever per session (they are ephemeral ts-based strings, no memory risk).
- *   - Tic-Tac-Toe: `const origRender = render` was dead code left mid-refactor.
- *     Removed. The reset-button visibility is handled cleanly in apply().
- *   - Whiteboard: broadcast() is called for every stroke segment which is
- *     verbose but correct. Added MAX_STROKES guard to prevent unbounded growth
- *     in long sessions (was already 2000 but the splice condition was off-by-one).
- *   - broadcast() must NOT re-apply locally. app.js's _broadcastToolAction
- *     sends to peers only. onLocalMove applies directly and does not go through
- *     apply() to avoid double-execution. This contract is documented.
+ * Fixes carried forward from v5/v6 + new:
+ *   - TicTacToe: seenActions never cleared on reset (was a double-reset bug)
+ *   - TicTacToe: dead code `const origRender = render` removed
+ *   - Whiteboard: MAX_STROKES splice corrected (was off-by-one)
+ *   - broadcast() never re-applies locally — contract documented
+ *   - New: tool containers now use the design system's clip-path aesthetic
+ *   - Smaller: ~35% reduction via consolidation
  */
 
 import { getToolById } from './tools-registry.js';
 
 export function createToolRuntime(toolId, ctx) {
-  if (toolId === 'tic-tac-toe') return createTicTacToeRuntime(ctx);
-  if (toolId === 'whiteboard')  return createWhiteboardRuntime(ctx);
-  return createPlaceholderRuntime(toolId, ctx);
+  if (toolId === 'tic-tac-toe') return _ttt(ctx);
+  if (toolId === 'whiteboard')  return _wb(ctx);
+  return _placeholder(toolId, ctx);
 }
 
 // ── Placeholder ───────────────────────────────────────────────────────────────
 
-function createPlaceholderRuntime(ctxToolId, ctx) {
-  const tool = getToolById(ctxToolId);
+function _placeholder(toolId, ctx) {
+  const tool = getToolById(toolId);
   let root = null;
-
   return {
-    mount(container) {
-      root = document.createElement('div');
-      root.style.cssText = 'padding:8px;';
-      root.innerHTML = `
-        <div style="font-size:.75rem;color:#7ab8b2;">
-          <b>${escapeHtml(tool?.title || ctxToolId)}</b>
-        </div>
-        <div style="margin-top:6px;font-size:.65rem;color:#3d7a74;">
-          Not yet implemented. Add module in <code>tools-modules.js</code>.
-        </div>`;
-      container.appendChild(root);
+    mount(c) {
+      root = _div('padding:8px;font-size:.72rem;color:var(--dim)');
+      root.innerHTML = `<b style="color:var(--tq)">${esc(tool?.title||toolId)}</b><br><span style="color:var(--mute)">not yet implemented</span>`;
+      c.appendChild(root);
     },
     apply() {},
-    destroy() { root?.parentNode?.removeChild(root); root = null; },
+    destroy() { root?.remove(); root=null; },
   };
 }
 
 // ── Tic-Tac-Toe ───────────────────────────────────────────────────────────────
 
-function createTicTacToeRuntime(ctx) {
-  // participants[0] is always the initiator; order is identical on all devices
-  const players = [...new Set(ctx.participants)].slice(0, 2);
+function _ttt(ctx) {
+  const players = [...new Set(ctx.participants)].slice(0,2);
   const board   = Array(9).fill(null);
+  const seen    = new Set();   // never cleared — prevents double-apply of reset
 
-  // seenActions persists for the lifetime of this runtime instance.
-  // IDs are unique ephemeral strings (fp:ts:index / reset:fp:ts) so
-  // there is no memory risk. Do NOT clear on reset — see bug note above.
-  const seenActions = new Set();
+  let turn=players[0]||null, winner=null, winLine=null;
+  let root=null, statusEl=null, cells=[], resetBtn=null;
 
-  let turn   = players[0] || null;
-  let winner = null;
-  let root   = null;
-  let statusEl = null;
-  let cells    = [];
-  let resetBtn = null;
+  const marker = fp => fp===players[0]?'X':fp===players[1]?'O':null;
+  const myMark = marker(ctx.selfId);
 
-  function markerFor(fp) {
-    if (fp === players[0]) return 'X';
-    if (fp === players[1]) return 'O';
-    return null;
-  }
-
-  function checkWinner() {
-    const lines = [
-      [0,1,2],[3,4,5],[6,7,8],
-      [0,3,6],[1,4,7],[2,5,8],
-      [0,4,8],[2,4,6],
-    ];
-    for (const [a, b, c] of lines) {
-      if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
-    }
-    return board.every(Boolean) ? 'draw' : null;
+  function checkWin() {
+    const lines=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    for (const [a,b,c] of lines) if (board[a]&&board[a]===board[b]&&board[a]===board[c]) return {mark:board[a],line:[a,b,c]};
+    return board.every(Boolean) ? {mark:'draw',line:null} : null;
   }
 
   function render() {
     if (!statusEl) return;
-    const iAmPlayer = players.includes(ctx.selfId);
-    const myTurn    = turn === ctx.selfId;
-    const role      = iAmPlayer
-      ? (players.indexOf(ctx.selfId) === 0 ? 'X' : 'O')
-      : 'spectator';
+    const iAm  = players.includes(ctx.selfId);
+    const myTurn = turn===ctx.selfId;
+    const role   = iAm ? (players.indexOf(ctx.selfId)===0?'X':'O') : 'spectator';
 
-    let header;
-    if (winner === 'draw')  header = 'Draw!';
-    else if (winner)        header = `Winner: ${short(winner) === short(ctx.selfId) ? 'you!' : short(winner)}`;
-    else if (turn)          header = `${turn === ctx.selfId ? 'Your' : short(turn) + "'s"} turn`;
-    else                    header = '…';
+    let hdr = winner ? (winner==='draw'?'Draw!':`${winner===myMark?'You win!':short(turn)+" wins"}`) : (turn ? `${myTurn?'your':''+short(turn)+"'s"} turn` : '…');
+    statusEl.textContent = `${hdr}  ·  you: ${role}`;
 
-    statusEl.textContent = `${header}  ·  you: ${role}`;
-
-    for (let i = 0; i < 9; i++) {
-      const v = board[i];
-      cells[i].textContent = v ?? '';
-      cells[i].disabled    = !!winner || !iAmPlayer || !myTurn || board[i] !== null;
-      cells[i].style.color = v === 'X' ? '#40e0d0' : v === 'O' ? '#7ab8b2' : '#c4e8e4';
-    }
-
-    // Show reset button once the game is over
+    cells.forEach((btn,i)=>{
+      const v=board[i];
+      btn.textContent = v||'';
+      btn.disabled    = !!winner||!iAm||!myTurn||v!==null;
+      btn.style.color = v==='X'?'var(--tq)':v==='O'?'var(--ug)':'var(--dim)';
+      btn.style.borderColor = winLine?.includes(i)?'var(--tq)':'var(--mute)';
+    });
     if (resetBtn) resetBtn.style.display = winner ? '' : 'none';
-  }
-
-  function _applyReset() {
-    // Reset board state but keep seenActions intact
-    board.fill(null);
-    turn   = players[0] || null;
-    winner = null;
-    render();
   }
 
   function applyAction(action) {
     if (!action) return;
-
-    if (action.type === 'reset') {
-      if (seenActions.has(action.id)) return;
-      seenActions.add(action.id);
-      _applyReset();
-      return;
+    if (action.type==='reset') {
+      if (seen.has(action.id)) return; seen.add(action.id);
+      board.fill(null); turn=players[0]||null; winner=null; winLine=null; render(); return;
     }
-
-    if (action.type !== 'move') return;
-    if (seenActions.has(action.id)) return;
-    seenActions.add(action.id);
-
-    if (winner)                                                    return;
-    if (action.by !== turn)                                        return;
-    if (typeof action.index !== 'number'
-        || action.index < 0 || action.index > 8)                  return;
-    if (board[action.index] !== null)                              return;
-
-    board[action.index] = markerFor(action.by);
-    winner = checkWinner();
-    if (!winner) turn = (turn === players[0]) ? players[1] : players[0];
+    if (action.type!=='move') return;
+    if (seen.has(action.id)) return; seen.add(action.id);
+    if (winner||action.by!==turn||typeof action.index!=='number'||action.index<0||action.index>8||board[action.index]!==null) return;
+    board[action.index] = marker(action.by);
+    const w = checkWin();
+    if (w) { winner=w.mark; winLine=w.line; } else turn=turn===players[0]?players[1]:players[0];
     render();
   }
 
-  function onLocalMove(index) {
-    if (winner || turn !== ctx.selfId) return;
-    const action = {
-      id:    `${ctx.selfId}:${Date.now()}:${index}`,
-      type:  'move',
-      index,
-      by:    ctx.selfId,
-      ts:    Date.now(),
-    };
-    // Apply locally first, THEN broadcast.
-    // ctx.broadcast() sends only to peers — it must NOT re-apply locally.
-    applyAction(action);
-    ctx.broadcast(action);
+  function localMove(i) {
+    if (winner||turn!==ctx.selfId) return;
+    const a={id:`${ctx.selfId}:${Date.now()}:${i}`,type:'move',index:i,by:ctx.selfId,ts:Date.now()};
+    applyAction(a); ctx.broadcast(a);
   }
-
-  function onLocalReset() {
-    const action = {
-      id:   `reset:${ctx.selfId}:${Date.now()}`,
-      type: 'reset',
-      by:   ctx.selfId,
-      ts:   Date.now(),
-    };
-    applyAction(action);
-    ctx.broadcast(action);
+  function localReset() {
+    const a={id:`reset:${ctx.selfId}:${Date.now()}`,type:'reset',by:ctx.selfId,ts:Date.now()};
+    applyAction(a); ctx.broadcast(a);
   }
 
   return {
     mount(container) {
-      root = document.createElement('div');
-      root.style.cssText = 'user-select:none;';
-
-      statusEl = document.createElement('div');
-      statusEl.style.cssText = 'font-size:.66rem;color:#7ab8b2;margin-bottom:8px;min-height:1.2em;';
+      root = _div('user-select:none');
+      statusEl = _div('font-size:.66rem;color:var(--tq2);margin-bottom:8px;min-height:1.2em;');
       root.appendChild(statusEl);
 
-      const grid = document.createElement('div');
-      grid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:5px;max-width:210px;';
-      cells = [];
-
-      for (let i = 0; i < 9; i++) {
+      const grid = _div('display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-width:190px;');
+      cells = Array.from({length:9}, (_,i) => {
         const btn = document.createElement('button');
-        btn.style.cssText = [
-          'height:60px;border:1px solid #1e7068;background:#071a18;',
-          'color:#c4e8e4;font-size:1.2rem;cursor:pointer;',
-          'transition:background .12s,border-color .12s;',
-        ].join('');
-        btn.addEventListener('mouseover', () => { if (!btn.disabled) btn.style.background = '#0d2e2a'; });
-        btn.addEventListener('mouseout',  () => { btn.style.background = '#071a18'; });
-        btn.addEventListener('click',     () => onLocalMove(i));
-        cells.push(btn);
-        grid.appendChild(btn);
-      }
+        btn.style.cssText = 'height:56px;border:1px solid var(--mute);background:var(--bg1);font-size:1.1rem;cursor:pointer;clip-path:polygon(0 0,calc(100%-6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100%-6px));transition:background .1s';
+        btn.addEventListener('mouseover', ()=>{if(!btn.disabled)btn.style.background='var(--bg2)';});
+        btn.addEventListener('mouseout',  ()=>btn.style.background='var(--bg1)');
+        btn.addEventListener('click', ()=>localMove(i));
+        grid.appendChild(btn); return btn;
+      });
       root.appendChild(grid);
 
       resetBtn = document.createElement('button');
-      resetBtn.textContent = 'new game';
-      resetBtn.style.cssText = [
-        'margin-top:8px;border:1px solid #1e7068;background:transparent;',
-        'color:#7ab8b2;cursor:pointer;padding:4px 10px;font-size:.65rem;display:none;',
-      ].join('');
-      resetBtn.addEventListener('click', () => onLocalReset());
+      resetBtn.textContent='new game';
+      resetBtn.style.cssText='margin-top:6px;border:1px solid var(--mute);background:transparent;color:var(--dim);cursor:pointer;padding:3px 10px;font-size:.65rem;font-family:inherit;clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));display:none';
+      resetBtn.addEventListener('click', localReset);
       root.appendChild(resetBtn);
-
-      container.appendChild(root);
-      render();
+      container.appendChild(root); render();
     },
-
-    apply(action) {
-      applyAction(action);
-    },
-
-    destroy() {
-      root?.parentNode?.removeChild(root);
-      root = null; statusEl = null; cells = []; resetBtn = null;
-    },
+    apply(a)  { applyAction(a); },
+    destroy() { root?.remove(); root=null; statusEl=null; cells=[]; resetBtn=null; },
   };
 }
 
@@ -228,131 +130,71 @@ function createTicTacToeRuntime(ctx) {
 
 const MAX_STROKES = 2000;
 
-function createWhiteboardRuntime(ctx) {
-  let root = null, canvas = null, ctx2d = null;
-  let drawing = false, lastX = 0, lastY = 0;
+function _wb(ctx) {
+  let root=null, canvas=null, ctx2d=null, drawing=false, lx=0, ly=0;
   const strokes = [];
 
-  function applyStroke(action) {
-    if (!ctx2d || action.type !== 'stroke') return;
-    ctx2d.beginPath();
-    ctx2d.strokeStyle = action.color || '#40e0d0';
-    ctx2d.lineWidth   = action.width || 2;
-    ctx2d.lineCap     = 'round';
-    ctx2d.moveTo(action.x0, action.y0);
-    ctx2d.lineTo(action.x1, action.y1);
-    ctx2d.stroke();
+  function drawStroke(a) {
+    if (!ctx2d||a.type!=='stroke') return;
+    ctx2d.beginPath(); ctx2d.strokeStyle=a.color||'var(--tq)'; ctx2d.lineWidth=a.width||2; ctx2d.lineCap='round';
+    ctx2d.moveTo(a.x0,a.y0); ctx2d.lineTo(a.x1,a.y1); ctx2d.stroke();
   }
-
-  function pushStroke(action) {
-    strokes.push(action);
+  function pushStroke(a) {
+    strokes.push(a);
     if (strokes.length > MAX_STROKES) strokes.splice(0, strokes.length - MAX_STROKES);
   }
 
   return {
     mount(container) {
-      root = document.createElement('div');
-      root.style.cssText = 'position:relative;';
+      root = _div('position:relative');
 
-      const toolbar = document.createElement('div');
-      toolbar.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;align-items:center;font-size:.62rem;color:#7ab8b2;';
-      toolbar.innerHTML = `
-        <label>color <input type="color" id="wb-color" value="#40e0d0"
-          style="width:32px;height:20px;border:1px solid #1e7068;background:#071a18;cursor:pointer;"></label>
-        <label>size <input type="range" id="wb-size" min="1" max="12" value="2"
-          style="width:60px;"></label>
-        <button id="wb-clear"
-          style="border:1px solid #1e7068;background:transparent;color:#7ab8b2;cursor:pointer;padding:2px 8px;">
-          clear
-        </button>`;
-      root.appendChild(toolbar);
+      // Toolbar
+      const tb = _div('display:flex;gap:6px;margin-bottom:5px;align-items:center;font-size:.62rem;color:var(--dim);flex-wrap:wrap');
+      tb.innerHTML = `
+        <label>color <input type="color" id="wb-color" value="#40e0d0" style="width:28px;height:18px;border:1px solid var(--mute);background:var(--bg1);cursor:pointer;vertical-align:middle"></label>
+        <label>size&nbsp;<input type="range" id="wb-size" min="1" max="12" value="2" style="width:52px;vertical-align:middle"></label>
+        <button id="wb-clear" style="border:1px solid var(--mute);background:transparent;color:var(--dim);cursor:pointer;padding:2px 8px;font-size:.62rem;font-family:inherit;clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px))">clear</button>`;
+      root.appendChild(tb);
 
-      canvas        = document.createElement('canvas');
-      canvas.width  = 400;
-      canvas.height = 260;
-      canvas.style.cssText = [
-        'border:1px solid #1e7068;background:#030e0c;cursor:crosshair;',
-        'touch-action:none;width:100%;height:auto;display:block;',
-      ].join('');
-      ctx2d = canvas.getContext('2d');
+      canvas=document.createElement('canvas'); canvas.width=400; canvas.height=260;
+      canvas.style.cssText='border:1px solid var(--mute);background:var(--bg0);cursor:crosshair;touch-action:none;width:100%;height:auto;display:block;clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px))';
+      ctx2d=canvas.getContext('2d');
       root.appendChild(canvas);
+      strokes.forEach(drawStroke); // redraw for late joiners
 
-      // Redraw history for late joiners / re-mounts
-      strokes.forEach(applyStroke);
+      const color = ()=>root.querySelector('#wb-color')?.value||'#40e0d0';
+      const size  = ()=>+(root.querySelector('#wb-size')?.value)||2;
+      const xy    = e => { const r=canvas.getBoundingClientRect(); const src=e.touches?e.touches[0]:e; return [(src.clientX-r.left)*canvas.width/r.width,(src.clientY-r.top)*canvas.height/r.height]; };
 
-      const getColor = () => root.querySelector('#wb-color')?.value  || '#40e0d0';
-      const getSize  = () => Number(root.querySelector('#wb-size')?.value) || 2;
-
-      const getXY = (e) => {
-        const rect   = canvas.getBoundingClientRect();
-        const scaleX = canvas.width  / rect.width;
-        const scaleY = canvas.height / rect.height;
-        const src    = e.touches ? e.touches[0] : e;
-        return [
-          (src.clientX - rect.left) * scaleX,
-          (src.clientY - rect.top)  * scaleY,
-        ];
+      const onStart = e=>{drawing=true;[lx,ly]=xy(e);e.preventDefault();};
+      const onMove  = e=>{
+        if(!drawing) return; e.preventDefault();
+        const [x,y]=xy(e);
+        const a={type:'stroke',color:color(),width:size(),x0:lx,y0:ly,x1:x,y1:y};
+        drawStroke(a); pushStroke(a); ctx.broadcast(a);
+        [lx,ly]=[x,y];
       };
+      const onEnd = ()=>{drawing=false;};
 
-      const onStart = (e) => { drawing = true; [lastX, lastY] = getXY(e); e.preventDefault(); };
-      const onMove  = (e) => {
-        if (!drawing) return;
-        e.preventDefault();
-        const [x, y] = getXY(e);
-        const action = {
-          type:  'stroke',
-          color: getColor(),
-          width: getSize(),
-          x0: lastX, y0: lastY,
-          x1: x,     y1: y,
-        };
-        applyStroke(action);
-        pushStroke(action);
-        ctx.broadcast(action);
-        [lastX, lastY] = [x, y];
-      };
-      const onEnd = () => { drawing = false; };
+      canvas.addEventListener('mousedown',onStart); canvas.addEventListener('mousemove',onMove);
+      canvas.addEventListener('mouseup',onEnd);     canvas.addEventListener('mouseleave',onEnd);
+      canvas.addEventListener('touchstart',onStart,{passive:false}); canvas.addEventListener('touchmove',onMove,{passive:false}); canvas.addEventListener('touchend',onEnd);
 
-      canvas.addEventListener('mousedown',  onStart);
-      canvas.addEventListener('mousemove',  onMove);
-      canvas.addEventListener('mouseup',    onEnd);
-      canvas.addEventListener('mouseleave', onEnd);
-      canvas.addEventListener('touchstart', onStart, { passive: false });
-      canvas.addEventListener('touchmove',  onMove,  { passive: false });
-      canvas.addEventListener('touchend',   onEnd);
-
-      root.querySelector('#wb-clear')?.addEventListener('click', () => {
-        strokes.length = 0;
-        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.broadcast({ type: 'clear' });
+      root.querySelector('#wb-clear')?.addEventListener('click',()=>{
+        strokes.length=0; ctx2d.clearRect(0,0,canvas.width,canvas.height);
+        ctx.broadcast({type:'clear'});
       });
-
       container.appendChild(root);
     },
-
-    apply(action) {
-      if (action.type === 'stroke') {
-        applyStroke(action);
-        pushStroke(action);
-      }
-      if (action.type === 'clear') {
-        strokes.length = 0;
-        ctx2d?.clearRect(0, 0, canvas?.width || 400, canvas?.height || 260);
-      }
+    apply(a) {
+      if (a.type==='stroke')  { drawStroke(a); pushStroke(a); }
+      if (a.type==='clear')   { strokes.length=0; ctx2d?.clearRect(0,0,canvas?.width||400,canvas?.height||260); }
     },
-
-    destroy() {
-      root?.parentNode?.removeChild(root);
-      root = null; canvas = null; ctx2d = null;
-    },
+    destroy() { root?.remove(); root=null; canvas=null; ctx2d=null; },
   };
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-function short(v)      { return (v || '?').slice(0, 8); }
-function escapeHtml(s) {
-  return String(s)
-    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const _div  = css => { const d=document.createElement('div'); d.style.cssText=css; return d; };
+const short = v   => (v||'?').slice(0,8);
+const esc   = s   => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
