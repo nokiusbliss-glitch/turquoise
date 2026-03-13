@@ -1,14 +1,22 @@
 /**
- * files.js — Turquoise
- * High-throughput file transfer with real-time stats and stall detection.
+ * files.js — Turquoise v2
+ * High-throughput file transfer with real-time stats, stall detection,
+ * and mid-transfer cancel.
  *
- * Fixes:
+ * Fixes / additions over v1:
+ *   - Cancel support (sender and receiver sides).
+ *     • cancelSend(fileId) — aborts an outgoing transfer after the current
+ *       chunk finishes (checked at the top of the chunk loop). Sends a
+ *       file-abort ctrl message so the receiver cleans up.
+ *     • cancelRecv(fp, fileId) — aborts an incoming transfer, clears the
+ *       stall timer, and emits onError('Cancelled').
+ *   - onFileReady callback now receives `blob` in addition to `url`.
+ *     folder.js uses this to build ZIPs without re-fetching blob URLs.
  *   - `if (!this._sendBinary) throw` was dead code: _sendBinary is always a
  *     function reference set in the constructor, so the check was never true.
  *     Replaced with a proper pre-flight channel-open check.
  *   - Added RECV_STALL_MS: if no binary chunk arrives for 30s on an active
- *     receive, the transfer is aborted with a clear error. Previously a
- *     half-open connection would leave a transfer hanging forever.
+ *     receive, the transfer is aborted with a clear error.
  *   - handleBinary: if binary arrives before file-meta (e.g. reordering),
  *     it now logs a warning rather than silently dropping the data.
  *   - _finalize: validates that received byte count matches declared size
@@ -22,9 +30,9 @@
  *   { bytesTransferred, totalBytes, speedBps, etaSec, elapsedSec, pct }
  */
 
-const CHUNK          = 256 * 1024;   // 256 KB — optimal for backpressure
-const HIGH_WATER     = 1024 * 1024;  // 1 MB   — pause threshold
-const RECV_STALL_MS  = 30_000;       // 30s with no new chunk → abort
+const CHUNK         = 256 * 1024;   // 256 KB — optimal for backpressure
+const HIGH_WATER    = 1024 * 1024;  // 1 MB   — pause threshold
+const RECV_STALL_MS = 30_000;       // 30s with no new chunk → abort
 
 export class FileTransfer {
   constructor(sendCtrlFn, sendBinaryFn, waitBufferFn) {
@@ -32,12 +40,13 @@ export class FileTransfer {
     this._sendBinary = sendBinaryFn;
     this._waitBuf    = waitBufferFn || (() => Promise.resolve());
 
-    this._recv    = new Map();   // fp → RecvState
-    this._queue   = new Map();   // fp → [{file, fileId}]
-    this._sending = new Set();   // fp currently being drained
+    this._recv         = new Map();   // fp → RecvState
+    this._queue        = new Map();   // fp → [{file, fileId}]
+    this._sending      = new Set();   // fp currently being drained
+    this._abortSending = new Set();   // fileIds whose outgoing transfer should abort
 
     this.onProgress  = null;   // (id, pct, dir, fp, stats) => void
-    this.onFileReady = null;   // (fileInfo) => void
+    this.onFileReady = null;   // (fileInfo) => void  — fileInfo includes .blob
     this.onError     = null;   // (id, msg, fp) => void
   }
 
@@ -48,6 +57,41 @@ export class FileTransfer {
     if (!this._queue.has(fp)) this._queue.set(fp, []);
     this._queue.get(fp).push({ file, fileId });
     if (!this._sending.has(fp)) this._drain(fp);
+  }
+
+  /**
+   * Cancel an outgoing transfer.
+   * If the transfer is mid-chunk, it aborts after the current chunk completes.
+   * Sends file-abort to the receiving peer.
+   * @param {string} fileId
+   * @param {string} fp - Peer fingerprint (needed to send the abort ctrl msg)
+   */
+  cancelSend(fileId, fp) {
+    this._abortSending.add(fileId);
+    // Remove from queue if not yet started
+    if (fp && this._queue.has(fp)) {
+      const q = this._queue.get(fp);
+      const idx = q.findIndex(e => e.fileId === fileId);
+      if (idx !== -1) {
+        q.splice(idx, 1);
+        try { this._sendCtrl(fp, { type: 'file-abort', fileId }); } catch {}
+        this.onError?.(fileId, 'Cancelled', fp);
+      }
+    }
+  }
+
+  /**
+   * Cancel an incoming transfer.
+   * @param {string} fp      - Peer fingerprint
+   * @param {string} fileId  - Transfer ID
+   */
+  cancelRecv(fp, fileId) {
+    this._clearStall(fp);
+    const s = this._recv.get(fp);
+    if (s?.fileId === fileId) {
+      this._recv.delete(fp);
+    }
+    this.onError?.(fileId, 'Cancelled', fp);
   }
 
   async _drain(fp) {
@@ -67,7 +111,6 @@ export class FileTransfer {
   }
 
   async _sendOne(file, fp, fileId) {
-    // Guard: verify we can actually send before spending time reading the file
     if (!this._sendBinary) throw new Error('No binary send function configured');
 
     if (file.size === 0) {
@@ -89,16 +132,21 @@ export class FileTransfer {
     });
     if (!sent) throw new Error('Peer not connected');
 
-    const startTime  = Date.now();
-    let offset       = 0;
-    let chunkIdx     = 0;
-    let lastPctInt   = -1;
-    let windowStart  = startTime;
-    let windowBytes  = 0;
-    let smoothSpeed  = 0;
+    const startTime = Date.now();
+    let offset      = 0;
+    let chunkIdx    = 0;
+    let lastPctInt  = -1;
+    let windowStart = startTime;
+    let windowBytes = 0;
+    let smoothSpeed = 0;
 
     while (offset < file.size) {
-      // Wait for DataChannel buffer to drain if over high watermark
+      // Check for cancel before each chunk
+      if (this._abortSending.has(fileId)) {
+        this._abortSending.delete(fileId);
+        throw new Error('Cancelled');
+      }
+
       await this._waitBuf(fp);
 
       const end = Math.min(offset + CHUNK, file.size);
@@ -152,12 +200,11 @@ export class FileTransfer {
     if (!fileId) return;
 
     if (type === 'file-meta') {
-      // Clear any stale state for this peer (e.g. previous aborted transfer)
       this._clearStall(fp);
       this._recv.set(fp, {
         fileId,
-        name:        msg.name    || 'file',
-        size:        msg.size    || 0,
+        name:        msg.name     || 'file',
+        size:        msg.size     || 0,
         mimeType:    msg.mimeType || 'application/octet-stream',
         total:       msg.totalChunks || 0,
         chunks:      [],
@@ -194,7 +241,6 @@ export class FileTransfer {
     s.bytes       += buf.byteLength;
     s.windowBytes += buf.byteLength;
 
-    // Reset stall timer on every received chunk
     this._resetStallTimer(fp);
 
     const now       = Date.now();
@@ -268,8 +314,11 @@ export class FileTransfer {
         bytesTransferred: s.bytes, totalBytes: s.size,
         speedBps: avgSpeed, etaSec: 0, elapsedSec: elapsed, done: true,
       });
+      // Pass blob directly so consumers (e.g. folder.js) don't need to fetch
+      // the URL to get the data back — avoids a round-trip and potential revoke races.
       this.onFileReady?.({
-        fileId, url, name: s.name, size: blob.size,
+        fileId, url, blob,
+        name: s.name, size: blob.size,
         mimeType: s.mimeType, from: fp,
       });
     } catch (e) {

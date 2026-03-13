@@ -1,28 +1,43 @@
 /**
- * app.js — Turquoise v11
+ * app.js — Turquoise v12
  *
- * Fixes over v10:
- *   - _onFileReady: audio files got TWO download buttons. The first
- *     `<a class="dl-btn">` was added inside the `mime.startsWith('audio/')` block,
- *     then a second identical one was appended by a dangling `if (mime.startsWith('audio/'))`
- *     check below. Removed the duplicate.
- *   - _queueFile: passes `circle:true` flag in file-meta ctrl message for
- *     circle broadcasts so the receiver routes to CIRCLE_ID session correctly.
- *     Previously the flag was only on file-meta from _dispatch, but senders
- *     need to signal it explicitly.
- *   - _openSession: called _buildPlusMenu() which reads `this.active` — but
- *     the call was after `this.active = fp` so it was always correct; added
- *     comment to clarify ordering dependency.
- *   - Folder transfer: FolderTransfer fully wired in. Menu item, dispatch
- *     handler, file claim routing, folder-ready UI card.
- *   - _onFileReady: revokes old blob URL after 60s to prevent memory leak.
- *     (Object URLs from FileTransfer accumulate in long sessions.)
- *   - circle toggle button click area was inside peer-tile click area, causing
- *     both the toggle AND the session open to fire. Fixed with stopPropagation
- *     (was already there on the handler but the tile listener also fired).
+ * Phase 2 changes over v11:
  *
- * No changes to signaling, WebRTC, or identity logic — those are in their
- * own modules.
+ *   1. Tic-Tac-Toe: tqapps.js v6 fix propagates — no app.js change needed.
+ *
+ *   2. File cancel:
+ *      - _queueFile: records which peer fps are receiving each fileId in
+ *        _fileOwners (Map<fileId, {fps, own}>). Needed for circle transfers
+ *        where one fileId is sent to N peers.
+ *      - _cancelFile(msg): calls ft.cancelSend / ft.cancelRecv appropriately.
+ *      - _fileCardEl / _appendFileCard: render a × cancel button on
+ *        in-progress file cards; wired to _cancelFile via data-fcid.
+ *      - _onFileErr: removes cancel button from errored cards.
+ *
+ *   3. Folder UX:
+ *      - _folderCardEl: shows a compact file tree (nested paths) when the
+ *        folder message carries a `manifest`. On receive completion the tree
+ *        is expanded with per-file download links + zip/all buttons.
+ *      - _onFolderReady: uses the new `download(fileId)` function from
+ *        folder.js v2, renders a toggle-able file tree.
+ *      - folder.js v2 no longer fetches blob URLs for ZIP — uses stored
+ *        blobs directly, so downloadZip works even minutes after receipt.
+ *
+ *   4. Video call UI:
+ *      - _renderCallPanel: video grid uses full available height. Local
+ *        video rendered as a draggable PIP overlay instead of a grid item,
+ *        with proper safe-area positioning. Controls row uses min-height 48px
+ *        touch targets. Stats bar sits above controls.
+ *      - Camera toggle: marks the local video as cam-off visually with an
+ *        overlay and disables the track (sends black frames). True track
+ *        replacement requires webrtc.js getSender API; kept as enabled-flag
+ *        for now but the UI now clearly shows the off state with an overlay.
+ *      - _renderCircleCallPanel: cam toggle button added for stream calls.
+ *      - Both panels: cam-off state renders a black overlay on the local
+ *        video tile so the user knows the camera is muted.
+ *
+ *   5. Other hardening (no changes needed from Phase 1 already covering these):
+ *      - webrtc.js v2 heartbeat / reconnect: transparent to app.js.
  */
 
 import {
@@ -57,11 +72,8 @@ const fmtEta = s => {
   if (!s || s <= 0 || !isFinite(s)) return '—';
   return s < 60 ? Math.ceil(s) + 's' : Math.floor(s / 60) + 'm' + Math.ceil(s % 60) + 's';
 };
-const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-const CIRCLE_ID = 'circle';
-
-// How long to hold onto blob URLs before revoking (60s after file ready)
+const CIRCLE_ID      = 'circle';
 const BLOB_URL_TTL_MS = 60_000;
 
 export class TurquoiseApp {
@@ -69,24 +81,21 @@ export class TurquoiseApp {
     this.id  = identity;
     this.net = network;
 
-    this.peers         = new Map();   // fp → {nick, connected}
-    this.sessions      = new Map();   // sessionId → msg[]
+    this.peers         = new Map();
+    this.sessions      = new Map();
     this.active        = null;
     this.unread        = new Map();
     this.circleBlocked = new Set();
 
-    // 1:1 call state
-    this.call = null;
-    // Circle call state
+    this.call       = null;
     this.circleCall = null;
 
-    // File blob URL cache: fileId → {url, name, from, mimeType}
-    this._fileUrls = new Map();
+    this._fileUrls  = new Map();   // fileId → {url, blob, name, from, mimeType}
+    // fileId → { fps: string[], own: boolean } — for cancel routing
+    this._fileOwners = new Map();
 
-    // Voice memo state
     this._memo = null;
 
-    // 1:1 audio element (reused across calls)
     this._audioEl = Object.assign(document.createElement('audio'), {
       autoplay: true, playsInline: true,
     });
@@ -94,7 +103,7 @@ export class TurquoiseApp {
     document.body.appendChild(this._audioEl);
 
     this._statsTimer = null;
-    this.games = new Map(); // fp → TicTacToe
+    this.games = new Map();
 
     // ── File transfer ──────────────────────────────────────────────────────
     this.ft = new FileTransfer(
@@ -154,7 +163,6 @@ export class TurquoiseApp {
   // ── Bind UI ────────────────────────────────────────────────────────────────
 
   _bind() {
-    // Nickname edit
     const row = $('identity-row'), disp = $('nick-display'), inp = $('nick-input');
     if (row && disp && inp) {
       row.addEventListener('click', () => this._triggerNickEdit());
@@ -175,7 +183,6 @@ export class TurquoiseApp {
       inp.addEventListener('blur', save);
     }
 
-    // Send message
     const mi = $('msg-input'), sb = $('send-btn');
     if (mi) {
       mi.addEventListener('keydown', e => {
@@ -188,27 +195,23 @@ export class TurquoiseApp {
     }
     sb?.addEventListener('click', () => this._send());
 
-    // + menu
     $('plus-btn')?.addEventListener('click', e => {
       e.stopPropagation();
       this._togglePlusMenu();
     });
     document.addEventListener('click', () => this._closePlusMenu());
 
-    // File input
     $('__file-input')?.addEventListener('change', e => {
       Array.from(e.target.files || []).forEach(f => this._queueFile(f));
       e.target.value = '';
     });
 
-    // Import state input
     $('__import-input')?.addEventListener('change', e => {
       const f = e.target.files?.[0];
       if (f) this._importState(f);
       e.target.value = '';
     });
 
-    // Drag-and-drop onto chat area
     const ca = $('chat-area');
     if (ca) {
       ca.addEventListener('dragover',  e => { e.preventDefault(); ca.classList.add('drag-over'); });
@@ -240,8 +243,8 @@ export class TurquoiseApp {
 
   _buildPlusMenu() {
     const menu = $('plus-menu'); if (!menu) return;
-    const fp         = this.active;
-    const isCircle   = fp === CIRCLE_ID;
+    const fp        = this.active;
+    const isCircle  = fp === CIRCLE_ID;
     const peerOnline = !isCircle && this.net.isReady(fp || '');
     const anyOnline  = this.net.getConnectedPeers().length > 0;
 
@@ -264,24 +267,20 @@ export class TurquoiseApp {
       if (!canSend) { this._sys('no peers available', true); return; }
       $('__file-input')?.click();
     });
-
     $('pmi-folder')?.addEventListener('click', () => {
       this._closePlusMenu();
       if (!canSend) { this._sys('no peers available', true); return; }
       this._sendFolder();
     });
-
     $('pmi-memo')?.addEventListener('click', () => {
       this._closePlusMenu();
       if (!canSend) { this._sys('no peers available', true); return; }
       this._startVoiceMemo();
     });
-
     $('pmi-ttt')?.addEventListener('click', () => {
       if (!isCircle && peerOnline) this._startGame(fp, 'ttt');
       else this._sys(isCircle ? 'games are 1:1 only' : 'peer offline', true);
     });
-
     $('pmi-export')?.addEventListener('click', () => { this._closePlusMenu(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlusMenu(); $('__import-input')?.click(); });
   }
@@ -360,7 +359,6 @@ export class TurquoiseApp {
       return;
     }
 
-    // ── File ctrl ────────────────────────────────────────────────────────
     if (type === 'file-meta') {
       const sessionId = msg.circle ? CIRCLE_ID : fp;
       const nick      = this.peers.get(fp)?.nick || fp.slice(0, 8);
@@ -383,16 +381,15 @@ export class TurquoiseApp {
       return;
     }
 
-    // ── Folder manifest ───────────────────────────────────────────────────
     if (type === 'folder-manifest') {
       const sessionId = msg.circle ? CIRCLE_ID : fp;
       const nick      = this.peers.get(fp)?.nick || fp.slice(0, 8);
       this.folderTransfer.handleCtrl(fp, msg);
-      // Show a "receiving folder" card in the chat
       const folderMsg = {
         id: msg.folderId + '_recv', sessionId, from: fp, fromNick: nick, own: false,
         type: 'folder', folderId: msg.folderId, name: msg.name || 'folder',
         totalSize: msg.totalSize || 0, fileCount: msg.files?.length || 0,
+        manifest: msg.files || [],
         ts: Date.now(), status: 'receiving',
       };
       if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, []);
@@ -403,7 +400,6 @@ export class TurquoiseApp {
       return;
     }
 
-    // ── Calls ─────────────────────────────────────────────────────────────
     if (type === 'call-invite')  { msg.circle ? this._onCircleCallInvite(fp, msg) : this._onCallInvite(fp, msg); return; }
     if (type === 'call-accept')  { msg.circle ? this._onCircleCallAccepted(fp)    : this._onCallAccepted(fp);    return; }
     if (type === 'call-decline') { msg.circle ? this._onCircleCallDeclined(fp)    : this._onCallDeclined(fp);    return; }
@@ -424,7 +420,6 @@ export class TurquoiseApp {
       return;
     }
 
-    // ── Games ─────────────────────────────────────────────────────────────
     if (type === 'game') { this._dispatchGame(fp, msg); return; }
   }
 
@@ -433,12 +428,9 @@ export class TurquoiseApp {
   _recv1to1(fp, ev) {
     if (!ev.text) return;
     const msg = {
-      id:        ev.id || crypto.randomUUID(),
-      sessionId: fp, from: fp,
-      fromNick:  ev.nick || this.peers.get(fp)?.nick || fp.slice(0, 8),
-      text:      String(ev.text),
-      ts:        ev.ts || Date.now(),
-      type:      'text', own: false,
+      id: ev.id || crypto.randomUUID(), sessionId: fp, from: fp,
+      fromNick: ev.nick || this.peers.get(fp)?.nick || fp.slice(0, 8),
+      text: String(ev.text), ts: ev.ts || Date.now(), type: 'text', own: false,
     };
     if (!this.sessions.has(fp)) this.sessions.set(fp, []);
     this.sessions.get(fp).push(msg);
@@ -454,12 +446,9 @@ export class TurquoiseApp {
   _recvCircle(fp, ev) {
     if (!ev.text || this.circleBlocked.has(fp)) return;
     const msg = {
-      id:        ev.id || crypto.randomUUID(),
-      sessionId: CIRCLE_ID, from: fp,
-      fromNick:  ev.nick || this.peers.get(fp)?.nick || fp.slice(0, 8),
-      text:      String(ev.text),
-      ts:        ev.ts || Date.now(),
-      type:      'text', own: false,
+      id: ev.id || crypto.randomUUID(), sessionId: CIRCLE_ID, from: fp,
+      fromNick: ev.nick || this.peers.get(fp)?.nick || fp.slice(0, 8),
+      text: String(ev.text), ts: ev.ts || Date.now(), type: 'text', own: false,
     };
     if (!this.sessions.has(CIRCLE_ID)) this.sessions.set(CIRCLE_ID, []);
     this.sessions.get(CIRCLE_ID).push(msg);
@@ -533,7 +522,31 @@ export class TurquoiseApp {
     this.sessions.get(sessionId).push(fileMsg);
     this._appendFileCard(fileMsg);
     this._status('sending ' + file.name + '…', 'info');
+
+    // Track which peers are receiving this fileId (needed for circle cancel)
+    this._fileOwners.set(fileId, { fps: [...peers], own: true });
     peers.forEach(fp => this.ft.send(file, fp, fileId));
+  }
+
+  /**
+   * Cancel an in-progress file transfer (send or receive).
+   * @param {object} msg - The session message object for this file
+   */
+  _cancelFile(msg) {
+    const { fileId, own, from, sessionId } = msg;
+    if (!fileId) return;
+
+    if (own) {
+      // Sending: cancel for each peer that's receiving
+      const info = this._fileOwners.get(fileId);
+      if (info) {
+        info.fps.forEach(fp => this.ft.cancelSend(fileId, fp));
+        this._fileOwners.delete(fileId);
+      }
+    } else {
+      // Receiving: from is the sender's fp
+      this.ft.cancelRecv(from, fileId);
+    }
   }
 
   _onFileProg(fileId, pct, stats) {
@@ -555,33 +568,28 @@ export class TurquoiseApp {
   }
 
   _onFileReady(f) {
-    // Route folder-owned files first
     if (this.folderTransfer.claimFile(f)) return;
 
     this._fileUrls.set(f.fileId, f);
-
-    // Schedule blob URL revocation to prevent memory leaks in long sessions
     setTimeout(() => {
-      if (this._fileUrls.get(f.fileId) === f) {
-        // Only revoke if not replaced by a newer entry
-        URL.revokeObjectURL(f.url);
-      }
+      if (this._fileUrls.get(f.fileId) === f) URL.revokeObjectURL(f.url);
     }, BLOB_URL_TTL_MS);
 
     for (const msgs of this.sessions.values()) {
       const m = msgs.find(m => m.fileId === f.fileId);
       if (m) m.status = 'done';
     }
+    this._fileOwners.delete(f.fileId);
 
     const cards = document.querySelectorAll(`[data-fcid="${f.fileId}"]`);
     cards.forEach(card => {
       card.querySelector('.prog-track')?.remove();
       card.querySelector('.file-stats')?.remove();
+      card.querySelector('.file-cancel')?.remove(); // remove cancel btn when done
 
       if (!card.querySelector('.dl-btn, audio')) {
         const mime = f.mimeType || '';
         if (mime.startsWith('audio/')) {
-          // Audio: inline player + single download link
           const au = document.createElement('audio');
           au.controls = true; au.src = f.url;
           au.style.cssText = 'max-width:100%;margin-top:4px;height:32px';
@@ -610,6 +618,7 @@ export class TurquoiseApp {
   }
 
   _onFileErr(fileId, errMsg) {
+    this._fileOwners.delete(fileId);
     for (const msgs of this.sessions.values()) {
       const m = msgs.find(m => m.fileId === fileId);
       if (m) { m.status = 'error'; m.error = errMsg; }
@@ -617,11 +626,14 @@ export class TurquoiseApp {
     document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card => {
       card.querySelector('.prog-track')?.remove();
       card.querySelector('.file-stats')?.remove();
+      card.querySelector('.file-cancel')?.remove();
       const d = document.createElement('div');
       d.className = 'file-err'; d.textContent = '⚠ ' + errMsg;
       card.appendChild(d);
     });
-    this._status('file error: ' + errMsg, 'err', 5000);
+    if (errMsg !== 'Cancelled') {
+      this._status('file error: ' + errMsg, 'err', 5000);
+    }
   }
 
   // ── Folder ────────────────────────────────────────────────────────────────
@@ -636,17 +648,10 @@ export class TurquoiseApp {
     if (!peers.length) { this._sys(isCircle ? 'no peers in circle' : 'peer offline', true); return; }
 
     const folderId = crypto.randomUUID();
-
-    // For circle, send to all peers; we call sendFolder once per peer
-    // but pickFiles() should only prompt once — pick first, then distribute
     let entries;
-    try {
-      entries = await FolderTransfer.pickFiles();
-    } catch (e) {
-      this._sys('folder access failed: ' + e.message, true);
-      return;
-    }
-    if (!entries?.length) return; // user cancelled
+    try { entries = await FolderTransfer.pickFiles(); }
+    catch (e) { this._sys('folder access failed: ' + e.message, true); return; }
+    if (!entries?.length) return;
 
     const folderName = entries[0].relativePath.split('/')[0] || 'folder';
     let totalSize    = 0;
@@ -660,11 +665,11 @@ export class TurquoiseApp {
       };
     });
 
-    // Add outgoing folder card to chat
     const folderMsg = {
       id: folderId + '_send', sessionId, from: this.id.fingerprint,
       fromNick: this.id.nickname, type: 'folder', folderId,
       name: folderName, totalSize, fileCount: fileList.length,
+      manifest: fileList,
       ts: Date.now(), own: true, status: 'sending',
     };
     if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, []);
@@ -672,7 +677,6 @@ export class TurquoiseApp {
     this._appendFolderCard(folderMsg);
     this._status(`sending folder "${folderName}" (${fileList.length} files)…`, 'info');
 
-    // Send manifest + enqueue files for each peer
     peers.forEach(fp => {
       this.net.sendCtrl(fp, {
         type: 'folder-manifest', folderId, name: folderName,
@@ -687,33 +691,50 @@ export class TurquoiseApp {
     const card = document.querySelector(`[data-folderid="${folderId}"]`);
     if (!card) return;
     const pct = total > 0 ? done / total : 0;
-    card.querySelector('.prog-fill')?.style &&
-      (card.querySelector('.prog-fill').style.width = (pct * 100).toFixed(1) + '%');
+    const fill = card.querySelector('.prog-fill');
+    if (fill) fill.style.width = (pct * 100).toFixed(1) + '%';
     const label = card.querySelector('.folder-count');
     if (label) label.textContent = `${done} / ${total} files`;
   }
 
   _onFolderReady(info) {
-    const { folderId, name, from, files, totalSize, downloadZip, downloadAll } = info;
+    const { folderId, name, from, files, manifest, totalSize, downloadZip, downloadAll, download } = info;
 
-    // Mark session message as done
     for (const msgs of this.sessions.values()) {
       const m = msgs.find(m => m.folderId === folderId);
-      if (m) m.status = 'done';
+      if (m) {
+        m.status   = 'done';
+        m.files    = files;    // enriched with urls/blobs
+        m.manifest = manifest;
+      }
     }
 
     const card = document.querySelector(`[data-folderid="${folderId}"]`);
     if (card) {
       card.querySelector('.prog-track')?.remove();
       card.querySelector('.folder-count')?.remove();
+
       if (!card.querySelector('.folder-dl')) {
+        // File tree (collapsible list)
+        const treeDiv = document.createElement('div');
+        treeDiv.className   = 'folder-tree';
+        treeDiv.style.cssText = 'margin:6px 0 4px;font-size:11px;max-height:120px;overflow-y:auto;';
+        const tree = _buildFileTree(manifest || []);
+        treeDiv.innerHTML = _renderFileTree(tree, download);
+        card.appendChild(treeDiv);
+        // Wire per-file download buttons
+        treeDiv.querySelectorAll('[data-dl-fid]').forEach(btn => {
+          btn.addEventListener('click', () => download(btn.dataset.dlFid));
+        });
+
+        // Action buttons row
         const btns = document.createElement('div');
         btns.className = 'folder-dl';
         btns.style.cssText = 'margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;';
 
-        const zipBtn  = document.createElement('button');
-        zipBtn.className    = 'dl-btn';
-        zipBtn.textContent  = '↓ download .zip';
+        const zipBtn = document.createElement('button');
+        zipBtn.className   = 'dl-btn';
+        zipBtn.textContent = '↓ download .zip';
         zipBtn.style.cursor = 'pointer';
         zipBtn.addEventListener('click', () => {
           zipBtn.textContent = 'building zip…';
@@ -894,10 +915,10 @@ export class TurquoiseApp {
   // ── Circle Call ────────────────────────────────────────────────────────────
 
   async _startCircleCall(callType) {
-    if (this.call)                            { this._sys('end 1:1 call first', true); return; }
-    if (this.circleCall?.phase === 'active')  { this._endCircleCall(); return; }
+    if (this.call)                           { this._sys('end 1:1 call first', true); return; }
+    if (this.circleCall?.phase === 'active') { this._endCircleCall(); return; }
     const fps   = this.net.getConnectedPeers().filter(fp => !this.circleBlocked.has(fp));
-    if (!fps.length)                          { this._sys('no peers in circle', true); return; }
+    if (!fps.length)                         { this._sys('no peers in circle', true); return; }
     const video = callType === 'stream';
     this._status('getting ' + (video ? 'camera/mic' : 'mic') + ' for circle…', 'info');
     let s;
@@ -1107,7 +1128,7 @@ export class TurquoiseApp {
         <div class="call-type-badge">${type === 'stream' ? '📷' : '🎙'} ${type}</div>
         <div class="call-state">${lbl}</div>
         <div class="call-controls">
-          <div class="call-btn end" id="cb-end">✕ cancel</div>
+          <div class="call-btn end" id="cb-end" style="min-height:48px;min-width:80px">✕ cancel</div>
         </div>
       </div>`;
       $('cb-end')?.addEventListener('click', () => {
@@ -1119,32 +1140,37 @@ export class TurquoiseApp {
     }
 
     const isStream = type === 'stream';
+
+    // Video layout: remote fills, local video is PIP overlay
+    let videoHtml = '';
+    if (isStream) {
+      videoHtml = `
+        <div class="video-grid" style="position:relative;flex:1;min-height:0;background:#000;overflow:hidden;border-radius:12px">
+          <video id="vid-r" autoplay playsinline style="width:100%;height:100%;object-fit:cover;display:block"></video>
+          <div class="video-label" style="position:absolute;bottom:8px;left:10px;font-size:11px;opacity:.75">${esc(peer)}</div>
+          <div id="vid-stats" class="vid-stats-overlay" style="position:absolute;top:8px;left:10px;font-size:10px;opacity:.6"></div>
+          <div id="local-pip" style="position:absolute;bottom:8px;right:8px;width:110px;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px #0006;cursor:pointer;touch-action:none">
+            <video id="vid-l" autoplay playsinline muted style="width:100%;height:auto;display:block${camOff ? ';opacity:0' : ''}"></video>
+            ${camOff ? '<div style="position:absolute;inset:0;background:#111;display:flex;align-items:center;justify-content:center;font-size:18px">📷<span style=\'font-size:10px;position:absolute;bottom:4px;left:0;right:0;text-align:center;color:#aaa\'>off</span></div>' : ''}
+            <div class="video-label" style="position:absolute;bottom:2px;left:4px;font-size:9px;opacity:.7">${esc(this.id.nickname)}</div>
+          </div>
+        </div>`;
+    } else {
+      videoHtml = `<div class="walkie-active">
+        <span class="wk-pulse">🎙</span> walkie · <span class="wk-peer">${esc(peer)}</span>
+        <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
+      </div>`;
+    }
+
     panel.innerHTML =
-      (isStream
-        ? `<div class="video-grid">
-            <div class="video-wrap" id="vw-r">
-              <video id="vid-r" autoplay playsinline></video>
-              <div class="video-label">${esc(peer)}</div>
-              <div class="vid-stats-overlay" id="vid-stats"></div>
-            </div>
-            <div class="video-wrap local">
-              <video id="vid-l" autoplay playsinline muted></video>
-              <div class="video-label">${esc(this.id.nickname)}</div>
-            </div>
-          </div>`
-        : `<div class="walkie-active">
-            <span class="wk-pulse">🎙</span> walkie · <span class="wk-peer">${esc(peer)}</span>
-            <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
-          </div>`)
-      + `<div class="call-controls">
-          <div class="call-btn${muted ? ' muted' : ''}" id="cb-mute">🎙 ${muted ? 'muted' : 'mic'}</div>
-          ${isStream
-            ? `<div class="call-btn${camOff ? ' muted' : ''}" id="cb-cam">📷 ${camOff ? 'off' : 'cam'}</div>
-               <div class="call-btn" id="cb-fs">⛶</div>`
-            : ''}
-          <div class="call-btn end" id="cb-end">✕ end</div>
-        </div>
-        <div class="call-stats-bar" id="call-stats-bar">connecting…</div>`;
+      videoHtml +
+      `<div class="call-stats-bar" id="call-stats-bar" style="padding:4px 12px;font-size:10px;opacity:.6;text-align:center">connecting…</div>
+       <div class="call-controls" style="display:flex;gap:8px;padding:8px 12px;justify-content:center;flex-wrap:wrap">
+          <div class="call-btn${muted ? ' muted' : ''}" id="cb-mute" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">🎙 ${muted ? 'muted' : 'mic'}</div>
+          ${isStream ? `<div class="call-btn${camOff ? ' muted' : ''}" id="cb-cam" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">📷 ${camOff ? 'off' : 'cam'}</div>
+                        <div class="call-btn" id="cb-fs" style="min-height:48px;min-width:48px;display:flex;align-items:center;justify-content:center">⛶</div>` : ''}
+          <div class="call-btn end" id="cb-end" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">✕ end</div>
+       </div>`;
 
     const vr = $('vid-r'), vl = $('vid-l');
     if (vr && remoteStream) {
@@ -1156,6 +1182,10 @@ export class TurquoiseApp {
       });
     }
     if (vl && localStream) vl.srcObject = localStream;
+
+    // Make local PIP draggable (within the grid)
+    const pip = $('local-pip');
+    if (pip) _makeDraggable(pip);
 
     $('cb-mute')?.addEventListener('click', () => {
       if (!this.call) return;
@@ -1194,7 +1224,9 @@ export class TurquoiseApp {
       panel.innerHTML = `<div class="call-waiting">
         <div class="call-type-badge">◯ circle ${type === 'stream' ? '📷 stream' : '🎙 walkie'}</div>
         <div class="call-state">inviting peers…</div>
-        <div class="call-controls"><div class="call-btn end" id="ccb-end">✕ end</div></div>
+        <div class="call-controls" style="display:flex;gap:8px;justify-content:center">
+          <div class="call-btn end" id="ccb-end" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center">✕ end</div>
+        </div>
       </div>`;
       $('ccb-end')?.addEventListener('click', () => this._endCircleCall());
       return;
@@ -1203,12 +1235,23 @@ export class TurquoiseApp {
     const isStream = type === 'stream', count = remoteStreams.size;
     let html = '';
     if (isStream) {
-      html = '<div class="video-grid">';
-      html += `<div class="video-wrap local"><video id="cvid-l" autoplay playsinline muted></video><div class="video-label">${esc(this.id.nickname)}</div></div>`;
+      html = '<div class="video-grid" style="position:relative;display:grid;gap:4px;flex:1;min-height:0;background:#000;border-radius:12px;overflow:hidden;padding:4px">';
+      // Dynamic column count based on peer count
+      const cols = count <= 1 ? 1 : count <= 3 ? 2 : 3;
+      html = `<div class="video-grid" style="position:relative;display:grid;grid-template-columns:repeat(${cols},1fr);gap:4px;flex:1;min-height:0;background:#000;border-radius:12px;overflow:hidden;padding:4px">`;
       remoteStreams.forEach((_, fp) => {
         const n = this.peers.get(fp)?.nick || fp.slice(0, 8);
-        html += `<div class="video-wrap"><video id="cvid-${fp.slice(0,8)}" autoplay playsinline></video><div class="video-label">${esc(n)}</div></div>`;
+        html += `<div style="position:relative;background:#111;border-radius:8px;overflow:hidden;min-height:80px">
+          <video id="cvid-${fp.slice(0,8)}" autoplay playsinline style="width:100%;height:100%;object-fit:cover;display:block"></video>
+          <div class="video-label" style="position:absolute;bottom:4px;left:6px;font-size:10px;opacity:.75">${esc(n)}</div>
+        </div>`;
       });
+      // Local video PIP in corner
+      html += `<div id="local-pip-cc" style="position:absolute;bottom:8px;right:8px;width:90px;border-radius:6px;overflow:hidden;box-shadow:0 2px 8px #0006">
+        <video id="cvid-l" autoplay playsinline muted style="width:100%;height:auto;display:block${camOff ? ';opacity:0' : ''}"></video>
+        ${camOff ? '<div style="position:absolute;inset:0;background:#111;display:flex;align-items:center;justify-content:center;font-size:14px">📷</div>' : ''}
+        <div class="video-label" style="position:absolute;bottom:2px;left:4px;font-size:9px;opacity:.7">${esc(this.id.nickname)}</div>
+      </div>`;
       html += '</div>';
     } else {
       const names = [...remoteStreams.keys()].map(fp => this.peers.get(fp)?.nick || fp.slice(0, 8)).join(', ') || '—';
@@ -1217,10 +1260,11 @@ export class TurquoiseApp {
         <div class="waveform"><span></span><span></span><span></span><span></span><span></span></div>
       </div>`;
     }
-    html += `<div class="call-controls">
-      <div class="call-btn${muted ? ' muted' : ''}" id="ccb-mute">🎙 ${muted ? 'muted' : 'mic'}</div>
-      ${isStream ? `<div class="call-btn${camOff ? ' muted' : ''}" id="ccb-cam">📷 ${camOff ? 'off' : 'cam'}</div>` : ''}
-      <div class="call-btn end" id="ccb-end">✕ end</div>
+
+    html += `<div class="call-controls" style="display:flex;gap:8px;padding:8px 12px;justify-content:center;flex-wrap:wrap">
+      <div class="call-btn${muted ? ' muted' : ''}" id="ccb-mute" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">🎙 ${muted ? 'muted' : 'mic'}</div>
+      ${isStream ? `<div class="call-btn${camOff ? ' muted' : ''}" id="ccb-cam" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">📷 ${camOff ? 'off' : 'cam'}</div>` : ''}
+      <div class="call-btn end" id="ccb-end" style="min-height:48px;min-width:64px;display:flex;align-items:center;justify-content:center;gap:4px">✕ end</div>
     </div>`;
     panel.innerHTML = html;
 
@@ -1230,6 +1274,10 @@ export class TurquoiseApp {
       const v = $(`cvid-${fp.slice(0, 8)}`);
       if (v) v.srcObject = stream;
     });
+
+    const pip = $('local-pip-cc');
+    if (pip) _makeDraggable(pip);
+
     $('ccb-mute')?.addEventListener('click', () => {
       if (!this.circleCall) return;
       this.circleCall.muted = !this.circleCall.muted;
@@ -1272,7 +1320,7 @@ export class TurquoiseApp {
 
   async _openSession(fp) {
     if (!fp) return;
-    this.active = fp; // must be set BEFORE _buildPlusMenu reads this.active
+    this.active = fp;
     this.unread.delete(fp);
     if (!this.sessions.has(fp)) {
       try { this.sessions.set(fp, await loadMessages(fp)); }
@@ -1284,7 +1332,7 @@ export class TurquoiseApp {
     const ib = $('input-bar'); if (ib) ib.classList.add('visible');
     $('msg-input')?.focus();
     this._showChat();
-    this._buildPlusMenu(); // reads this.active — must come after assignment above
+    this._buildPlusMenu();
   }
 
   async _clearChat(fp) {
@@ -1307,7 +1355,7 @@ export class TurquoiseApp {
       const messages = await loadAllMessages();
       const peers    = await loadPeers();
       const state = {
-        tqVersion:  11,
+        tqVersion:  12,
         exportedAt: new Date().toISOString(),
         identity:   keyData
           ? { ...keyData, nickname: this.id.nickname, fingerprint: this.id.fingerprint }
@@ -1477,11 +1525,9 @@ export class TurquoiseApp {
     }).join('');
 
     list.innerHTML = circleTile + peerTiles;
-
     list.querySelectorAll('.peer-tile').forEach(t =>
       t.addEventListener('click', () => { const fp = t.dataset.fp; if (fp) this._openSession(fp); })
     );
-    // stopPropagation ensures the circle-toggle click doesn't bubble to the peer-tile click
     list.querySelectorAll('.circle-toggle').forEach(b =>
       b.addEventListener('click', e => { const fp = b.dataset.fp; if (fp) this._toggleCircle(fp, e); })
     );
@@ -1581,7 +1627,13 @@ export class TurquoiseApp {
     if (document.querySelector(`[data-fcid="${fileMsg.fileId}"]`)) return;
     const sys = msgs.querySelector('.sys-msg');
     if (sys && msgs.children.length === 1) sys.remove();
-    msgs.appendChild(this._fileCardEl(fileMsg));
+    const el = this._fileCardEl(fileMsg);
+    msgs.appendChild(el);
+    // Wire cancel button
+    el.querySelector('.file-cancel')?.addEventListener('click', e => {
+      e.stopPropagation();
+      this._cancelFile(fileMsg);
+    });
     this._scroll();
   }
 
@@ -1622,11 +1674,21 @@ export class TurquoiseApp {
     } else if (msg.status === 'error') {
       inner += `<div class="file-err">⚠ ${esc(msg.error || 'failed')}</div>`;
     } else {
+      // In-progress: show progress bar + cancel button
       inner += `<div class="prog-track"><div class="prog-fill" style="width:0%"></div></div>`;
-      inner += `<div class="file-stats"><span class="fs-pct">0%</span> <span class="fs-sep">·</span> <span class="fs-bytes">—</span></div>`;
+      inner += `<div style="display:flex;align-items:center;gap:8px;margin-top:2px">`;
+      inner += `<div class="file-stats" style="flex:1"><span class="fs-pct">0%</span> <span class="fs-sep">·</span> <span class="fs-bytes">—</span></div>`;
+      inner += `<button class="file-cancel" title="cancel transfer" style="background:none;border:none;color:var(--tq-mid,#1e7068);cursor:pointer;font-size:14px;padding:2px 4px;line-height:1" data-fcid="${msg.fileId}">✕</button>`;
+      inner += `</div>`;
     }
 
     w.innerHTML = `<div class="meta">${who} · ${time}</div><div class="file-card" data-fcid="${msg.fileId}">${inner}</div>`;
+
+    // Wire cancel after DOM is ready
+    w.querySelector('.file-cancel')?.addEventListener('click', e => {
+      e.stopPropagation();
+      this._cancelFile(msg);
+    });
     return w;
   }
 
@@ -1635,12 +1697,19 @@ export class TurquoiseApp {
     w.className = 'msg ' + (msg.own ? 'own' : 'peer');
     const time = new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const who  = esc(msg.own ? this.id.nickname : msg.fromNick || '?');
-    let inner  = `<div class="file-name">📁 ${esc(msg.name || 'folder')}</div>`;
-    inner     += `<div class="file-size">${msg.fileCount || 0} files · ${fmt(msg.totalSize)}</div>`;
-    if (msg.status !== 'done') {
+
+    let inner = `<div class="file-name">📁 ${esc(msg.name || 'folder')}</div>`;
+    inner    += `<div class="file-size">${msg.fileCount || 0} files · ${fmt(msg.totalSize)}</div>`;
+
+    if (msg.status === 'done' && msg.files) {
+      // Render file tree with per-file downloads
+      const tree = _buildFileTree(msg.manifest || msg.files || []);
+      inner += `<div class="folder-tree" style="margin:6px 0 4px;font-size:11px;max-height:100px;overflow-y:auto">${_renderFileTree(tree, null)}</div>`;
+    } else if (msg.status !== 'done') {
       inner += `<div class="prog-track"><div class="prog-fill" style="width:0%"></div></div>`;
-      inner += `<div class="folder-count">0 / ${msg.fileCount || 0} files</div>`;
+      inner += `<div class="folder-count" style="font-size:11px;margin-top:2px;opacity:.7">0 / ${msg.fileCount || 0} files</div>`;
     }
+
     w.innerHTML = `<div class="meta">${who} · ${time}</div><div class="file-card" data-folderid="${msg.folderId}">${inner}</div>`;
     return w;
   }
@@ -1695,4 +1764,82 @@ export class TurquoiseApp {
     log.appendChild(d); log.scrollTop = log.scrollHeight;
     while (log.children.length > 120) log.removeChild(log.firstChild);
   }
+}
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
+
+/**
+ * Build a nested tree structure from flat manifest entries.
+ * @param {Array<{fileId?, relativePath, size?, mimeType?}>} entries
+ * @returns {object} nested tree: { name, children:{}, files:[] }
+ */
+function _buildFileTree(entries) {
+  const root = { name: '', children: {}, files: [] };
+  for (const entry of entries) {
+    const path  = entry.relativePath || entry.name || 'file';
+    const parts = path.split('/');
+    let node    = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.children[part]) node.children[part] = { name: part, children: {}, files: [] };
+      node = node.children[part];
+    }
+    node.files.push({ ...entry, filename: parts[parts.length - 1] });
+  }
+  return root;
+}
+
+/**
+ * Render a file tree as HTML.
+ * @param {object} node - tree node from _buildFileTree
+ * @param {Function|null} downloadFn - if provided, renders per-file download buttons
+ * @param {number} depth
+ */
+function _renderFileTree(node, downloadFn, depth = 0) {
+  let html = '';
+  const indent = depth * 12;
+  // Render subdirectories first
+  for (const [name, child] of Object.entries(node.children)) {
+    html += `<div style="padding-left:${indent}px;opacity:.7">📂 ${esc(name)}</div>`;
+    html += _renderFileTree(child, downloadFn, depth + 1);
+  }
+  // Then files
+  for (const f of node.files) {
+    const fmtSize = f.size != null ? ` <span style="opacity:.5">${fmt(f.size)}</span>` : '';
+    const dlBtn   = downloadFn && f.fileId
+      ? ` <button data-dl-fid="${f.fileId}" style="background:none;border:none;color:var(--tq,#40e0d0);cursor:pointer;font-size:10px;padding:0 2px" title="download">↓</button>`
+      : '';
+    html += `<div style="padding-left:${indent}px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">📄 ${esc(f.filename || f.name || 'file')}${fmtSize}${dlBtn}</div>`;
+  }
+  return html;
+}
+
+/**
+ * Make a DOM element draggable within its offset parent.
+ * Uses pointer events for touch + mouse compatibility.
+ */
+function _makeDraggable(el) {
+  let startX = 0, startY = 0, origLeft = 0, origBottom = 0;
+  const parent = el.offsetParent || el.parentElement;
+
+  el.style.position = 'absolute';
+  el.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    startX    = e.clientX;
+    startY    = e.clientY;
+    origLeft  = el.offsetLeft;
+    origBottom = parent.offsetHeight - el.offsetTop - el.offsetHeight;
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove', e => {
+    if (!el.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const newLeft   = Math.max(0, Math.min(origLeft + dx, parent.offsetWidth  - el.offsetWidth));
+    const newBottom = Math.max(0, Math.min(origBottom - dy, parent.offsetHeight - el.offsetHeight));
+    el.style.left   = newLeft   + 'px';
+    el.style.bottom = newBottom + 'px';
+    el.style.right  = 'auto';
+    el.style.top    = 'auto';
+  });
 }

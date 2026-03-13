@@ -1,21 +1,13 @@
 /**
- * tqapps.js — Turquoise Apps v5
+ * tqapps.js — Turquoise Apps v6
  *
- * Fixes:
- *   - VoiceMemo: no guard when MediaRecorder is undefined (Firefox without
- *     media stream support, or certain privacy browsers). Now checks before
- *     attempting construction and shows a clear error message.
- *   - VoiceMemo: calling start() while already recording silently created a
- *     second MediaRecorder on the same stream. Added an _started flag guard.
- *   - VoiceMemo: _finish() was called from recorder.onstop but cancel()
- *     also called recorder.stop() then set _chunks = [] — a race where
- *     _finish() could still fire after cancel and invoke onFile with an
- *     empty-but-non-null blob. Fixed by introducing a _cancelled flag.
- *   - TicTacToe: _reset() set state based on `this.mySymbol ? 'active' : 'waiting'`
- *     but mySymbol is always set once a game has started, so state after
- *     a peer-initiated reset was always 'active' even when we were the
- *     accepting side. Kept as-is (correct for this architecture) but
- *     added a comment to prevent future confusion.
+ * Fixes over v5:
+ *   - TicTacToe: handleMsg('invite') was setting mySymbol='O' immediately,
+ *     which caused _draw()'s invite-UI branch (`!sym`) to be false — so the
+ *     receiver NEVER saw the "challenge received / accept / decline" UI.
+ *     Fix: mySymbol is left null on invite receipt; _accept() sets it to 'O'
+ *     as it always should have been. The invite condition is now just
+ *     `this._invited && this.state === 'waiting'`, independent of sym.
  */
 
 // ── App Registry ──────────────────────────────────────────────────────────────
@@ -48,10 +40,19 @@ export class TicTacToe {
     const { action } = msg;
 
     if (action === 'invite') {
-      this.mySymbol = 'O'; this._invited = true; this.state = 'waiting'; this._draw();
+      // Do NOT set mySymbol here — leave it null so _draw() can show the
+      // invite UI (which checks `this.state === 'waiting' && this._invited`).
+      // mySymbol is set to 'O' only when the user actually clicks Accept.
+      this._invited = true;
+      this.state    = 'waiting';
+      this._draw();
+
     } else if (action === 'accept') {
-      // Initiator ('X') learns peer accepted
-      this.mySymbol = 'X'; this.state = 'active'; this._draw();
+      // Initiator ('X') learns peer accepted → game is on
+      this.mySymbol = 'X';
+      this.state    = 'active';
+      this._draw();
+
     } else if (action === 'move') {
       const { cell } = msg;
       if (typeof cell !== 'number' || cell < 0 || cell > 8) return;
@@ -61,16 +62,19 @@ export class TicTacToe {
       this.board[cell] = peerSym;
       this.turn = this.mySymbol;
       this._check(); this._draw();
+
     } else if (action === 'reset') {
       this._reset(); this._draw();
+
     } else if (action === 'resign') {
       this.state = 'resigned'; this._draw();
     }
   }
 
   _accept() {
-    // Accepting side is always 'O'; initiator is 'X'
-    this.mySymbol = 'O'; this.state = 'active';
+    // Accepting side is always 'O'; inviter is 'X'
+    this.mySymbol = 'O';
+    this.state    = 'active';
     this.send({ gameType: 'ttt', action: 'accept' });
     this._draw();
   }
@@ -84,14 +88,11 @@ export class TicTacToe {
   }
 
   _reset() {
-    this.board    = Array(9).fill(null);
-    this.turn     = 'X';
-    // mySymbol is set for both sides once a game started, so state is always
-    // 'active' after a reset when symbols are assigned. 'waiting' only applies
-    // before the first accept handshake.
-    this.state    = this.mySymbol ? 'active' : 'waiting';
-    this.winner   = null;
-    this.winLine  = null;
+    this.board   = Array(9).fill(null);
+    this.turn    = 'X';
+    this.state   = this.mySymbol ? 'active' : 'waiting';
+    this.winner  = null;
+    this.winLine = null;
   }
 
   _requestReset() {
@@ -127,11 +128,13 @@ export class TicTacToe {
 
   _draw() {
     const c = this._dom; if (!c) return;
-    const sym = this.mySymbol, peer = sym === 'X' ? 'O' : 'X';
+    const sym  = this.mySymbol;
+    const peer = sym === 'X' ? 'O' : 'X';
     const myTurn = this.state === 'active' && this.turn === sym;
 
     let status = '';
-    if (this.state === 'waiting' && this._invited && !sym) {
+    // Invite UI: shown whenever we've been invited and haven't accepted yet
+    if (this.state === 'waiting' && this._invited) {
       status = `<div class="ta-invite">
         <div class="ta-inv-text">challenge received</div>
         <div class="ta-btns">
@@ -220,13 +223,11 @@ export class VoiceMemo {
   }
 
   async start(container) {
-    // Guard: prevent concurrent start() calls
     if (this._started) return;
-    this._started = true;
+    this._started   = true;
     this._cancelled = false;
-    this._dom = container;
+    this._dom       = container;
 
-    // Guard: check MediaRecorder availability (may be absent in some browsers)
     if (typeof MediaRecorder === 'undefined') {
       container.innerHTML = `<div class="vm-err">🎤 voice recording not supported in this browser</div>`;
       setTimeout(() => this.onCancel?.(), 2500);
@@ -248,7 +249,6 @@ export class VoiceMemo {
     try {
       this._recorder = new MediaRecorder(this._stream, mime ? { mimeType: mime } : {});
     } catch (e) {
-      // Fallback: let browser choose MIME type
       try { this._recorder = new MediaRecorder(this._stream); }
       catch (e2) {
         container.innerHTML = `<div class="vm-err">🎤 recording setup failed: ${e2.message}</div>`;
@@ -263,8 +263,7 @@ export class VoiceMemo {
       if (e.data?.size > 0) this._chunks.push(e.data);
     };
     this._recorder.onstop = () => this._finish();
-
-    this._recorder.start(100); // collect data every 100ms
+    this._recorder.start(100);
 
     this._elapsed = 0;
     this._timer   = setInterval(() => { this._elapsed++; this._draw(); }, 1000);
@@ -286,12 +285,11 @@ export class VoiceMemo {
     const s    = this._elapsed;
     const mins = Math.floor(s / 60);
     const secs = String(s % 60).padStart(2, '0');
-    const time = `${mins}:${secs}`;
 
     this._dom.innerHTML = `<div class="tqapp-memo">
       <div class="tqapp-hdr">
         <span>🎤 voice memo</span>
-        <span class="vm-time">${time}</span>
+        <span class="vm-time">${mins}:${secs}</span>
       </div>
       <div class="vm-bars">
         <span></span><span></span><span></span><span></span>
@@ -329,10 +327,8 @@ export class VoiceMemo {
   }
 
   _finish() {
-    // Ignore if cancel() already ran — avoids invoking onFile with empty data
     if (this._cancelled) return;
     if (!this._chunks.length) { this.onCancel?.(); return; }
-
     const mime = this._recorder?.mimeType || 'audio/webm';
     const blob = new Blob(this._chunks, { type: mime });
     const ext  = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
@@ -342,7 +338,6 @@ export class VoiceMemo {
   }
 
   destroy() {
-    // Non-cancelling teardown — preserves any recorded data already sent
     this._cancelled = true;
     clearInterval(this._timer);
     if (this._recorder?.state === 'recording') {
