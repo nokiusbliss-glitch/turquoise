@@ -1,14 +1,13 @@
 /**
- * sw.js — Turquoise Service Worker v5
+ * sw.js — Turquoise Service Worker v6
  * Cache-first for app shell, network-first for cross-origin assets.
  *
- * Fixes v4→v5:
- *   - Added tqapps.js to CORE_ASSETS (was missing — broke offline mode)
- *   - Added folder.js to CORE_ASSETS
- *   - Graceful partial install: if some assets 404, don't abort the whole SW
+ * Changes v5→v6:
+ *   - Added tqlog.js to CORE_ASSETS (new module required at boot)
+ *   - Graceful partial install preserved from v5
  */
 
-const CACHE_NAME = 'tq-v5';
+const CACHE_NAME = 'tq-v6';
 
 const CORE_ASSETS = [
   '/',
@@ -21,6 +20,7 @@ const CORE_ASSETS = [
   '/files.js',
   '/folder.js',
   '/tqapps.js',
+  '/tqlog.js',          // new
   '/tools-registry.js',
   '/tools-modules.js',
   '/manifest.json',
@@ -29,7 +29,6 @@ const CORE_ASSETS = [
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE_NAME).then(async (cache) => {
-      // Cache individually so one missing asset doesn't abort install
       const results = await Promise.allSettled(
         CORE_ASSETS.map(url =>
           cache.add(url).catch(err => {
@@ -58,10 +57,9 @@ self.addEventListener('fetch', (e) => {
 
   const url = new URL(e.request.url);
 
-  // Never intercept WebSocket upgrades
   if (e.request.headers.get('upgrade') === 'websocket') return;
 
-  // Cross-origin (e.g. Google Fonts): network-first, cache fallback
+  // Cross-origin: network-first, cache fallback
   if (url.origin !== self.location.origin) {
     e.respondWith(
       caches.open(CACHE_NAME).then(cache =>

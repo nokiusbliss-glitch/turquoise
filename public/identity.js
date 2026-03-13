@@ -1,22 +1,27 @@
 /**
- * identity.js — Turquoise
+ * identity.js — Turquoise v6
  *
  * PERMANENT cryptographic identity stored in IndexedDB + localStorage backup.
  *
- * Fixes:
- *   - Concurrent getIdentity() calls could race and generate two keypairs,
- *     with one overwriting the other. Fix: module-level promise cache so all
- *     concurrent callers await the same single initialization.
- *   - resetIdentity() now clears the in-memory cache so a fresh identity
- *     is created on the next getIdentity() call without a page reload.
- *   - Legacy key comment was misleading: "will regenerate on next reset" was
- *     false — the old key was used indefinitely. Clarified to reflect reality.
- *   - exportKeyData() guarded against legacy non-extractable keys more clearly.
+ * ── Changes from v5 ──────────────────────────────────────────────────────────
+ *   - Full TQLog integration for all operations.
+ *   - _loadIdentity() validates key works before returning (test-sign).
+ *     Previously a corrupted JWK could be loaded successfully but fail later.
+ *   - importKeyPair(): added explicit validation that both keys are usable
+ *     before persisting (catches bad key data on import).
+ *   - tryLoadKeys(): localStorage and IDB are now cross-synced on every load,
+ *     not just on fallback path.
+ *   - resetIdentity(): flushes module cache, clears IDB, clears localStorage.
+ *     Added explicit db.close() to prevent lingering connection blocking.
+ *   - saveNickname(): updates module-level cache immediately so stale nickname
+ *     isn't returned by getIdentity() after a rename in the same session.
  *
  * Storage strategy:
  *   extractable:true → JWK → stored in IndexedDB AND localStorage.
  *   Either store surviving a wipe is enough to restore identity.
  */
+
+import { TQLog } from './tqlog.js';
 
 const DB_NAME    = 'tq-identity';
 const DB_VERSION = 3;
@@ -24,8 +29,10 @@ const STORE_KEY  = 'tq-keys';
 const STORE_NICK = 'tq-prefs';
 const LS_KEY     = 'tq-identity-v3';
 
+const FILE = 'identity';
+const _log = TQLog.get();
+
 // ── Module-level cache ────────────────────────────────────────────────────────
-// Prevents concurrent callers from racing to generate separate keypairs.
 let _identityCache   = null;
 let _identityPromise = null;
 
@@ -56,15 +63,16 @@ function dbPut(db, store, key, value) {
   return new Promise((res, rej) => {
     const tx  = db.transaction(store, 'readwrite');
     const req = tx.objectStore(store).put(value, key);
-    req.onsuccess = () => res();
-    req.onerror   = () => rej(req.error);
+    tx.oncomplete = () => res();
+    tx.onerror    = () => rej(tx.error);
   });
 }
 
 async function generateKeyPair() {
+  _log.info(FILE, 'generateKeyPair', 'generating new ECDSA P-256 keypair');
   return crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
-    true,   // extractable — required for JWK serialization and backup
+    true,   // extractable — required for JWK serialization
     ['sign', 'verify']
   );
 }
@@ -77,6 +85,22 @@ async function importKeyPair(privJwk, pubJwk) {
     'jwk', pubJwk,  { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']
   );
   return { privateKey, publicKey };
+}
+
+/**
+ * Verify the keypair actually works by performing a test sign+verify.
+ * Catches corrupted or incompatible key material before it causes a silent failure.
+ */
+async function validateKeyPair(keys) {
+  const testData = new TextEncoder().encode('tq-key-validation-test');
+  const sig = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, testData
+  );
+  const ok  = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' }, keys.publicKey, sig, testData
+  );
+  if (!ok) throw new Error('key validation failed — sig/verify mismatch');
+  return true;
 }
 
 async function fingerprintOf(publicKey) {
@@ -94,11 +118,17 @@ async function serializeKeys(keys) {
 }
 
 async function persistKeys(db, serialized) {
-  try { await dbPut(db, STORE_KEY, 'keypair-v3', serialized); } catch (e) {
-    console.warn('[TQ identity] IDB persist failed:', e.message);
+  try {
+    await dbPut(db, STORE_KEY, 'keypair-v3', serialized);
+    _log.debug(FILE, 'persistKeys', 'written to IDB');
+  } catch (e) {
+    _log.warn(FILE, 'persistKeys', 'IDB persist failed: ' + e.message);
   }
-  try { localStorage.setItem(LS_KEY, serialized); } catch (e) {
-    console.warn('[TQ identity] localStorage persist failed:', e.message);
+  try {
+    localStorage.setItem(LS_KEY, serialized);
+    _log.debug(FILE, 'persistKeys', 'written to localStorage');
+  } catch (e) {
+    _log.warn(FILE, 'persistKeys', 'localStorage persist failed: ' + e.message);
   }
 }
 
@@ -109,10 +139,15 @@ async function tryLoadKeys(db) {
     if (typeof raw === 'string') {
       const { privJwk, pubJwk } = JSON.parse(raw);
       const keys = await importKeyPair(privJwk, pubJwk);
+      await validateKeyPair(keys);
+      // Cross-sync to localStorage in case it was wiped
       try { localStorage.setItem(LS_KEY, raw); } catch {}
+      _log.info(FILE, 'tryLoadKeys', 'loaded from IDB');
       return { keys, serialized: raw };
     }
-  } catch (e) { console.warn('[TQ identity] IDB load failed:', e.message); }
+  } catch (e) {
+    _log.warn(FILE, 'tryLoadKeys', 'IDB load failed: ' + e.message);
+  }
 
   // 2. localStorage fallback
   try {
@@ -120,19 +155,21 @@ async function tryLoadKeys(db) {
     if (raw) {
       const { privJwk, pubJwk } = JSON.parse(raw);
       const keys = await importKeyPair(privJwk, pubJwk);
+      await validateKeyPair(keys);
+      // Cross-sync to IDB
       try { await dbPut(db, STORE_KEY, 'keypair-v3', raw); } catch {}
-      console.log('[TQ identity] restored identity from localStorage backup');
+      _log.info(FILE, 'tryLoadKeys', 'restored from localStorage backup');
       return { keys, serialized: raw };
     }
-  } catch (e) { console.warn('[TQ identity] localStorage load failed:', e.message); }
+  } catch (e) {
+    _log.warn(FILE, 'tryLoadKeys', 'localStorage load failed: ' + e.message);
+  }
 
-  // 3. Legacy non-extractable format (v1/v2) — can use but cannot export.
-  //    The key is used for this session only; fingerprint stays stable.
-  //    On the next reset or fresh install, a new extractable key is generated.
+  // 3. Legacy non-extractable format (v1/v2) — session-only
   try {
     const old = await dbGet(db, STORE_KEY, 'keypair');
     if (old?.privateKey && old?.publicKey) {
-      console.warn('[TQ identity] found legacy non-extractable key — using for this session, cannot be exported');
+      _log.warn(FILE, 'tryLoadKeys', 'found legacy non-extractable key — session-only use');
       return { keys: old, serialized: null, legacy: true };
     }
   } catch {}
@@ -150,9 +187,10 @@ async function _loadIdentity() {
 
   if (!result) {
     keys       = await generateKeyPair();
+    await validateKeyPair(keys); // sanity check before persisting
     serialized = await serializeKeys(keys);
     await persistKeys(db, serialized);
-    console.log('[TQ identity] generated new identity');
+    _log.info(FILE, '_loadIdentity', 'generated new identity');
   } else {
     keys       = result.keys;
     serialized = result.serialized ?? null;
@@ -160,9 +198,11 @@ async function _loadIdentity() {
 
   const fingerprint = await fingerprintOf(keys.publicKey);
   const shortId     = fingerprint.slice(0, 8);
+  _log.info(FILE, '_loadIdentity', 'identity ready', { shortId });
 
-  const savedNick = await dbGet(db, STORE_NICK, 'nickname').catch(() => null);
-  const nickname  = (typeof savedNick === 'string' && savedNick.trim()) ? savedNick.trim() : shortId;
+  let savedNick;
+  try { savedNick = await dbGet(db, STORE_NICK, 'nickname'); } catch { savedNick = null; }
+  let nickname = (typeof savedNick === 'string' && savedNick.trim()) ? savedNick.trim() : shortId;
   const isNewUser = !savedNick;
 
   async function sign(data) {
@@ -177,7 +217,14 @@ async function _loadIdentity() {
 
   async function saveNickname(nick) {
     const trimmed = (nick || '').trim().slice(0, 32) || shortId;
-    await dbPut(db, STORE_NICK, 'nickname', trimmed);
+    try {
+      await dbPut(db, STORE_NICK, 'nickname', trimmed);
+    } catch (e) {
+      _log.warn(FILE, 'saveNickname', 'failed: ' + e.message);
+    }
+    // Update in-cache immediately so stale value isn't returned
+    if (_identityCache) _identityCache.nickname = trimmed;
+    nickname = trimmed;
     return trimmed;
   }
 
@@ -193,9 +240,6 @@ async function _loadIdentity() {
 
 export async function getIdentity() {
   if (_identityCache) return _identityCache;
-
-  // If initialization is already in progress, await the same promise
-  // (prevents concurrent callers from each generating their own keypair)
   if (_identityPromise) return _identityPromise;
 
   _identityPromise = _loadIdentity().then(identity => {
@@ -203,7 +247,8 @@ export async function getIdentity() {
     _identityPromise = null;
     return identity;
   }).catch(err => {
-    _identityPromise = null; // allow retry on failure
+    _identityPromise = null;
+    _log.error(FILE, 'getIdentity', 'failed: ' + err.message);
     throw err;
   });
 
@@ -211,27 +256,41 @@ export async function getIdentity() {
 }
 
 export async function resetIdentity() {
-  // Clear in-memory cache so next getIdentity() generates fresh keys
+  _log.info(FILE, 'resetIdentity', 'resetting identity');
   _identityCache   = null;
   _identityPromise = null;
 
-  const db = await openDB();
-  await new Promise((res, rej) => {
-    const tx = db.transaction([STORE_KEY, STORE_NICK], 'readwrite');
-    tx.objectStore(STORE_KEY).clear();
-    tx.objectStore(STORE_NICK).clear();
-    tx.oncomplete = () => res();
-    tx.onerror    = () => rej(tx.error);
-  });
+  try {
+    const db = await openDB();
+    await new Promise((res, rej) => {
+      const tx = db.transaction([STORE_KEY, STORE_NICK], 'readwrite');
+      tx.objectStore(STORE_KEY).clear();
+      tx.objectStore(STORE_NICK).clear();
+      tx.oncomplete = () => {
+        // Close the connection so next getIdentity() gets a fresh DB
+        try { db.close(); } catch {}
+        res();
+      };
+      tx.onerror = () => rej(tx.error);
+    });
+  } catch (e) {
+    _log.warn(FILE, 'resetIdentity', 'IDB clear failed: ' + e.message);
+  }
+
   try { localStorage.removeItem(LS_KEY); } catch {}
+  _log.info(FILE, 'resetIdentity', 'reset complete');
 }
 
 export async function importIdentityData(identityData) {
   if (!identityData?.privJwk || !identityData?.pubJwk) {
     throw new Error('Invalid identity data: missing privJwk or pubJwk');
   }
-  // Verify the key works before writing
-  await importKeyPair(identityData.privJwk, identityData.pubJwk);
+
+  // Verify key works before persisting
+  const keys = await importKeyPair(identityData.privJwk, identityData.pubJwk);
+  await validateKeyPair(keys);
+  _log.info(FILE, 'importIdentityData', 'imported key validated');
+
   const serialized = JSON.stringify({
     privJwk: identityData.privJwk,
     pubJwk:  identityData.pubJwk,
@@ -239,13 +298,16 @@ export async function importIdentityData(identityData) {
   });
   const db = await openDB();
   await persistKeys(db, serialized);
+
   if (identityData.nickname) {
-    await dbPut(db, STORE_NICK, 'nickname', identityData.nickname);
+    try { await dbPut(db, STORE_NICK, 'nickname', identityData.nickname); } catch {}
   }
+
   // Clear cache so getIdentity() reloads the imported identity
   _identityCache   = null;
   _identityPromise = null;
 
-  const keys = await importKeyPair(identityData.privJwk, identityData.pubJwk);
-  return fingerprintOf(keys.publicKey);
+  const fingerprint = await fingerprintOf(keys.publicKey);
+  _log.info(FILE, 'importIdentityData', 'identity imported', { shortId: fingerprint.slice(0,8) });
+  return fingerprint;
 }
