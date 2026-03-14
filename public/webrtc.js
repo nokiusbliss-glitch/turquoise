@@ -345,13 +345,11 @@ export class TurquoiseNetwork {
 
   _startHB() {
     clearInterval(this._hbTimer);
-
-    // Reset miss counters on all peers so a reconnect doesn’t teardown
-    // immediately if they were already close to the timeout.
-    for (const [, ps] of this.peers) {
-      ps.hbMiss = 0;
-    }
-
+    // Reset miss counters on all connected peers. Without this, a WS reconnect
+    // (connect() → _startHB()) starts counting from the previous hbMiss value,
+    // so a peer at hbMiss=2 would tear down after just one more tick (~8s)
+    // instead of the full 3×8s=24s window.
+    for (const [, ps] of this.peers) ps.hbMiss = 0;
     this._hbTimer = setInterval(() => {
       for (const [fp, ps] of this.peers) {
         if (!ps.ready) continue;
@@ -407,47 +405,36 @@ export class TurquoiseNetwork {
   async offerWithStream(fp, stream) {
     const ps = this.peers.get(fp);
     if (!ps) return;
-
-    // Add media using transceivers so we don't reorder m-lines
+    // Use addTransceiver (NOT addTrack + createOffer) to append new audio/video
+    // m-lines at the END of the existing SDP. addTrack + createOffer can reorder
+    // m-lines on a PC that already negotiated DataChannels, causing Chrome's
+    // "The order of m-lines in subsequent offer doesn't match" error.
     for (const track of stream.getTracks()) {
-      ps.pc.addTransceiver(track, { direction: 'sendrecv' });
+      ps.pc.addTransceiver(track, { streams:[stream], direction:'sendrecv' });
     }
-
     try {
-      await ps.pc.setLocalDescription();               // implicit offer
-      this._sig({
-        type: 'offer-reneg',
-        sdp: ps.pc.localDescription.sdp,
-        to: fp,
-        from: this.id.fingerprint,
-      });
-    } catch (e) {
-      this._log.error(FILE, 'offerWithStream', e.message);
-    }
+      // setLocalDescription() with no args = implicit offer. It appends new
+      // m-lines after existing ones rather than reordering them.
+      await ps.pc.setLocalDescription();
+      this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
+    } catch(e) { this._log.warn(FILE,'offerWithStream',e.message); }
   }
 
+  /**
+   * Set remote SDP, add local tracks, complete the SDP answer (call acceptor side).
+   * @param {string} fp
+   * @param {string} sdp  — the SDP from offer-reneg
+   * @param {MediaStream} stream
+   */
   async answerWithStream(fp, sdp, stream) {
     const ps = this.peers.get(fp);
     if (!ps || !sdp) return;
-
     try {
-      await ps.pc.setRemoteDescription({ type: 'offer', sdp });
-
-      // Add media using transceivers so we don’t reorder m-lines
-      for (const track of stream.getTracks()) {
-        ps.pc.addTransceiver(track, { direction: 'sendrecv' });
-      }
-
-      await ps.pc.setLocalDescription();               // implicit answer
-      this._sig({
-        type: 'answer-reneg',
-        sdp: ps.pc.localDescription.sdp,
-        to: fp,
-        from: this.id.fingerprint,
-      });
-    } catch (e) {
-      this._log.error(FILE, 'answerWithStream', e.message);
-    }
+      await ps.pc.setRemoteDescription({type:'offer', sdp});
+      stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
+      await ps.pc.setLocalDescription();
+      this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
+    } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
   }
 
   stopMedia(fp) {
