@@ -2,9 +2,8 @@
  * webrtc.js — Turquoise v7.1
  *
  * Fixes over v7:
- *   - offer-reneg / answer-reneg forwarded to onMessage so app.js call
- *     handlers actually fire. Previously consumed internally → answering
- *     side never got a remote stream (calls silently failed).
+ *   - offer-reneg forwarded to onMessage so app.js call handlers fire.
+ *     answer-reneg is applied internally as an SDP answer.
  *   - answerWithStream(fp, sdp, stream): now accepts the SDP from the
  *     offer-reneg, sets remote description, adds tracks, sends answer-reneg.
  *     Previously only added tracks with no SDP exchange → call never connected.
@@ -146,10 +145,10 @@ export class TurquoiseNetwork {
     switch (type) {
       case 'offer':  this._onOffer(msg);  break;
       case 'answer': this._onAnswer(msg); break;
+      case 'answer-reneg': this._onAnswerReneg(msg); break;
       case 'ice':    this._onIce(msg);    break;
-      // offer-reneg and answer-reneg are forwarded to app.js for media handling.
-      // Previously both were handled internally (same as offer/answer) which
-      // bypassed app.js call logic and broke the answering side of every call.
+      // offer-reneg is forwarded to app.js for media handling.
+      // answer-reneg is handled internally (applied as an SDP answer).
       default: this.onMessage?.(from, msg);
     }
   }
@@ -311,6 +310,9 @@ export class TurquoiseNetwork {
     if (!ps || ps.ignoreOffer || !msg.sdp) return;
     try { await ps.pc.setRemoteDescription({type:'answer', sdp:msg.sdp}); } catch {}
   }
+
+  // answer-reneg is the SDP answer to offer-reneg; apply it like a normal answer.
+  async _onAnswerReneg(msg) { return this._onAnswer(msg); }
 
   async _onIce(msg) {
     const ps = this.peers.get(msg.from);
