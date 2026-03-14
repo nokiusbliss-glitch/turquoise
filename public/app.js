@@ -459,7 +459,7 @@ export class TurquoiseApp {
   _dispatch(fp, msg) {
     const {type}=msg;
     if (type==='nick-update') {
-      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
       return;
     }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
@@ -702,8 +702,6 @@ export class TurquoiseApp {
     let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this._handleMediaError(e,fp); return; }
     this.call={fp,type:callType,phase:'inviting',localStream:s,remoteStream:null,muted:false,camOff:false,inviteTimer:setTimeout(()=>this._onCallTimeout(fp),45_000)};
     this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname});
-    // Send initial offer with media to avoid renegotiation issues
-    await this.net.offerWithStream(fp, s);
     this._status(callType+' — calling '+(this.peers.get(fp)?.nick||fp.slice(0,8))+'…','info');
     this._renderCallPanel();
   }
@@ -717,7 +715,9 @@ export class TurquoiseApp {
   _onCallAccepted(fp) {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='inviting') return;
     clearTimeout(this.call.inviteTimer); this.call.phase='connecting';
-    this._attachRemote1to1(fp);
+    this.net.offerWithStream(fp,this.call.localStream)
+      .then(()=>this._attachRemote1to1(fp))
+      .catch(e=>{ this._status('call failed: '+e.message,'err',5000); this._endCallLocal(true); });
   }
 
   _onCallDeclined(fp) {
@@ -737,10 +737,9 @@ export class TurquoiseApp {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='ringing') return;
     this._hideCallIncoming();
     const video=this.call.type==='stream';
-    let s;
-    if (this.call.localStream) { s=this.call.localStream; }
-    else { try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,fp); return; } this.call.localStream=s; }
-    this.call.phase='connecting';
+    let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
+    catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this.call=null; this._handleMediaError(e,fp); return; }
+    this.call.localStream=s; this.call.phase='connecting';
     this.net.sendCtrl(fp,{type:'call-accept'});
     await this._openSession(fp); this._renderCallPanel();
   }
