@@ -702,6 +702,8 @@ export class TurquoiseApp {
     let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this._handleMediaError(e,fp); return; }
     this.call={fp,type:callType,phase:'inviting',localStream:s,remoteStream:null,muted:false,camOff:false,inviteTimer:setTimeout(()=>this._onCallTimeout(fp),45_000)};
     this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname});
+    // Send initial offer with media to avoid renegotiation issues
+    await this.net.offerWithStream(fp, s);
     this._status(callType+' — calling '+(this.peers.get(fp)?.nick||fp.slice(0,8))+'…','info');
     this._renderCallPanel();
   }
@@ -735,9 +737,10 @@ export class TurquoiseApp {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='ringing') return;
     this._hideCallIncoming();
     const video=this.call.type==='stream';
-    let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
-    catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this.call=null; this._handleMediaError(e,fp); return; }
-    this.call.localStream=s; this.call.phase='connecting';
+    let s;
+    if (this.call.localStream) { s=this.call.localStream; }
+    else { try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,fp); return; } this.call.localStream=s; }
+    this.call.phase='connecting';
     this.net.sendCtrl(fp,{type:'call-accept'});
     await this._openSession(fp); this._renderCallPanel();
   }
