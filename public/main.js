@@ -18,14 +18,16 @@ let _network = null;
 
 // ── Required APIs ─────────────────────────────────────────────────────────────
 const REQUIRED = [
-  ['IndexedDB',    ()=>!!window.indexedDB],
+  ['IndexedDB',    null,           ()=>!!window.indexedDB],
   ['crypto.subtle','requires HTTPS', ()=>!!window.crypto?.subtle],
-  ['WebRTC',       ()=>!!window.RTCPeerConnection],
-  ['WebSocket',    ()=>!!window.WebSocket],
+  ['WebRTC',       null,           ()=>!!window.RTCPeerConnection],
+  ['WebSocket',    null,           ()=>!!window.WebSocket],
 ];
 
 function missingAPIs() {
-  return REQUIRED.filter(([,,check])=>!check()).map(([name,hint])=>typeof hint==='string'?`${name} (${hint})`:name);
+  return REQUIRED
+    .filter(([,,check]) => !check())
+    .map(([name,hint]) => hint ? `${name} (${hint})` : name);
 }
 
 function fatal(msg, recoverable=false) {
