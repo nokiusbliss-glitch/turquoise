@@ -459,7 +459,7 @@ export class TurquoiseApp {
   _dispatch(fp, msg) {
     const {type}=msg;
     if (type==='nick-update') {
-      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});
       return;
     }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
@@ -715,9 +715,7 @@ export class TurquoiseApp {
   _onCallAccepted(fp) {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='inviting') return;
     clearTimeout(this.call.inviteTimer); this.call.phase='connecting';
-    this.net.offerWithStream(fp,this.call.localStream)
-      .then(()=>this._attachRemote1to1(fp))
-      .catch(e=>{ this._status('call failed: '+e.message,'err',5000); this._endCallLocal(true); });
+    this._attachRemote1to1(fp);
   }
 
   _onCallDeclined(fp) {
