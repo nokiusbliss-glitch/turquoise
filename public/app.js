@@ -217,10 +217,20 @@ export class TurquoiseApp {
   }
 
   _togglePlus() {
-    const m=$('plus-menu'); if(!m) return;
+    const m=$('plus-menu'), btn=$('plus-btn');
+    if (!m||!btn) return;
     const was = m.classList.contains('visible');
     this._closePlus();
-    if (!was) { this._buildPlus(); m.classList.add('visible'); }
+    if (!was) {
+      // Position above the plus button using fixed coords so the menu works
+      // regardless of parent overflow context (#main is overflow:hidden).
+      const r = btn.getBoundingClientRect();
+      m.style.left   = r.left + 'px';
+      m.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+      m.style.top    = '';
+      this._buildPlus();
+      m.classList.add('visible');
+    }
   }
   _closePlus() { $('plus-menu')?.classList.remove('visible'); }
 

@@ -345,6 +345,11 @@ export class TurquoiseNetwork {
 
   _startHB() {
     clearInterval(this._hbTimer);
+    // Reset miss counters on all connected peers. Without this, a WS reconnect
+    // (connect() → _startHB()) starts counting from the previous hbMiss value,
+    // so a peer at hbMiss=2 would tear down after just one more tick (~8s)
+    // instead of the full 3×8s=24s window.
+    for (const [, ps] of this.peers) ps.hbMiss = 0;
     this._hbTimer = setInterval(() => {
       for (const [fp, ps] of this.peers) {
         if (!ps.ready) continue;
@@ -400,10 +405,17 @@ export class TurquoiseNetwork {
   async offerWithStream(fp, stream) {
     const ps = this.peers.get(fp);
     if (!ps) return;
-    stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
+    // Use addTransceiver (NOT addTrack + createOffer) to append new audio/video
+    // m-lines at the END of the existing SDP. addTrack + createOffer can reorder
+    // m-lines on a PC that already negotiated DataChannels, causing Chrome's
+    // "The order of m-lines in subsequent offer doesn't match" error.
+    for (const track of stream.getTracks()) {
+      ps.pc.addTransceiver(track, { streams:[stream], direction:'sendrecv' });
+    }
     try {
-      const o = await ps.pc.createOffer({offerToReceiveAudio:true, offerToReceiveVideo:true});
-      await ps.pc.setLocalDescription(o);
+      // setLocalDescription() with no args = implicit offer. It appends new
+      // m-lines after existing ones rather than reordering them.
+      await ps.pc.setLocalDescription();
       this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'offerWithStream',e.message); }
   }
