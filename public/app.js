@@ -459,7 +459,7 @@ export class TurquoiseApp {
   _dispatch(fp, msg) {
     const {type}=msg;
     if (type==='nick-update') {
-      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
       return;
     }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
@@ -875,9 +875,7 @@ export class TurquoiseApp {
     vids.innerHTML='';
     const remote=document.createElement('div');
     remote.className='call-video-tile'; remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
-    if (c.type === 'stream' && c.remoteStream) {  // Only create video element for video calls
-      const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v);
-    }
+    if (c.remoteStream) { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); }
     const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(c.fp)?.nick||c.fp.slice(0,8); remote.appendChild(lbl);
     vids.appendChild(remote);
     const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'');
