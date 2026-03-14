@@ -9,5 +9,7 @@
     "dev":   "node --watch server.js"
   },
   "engines": { "node": ">=18" },
-  "dependencies": { "ws": "8.19.0" }
+  "dependencies": {
+    "ws": "^8.0.0"
+  }
 }

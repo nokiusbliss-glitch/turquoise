@@ -430,11 +430,11 @@ export class TurquoiseNetwork {
     const ps = this.peers.get(fp);
     if (!ps || !sdp) return;
     try {
-      await ps.pc.setRemoteDescription({type:'offer', sdp});
-      stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
+      await ps.pc.setRemoteDescription({ type: 'offer', sdp });
+      stream.getTracks().forEach(t => ps.pc.addTransceiver(t, { streams: [stream], direction: 'sendrecv' }));  // Use addTransceiver
       await ps.pc.setLocalDescription();
-      this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
-    } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
+      this._sig({ type: 'answer-reneg', sdp: ps.pc.localDescription.sdp, to: fp, from: this.id.fingerprint });
+    } catch (e) { this._log.warn(FILE, 'answerWithStream', e.message); }
   }
 
   stopMedia(fp) {
