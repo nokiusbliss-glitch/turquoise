@@ -1,369 +1,586 @@
-<!DOCTYPE html>
-<html lang="en">
 <head>
-
 <meta charset="UTF-8">
-
-<meta name="viewport"
-content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#040a09">
 
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
 
 <title>Turquoise</title>
 
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+
 <style>
 
-/* ---------- GLOBAL ---------- */
+/* ── Reset ───────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
-html{
-touch-action:manipulation;
+html,body{
+height:100%;
+overflow:hidden;
+background:#040a09;
+color:#c4ede9
 }
 
 body{
-margin:0;
-font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;
-background:#040a09;
-color:#7fffd4;
+font-family:'Space Mono',monospace;
+font-size:13px;
+-webkit-font-smoothing:antialiased;
+}
+
+/* Fix for menus escaping containers */
+body.menu-open{
 overflow:hidden;
 }
 
-/* ---------- APP LAYOUT ---------- */
+/* ── Palette ─────────────────────────────────────── */
+:root{
+
+--tq:#40e0d0;
+--tq2:#1a9e94;
+--tq3:#0a3d39;
+
+--ug:#6bff7b;
+--ug2:#2d7a34;
+
+--uy:#ffe14a;
+--uy2:#a88a00;
+
+--bg0:#040a09;
+--bg1:#071a18;
+--bg2:#0d2e2a;
+
+--text:#c4ede9;
+--dim:#4a8a84;
+--mute:#1e5550;
+
+--err:#ff6040;
+--warn:#ffe14a;
+--ok:#6bff7b;
+
+--r:1px;
+
+}
+
+/* ── Scrollbars ──────────────────────────────────── */
+
+::-webkit-scrollbar{
+width:3px;
+height:3px;
+}
+
+::-webkit-scrollbar-track{
+background:transparent;
+}
+
+::-webkit-scrollbar-thumb{
+background:var(--mute);
+border-radius:2px;
+}
+
+/* ── App Shell ───────────────────────────────────── */
 
 #app{
+display:grid;
+grid-template-columns:220px 1fr 260px;
+grid-template-rows:44px 1fr;
+
+height:100dvh;
+
+background:var(--bg0);
+
+position:relative;
+overflow:hidden;
+}
+
+/* Decorative overlay */
+
+#app::before{
+
+content:'';
+
+position:fixed;
+inset:0;
+
+background:
+
+linear-gradient(
+17deg,
+transparent 41%,
+rgba(64,224,208,.025) 41%,
+rgba(64,224,208,.025) 41.3%,
+transparent 41.3%
+),
+
+linear-gradient(
+17deg,
+transparent 63%,
+rgba(107,255,123,.018) 63%,
+rgba(107,255,123,.018) 63.2%,
+transparent 63.2%
+);
+
+pointer-events:none;
+z-index:0;
+
+}
+
+/* ── Header ───────────────────────────────────── */
+
+#header{
+
+grid-column:1/-1;
+
 display:flex;
-height:100vh;
+align-items:center;
+
+background:var(--bg1);
+
+clip-path:polygon(
+0 0,
+100% 0,
+100% 100%,
+0 calc(100% - 6px)
+);
+
+padding:0 16px 6px 16px;
+
+position:relative;
+z-index:20;
+
+border-bottom:1px solid var(--mute);
+
 }
 
-/* ---------- SIDEBAR ---------- */
+#header-logo{
 
-#sidebar{
-width:220px;
-background:#020706;
-border-right:1px solid #003b33;
+font-family:'Syne',sans-serif;
+font-weight:800;
+
+font-size:15px;
+
+letter-spacing:.25em;
+
+color:var(--tq);
+
+text-transform:uppercase;
+
+clip-path:polygon(
+0 0,
+calc(100% - 6px) 0,
+100% 100%,
+0 100%
+);
+
+background:rgba(64,224,208,.06);
+
+padding:3px 18px 3px 8px;
+
+margin-right:24px;
+
+}
+
+/* Identity row */
+
+#identity-row{
 display:flex;
-flex-direction:column;
-}
-
-#sidebar-header{
-padding:10px;
-border-bottom:1px solid #003b33;
-}
-
-#peer-list{
-flex:1;
-overflow:auto;
-}
-
-.peer{
-padding:10px;
+align-items:center;
+gap:8px;
 cursor:pointer;
-border-bottom:1px solid #002822;
-}
-
-.peer:hover{
-background:#002822;
-}
-
-/* ---------- MAIN ---------- */
-
-#main{
 flex:1;
+min-width:0;
+}
+
+#identity-row::before{
+content:'▸';
+color:var(--dim);
+font-size:10px;
+}
+
+#nick-display{
+font-family:'Syne',sans-serif;
+font-weight:700;
+font-size:13px;
+
+color:var(--tq);
+
+letter-spacing:.05em;
+
+white-space:nowrap;
+overflow:hidden;
+text-overflow:ellipsis;
+}
+
+#nick-input{
+
+display:none;
+
+background:var(--bg2);
+
+border:1px solid var(--tq2);
+
+color:var(--tq);
+
+padding:2px 8px;
+
+font-family:inherit;
+font-size:13px;
+
+width:140px;
+
+outline:none;
+
+}
+
+#nick-input.visible{
+display:block;
+}
+
+#full-fp{
+
+font-size:9px;
+color:var(--dim);
+
+white-space:nowrap;
+overflow:hidden;
+
+text-overflow:ellipsis;
+
+max-width:200px;
+
+letter-spacing:.06em;
+
+}
+
+/* Right side */
+
+#hdr-right{
 display:flex;
-flex-direction:column;
-}
-
-/* ---------- CHAT AREA ---------- */
-
-#chat-area{
-flex:1;
-overflow-y:auto;
-padding:12px;
-scroll-behavior:smooth;
-overscroll-behavior:contain;
-}
-
-/* ---------- MESSAGE ---------- */
-
-.msg{
-margin-bottom:12px;
-max-width:70%;
-padding:10px;
-border-radius:8px;
-background:#022c26;
-word-break:break-word;
-animation:fadein .25s ease;
-user-select:text;
-will-change:transform,opacity;
-}
-
-.msg.self{
-background:#014d43;
+align-items:center;
+gap:8px;
 margin-left:auto;
 }
 
-@keyframes fadein{
-from{
-opacity:0;
-transform:translateY(5px);
-}
-to{
-opacity:1;
-transform:none;
-}
-}
+#conn-status{
 
-/* ---------- FILE / FOLDER ---------- */
+font-size:9px;
+letter-spacing:.1em;
 
-.file-card,
-.folder-card{
-border:1px solid #004c43;
-padding:8px;
-margin-top:6px;
-border-radius:6px;
-background:#011d1a;
-will-change:transform,opacity;
+color:var(--dim);
+
+padding:2px 8px;
+
+background:rgba(64,224,208,.06);
+
+transition:color .3s,background .3s;
+
 }
 
-/* ---------- COMPOSE AREA ---------- */
+#conn-status.ok{
+color:var(--ug);
+}
 
-#compose-area{
+#conn-status.warn{
+color:var(--uy);
+}
+
+#conn-status.err{
+color:var(--err);
+}
+
+/* ── Main Chat ─────────────────────────────────── */
+
+#main{
+
+grid-row:2;
+grid-column:2;
+
+display:flex;
+flex-direction:column;
+
+overflow:hidden;
+
+position:relative;
+
+z-index:3;
+
+}
+
+#chat-area{
+
+flex:1;
+
+overflow-y:auto;
+
+padding:16px 18px 8px;
+
+display:flex;
+flex-direction:column;
+
+gap:4px;
+
+position:relative;
+
+scroll-behavior:smooth;
+
+}
+
+/* Drag overlay */
+
+#chat-area.drag-over::after{
+
+content:'drop to send';
+
+position:absolute;
+inset:0;
+
+background:rgba(64,224,208,.08);
+
+border:2px dashed var(--tq2);
+
 display:flex;
 align-items:center;
-padding:8px;
-gap:6px;
-border-top:1px solid #003b33;
-clip-path:polygon(0 5px,5px 0,100% 0,100% 100%,0 100%);
-overflow:visible;
+justify-content:center;
+
+font-size:20px;
+letter-spacing:.2em;
+
+color:var(--tq2);
+
+pointer-events:none;
+
 }
+
+/* Compose */
+
+#compose-area{
+
+flex-shrink:0;
+
+padding:8px 12px 10px;
+
+background:var(--bg1);
+
+border-top:1px solid var(--mute);
+
+display:flex;
+gap:8px;
+
+align-items:flex-end;
+
+position:relative;
+z-index:10;
+
+}
+
+/* Textarea fix */
 
 #msg-input{
-flex:1;
+
+width:100%;
+
+min-height:32px;
+max-height:160px;
+
 resize:none;
-border:none;
-outline:none;
-background:#011513;
-color:#7fffd4;
-padding:8px;
-border-radius:6px;
-max-height:120px;
+
 overflow-y:auto;
+
+background:var(--bg2);
+
+border:1px solid var(--mute);
+
+color:var(--text);
+
+font-family:inherit;
+
+font-size:12px;
+
+padding:7px 10px;
+
+outline:none;
+
 }
 
-/* ---------- BUTTONS ---------- */
-
-button{
-background:#003b33;
-border:none;
-color:#7fffd4;
-padding:8px 10px;
-border-radius:6px;
-cursor:pointer;
+#msg-input:focus{
+border-color:var(--tq2);
 }
-
-button:hover{
-background:#005f55;
-}
-
-/* ---------- PLUS MENU ---------- */
+/* ── Plus Menu ─────────────────────────────────── */
 
 #plus-menu{
-position:absolute;
-bottom:50px;
-left:10px;
-background:#011d1a;
-border:1px solid #004c43;
-border-radius:6px;
+
+position:fixed;
+
+bottom:70px;
+left:14px;
+
+background:var(--bg1);
+
+border:1px solid var(--mute);
+
+min-width:190px;
+
+z-index:200;
+
 display:none;
-flex-direction:column;
-z-index:50;
+
+box-shadow:0 8px 32px rgba(0,0,0,.6);
+
 }
 
-#plus-menu button{
-width:150px;
-text-align:left;
-background:none;
-border:none;
-padding:10px;
+#plus-menu.visible{
+display:block;
 }
 
-#plus-menu button:hover{
-background:#003b33;
+.pm-item{
+
+padding:7px 14px;
+
+font-size:11px;
+
+color:var(--dim);
+
+cursor:pointer;
+
+transition:background .1s,color .1s;
+
 }
 
-/* ---------- STATUS ---------- */
+.pm-item:hover{
 
-#status-line{
-padding:4px 10px;
-font-size:12px;
-border-top:1px solid #003b33;
-min-height:18px;
+background:rgba(64,224,208,.07);
+
+color:var(--tq);
+
 }
-
-/* ---------- CALL PANEL ---------- */
+/* ── Call Panel ───────────────────────────────── */
 
 #call-panel{
-position:fixed;
-bottom:0;
-left:220px;
-right:0;
-height:200px;
-background:#011513;
-border-top:1px solid #003b33;
+
 display:none;
-flex-wrap:wrap;
-padding:8px;
-gap:10px;
-overflow:auto;
+
+position:fixed;
+
+inset:0;
+
+z-index:100;
+
+background:rgba(4,10,9,.94);
+
+flex-direction:column;
+
+align-items:center;
+
+justify-content:center;
+
+backdrop-filter:blur(4px);
+
 }
 
+#call-panel.visible{
+display:flex;
+}
+
+/* video grid */
+
+#call-videos{
+
+display:grid;
+
+grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+
+gap:12px;
+
+max-width:900px;
+
+width:100%;
+
+padding:16px;
+
+}
+
+/* video tile */
+
 .call-video-tile{
-background:#000;
-width:300px;
-aspect-ratio:16/9;
-border-radius:6px;
-overflow:hidden;
+
+background:var(--bg2);
+
 position:relative;
+
+overflow:hidden;
+
+aspect-ratio:16/9;
+
 }
 
 .call-video-tile video{
+
 width:100%;
 height:100%;
+
 object-fit:cover;
+
 }
 
-/* ---------- PIP ---------- */
+/* pip */
 
 .call-pip{
+
 position:fixed;
-bottom:16px;
-right:16px;
-width:180px;
-aspect-ratio:16/9;
-background:#000;
-border-radius:8px;
-overflow:hidden;
-z-index:40;
+
+width:160px;
+height:100px;
+
+bottom:90px;
+
+right:280px;
+
+z-index:101;
+
+cursor:grab;
+
+}
+/* ── Responsive ───────────────────────────────── */
+
+@media(max-width:900px){
+
+#app{
+grid-template-columns:220px 1fr;
 }
 
-/* ---------- MOBILE ---------- */
-
-@media(max-width:600px){
-
-#sidebar{
+#netlog-panel{
 display:none;
 }
 
-#sidebar.show{
-display:flex;
+}
+
+@media(max-width:640px){
+
+#app{
+grid-template-columns:1fr;
+grid-template-rows:44px 1fr;
+}
+
+#sidebar{
+
 position:fixed;
+
+left:-220px;
+
 top:44px;
-bottom:0;
-left:0;
+
 width:220px;
-z-index:50;
+
+height:calc(100% - 44px);
+
+transition:left .25s;
+
 }
 
-#call-panel{
+#sidebar.show{
 left:0;
 }
 
-.call-video-tile{
-width:100%;
 }
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div id="app">
-
-<!-- SIDEBAR -->
-
-<div id="sidebar">
-
-<div id="sidebar-header">
-<strong>Peers</strong>
-</div>
-
-<div id="peer-list"></div>
-
-</div>
-
-
-<!-- MAIN -->
-
-<div id="main">
-
-<div id="chat-area"></div>
-
-
-<!-- COMPOSE -->
-
-<div id="compose-area">
-
-<button id="plus-btn">+</button>
-
-<textarea
-id="msg-input"
-rows="1"
-placeholder="transmit…"
-spellcheck="false"></textarea>
-
-<button id="send-btn">Send</button>
-
-</div>
-
-<div id="plus-menu">
-
-<button id="send-file">Send File</button>
-<button id="send-folder">Send Folder</button>
-<button id="start-call">Start Call</button>
-
-</div>
-
-<div id="status-line"></div>
-
-</div>
-
-</div>
-
-
-<!-- CALL PANEL -->
-
-<div id="call-panel"></div>
-
-
-<script type="module">
-
-const plusBtn=document.getElementById('plus-btn')
-const plusMenu=document.getElementById('plus-menu')
-
-plusBtn.onclick=()=>{
-plusMenu.style.display=
-plusMenu.style.display==='flex'
-?'none':'flex'
-}
-
-document.addEventListener('click',e=>{
-if(!plusMenu.contains(e.target)&&e.target!==plusBtn)
-plusMenu.style.display='none'
-})
-
-const textarea=document.getElementById('msg-input')
-
-textarea.addEventListener('input',()=>{
-textarea.style.height='auto'
-textarea.style.height=textarea.scrollHeight+'px'
-})
-
-</script>
-
-</body>
-</html>
