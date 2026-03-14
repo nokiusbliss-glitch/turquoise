@@ -459,7 +459,7 @@ export class TurquoiseApp {
   _dispatch(fp, msg) {
     const {type}=msg;
     if (type==='nick-update') {
-      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
       return;
     }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
@@ -762,16 +762,12 @@ export class TurquoiseApp {
   _attachRemote1to1(fp) {
     this.net.setRemoteStreamHandler(fp, stream => {
       if (!stream) return;
-      if (this.call?.type !== 'stream') {  // Only set audio for voice calls
-        this._audioEl.srcObject = stream;
-        this._audioEl.play().catch(() => {});
-      }
-      if (this.call?.fp === fp) {
-        this.call.remoteStream = stream;
-        this.call.phase = 'active';
+      this._audioEl.srcObject=stream; this._audioEl.play().catch(()=>{});
+      if (this.call?.fp===fp) {
+        this.call.remoteStream=stream; this.call.phase='active';
         this._renderCallPanel();
         this._startStatsPolling(fp);
-        this._status(this.call.type + ' on · ' + (this.peers.get(fp)?.nick || fp.slice(0, 8)), 'ok');
+        this._status(this.call.type+' on · '+(this.peers.get(fp)?.nick||fp.slice(0,8)),'ok');
       }
     });
   }
@@ -838,20 +834,12 @@ export class TurquoiseApp {
 
   _attachCircleRemote(fp) {
     this.net.setRemoteStreamHandler(fp, stream => {
-      if (!stream || !this.circleCall) return;
-      this.circleCall.remoteStreams.set(fp, stream);
-      if (this.circleCall.type !== 'stream') {  // Only set audio for voice calls
-        let el = this.circleCall.audioEls.get(fp);
-        if (!el) {
-          el = Object.assign(document.createElement('audio'), { autoplay: true, playsInline: true, style: 'display:none' });
-          document.body.appendChild(el);
-          this.circleCall.audioEls.set(fp, el);
-        }
-        el.srcObject = stream;
-        el.play().catch(() => {});
-      }
-      this.circleCall.phase = 'active';
-      this._renderCircleCallPanel();
+      if (!stream||!this.circleCall) return;
+      this.circleCall.remoteStreams.set(fp,stream);
+      let el=this.circleCall.audioEls.get(fp);
+      if (!el) { el=Object.assign(document.createElement('audio'),{autoplay:true,playsInline:true,style:'display:none'}); document.body.appendChild(el); this.circleCall.audioEls.set(fp,el); }
+      el.srcObject=stream; el.play().catch(()=>{});
+      this.circleCall.phase='active'; this._renderCircleCallPanel();
     });
   }
 
@@ -964,20 +952,9 @@ export class TurquoiseApp {
   _stopStatsPolling() { clearInterval(this._statsTimer); this._statsTimer=null; }
 
   _handleMediaError(e, fp) {
-    const msg = e.name === 'NotAllowedError' ? 'mic/cam permission denied' : 'no mic/cam found';
-    this._status(msg, 'err', 8000);
-    if (fp) this.net.sendCtrl(fp, { type: 'permission-denied', media: msg });
-    // Reset call state
-    if (this.call) {
-      this.call.localStream?.getTracks().forEach(t => t.stop());
-      this.call = null;
-      this._renderCallPanel();
-    }
-    if (this.circleCall) {
-      this.circleCall.localStream?.getTracks().forEach(t => t.stop());
-      this.circleCall = null;
-      this._renderCircleCallPanel();
-    }
+    const msg=e.name==='NotAllowedError'?'mic/cam permission denied':'no mic/cam found';
+    this._status(msg,'err',8000);
+    if (fp) this.net.sendCtrl(fp,{type:'permission-denied',media:msg});
   }
 
   // ── State import/export ────────────────────────────────────────────────────
