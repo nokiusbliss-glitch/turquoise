@@ -459,7 +459,7 @@ export class TurquoiseApp {
   _dispatch(fp, msg) {
     const {type}=msg;
     if (type==='nick-update') {
-      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
+      const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});
       return;
     }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
@@ -817,11 +817,18 @@ export class TurquoiseApp {
 
   _declineCircleCall(fp) { this._hideCallIncoming(); this.net.sendCtrl(fp,{type:'call-decline',circle:true}); }
 
-  _onCircleCallAccepted(fp) {
-    if (!this.circleCall?.localStream) return;
-    this.circleCall.phase='active';
-    this.net.offerWithStream(fp,this.circleCall.localStream).then(()=>this._attachCircleRemote(fp)).catch(()=>{});
-    this._renderCircleCallPanel();
+  _onCircleCallAccepted(fp, msg) {
+    const stream = this.circleCall?.localStream;
+    if (!stream) return;
+
+    // Ensure remote handler is registered before renegotiating
+    this._attachCircleRemote(fp);
+
+    try {
+      await this.net.offerWithStream(fp, stream);
+    } catch (e) {
+      this._status('call failed: ' + e.message, 'err', 5000);
+    }
   }
 
   _onCircleCallDeclined(fp) { this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' declined circle call','warn',3000); }
