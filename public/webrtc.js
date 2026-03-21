@@ -72,6 +72,32 @@ export class TurquoiseNetwork {
     this._startHB();
   }
 
+  /**
+   * Hard reconnect — use on device wake or network restore.
+   *
+   * The problem: mobile browsers keep a WebSocket in readyState OPEN even
+   * after the underlying TCP connection was silently killed during device
+   * sleep.  Checking _wsOK misses this case.  We must forcibly close the
+   * socket and tear down every stale P2P connection so _reconnectKnown()
+   * can rebuild them fresh once the new WS handshake completes.
+   */
+  forceReconnect() {
+    if (this._dead) return;
+    this._log.info(FILE, 'forceReconnect', 'forcing full reconnect after wake/network change');
+    this._wsOK = false;
+    clearInterval(this._ping);
+    if (this.ws) {
+      const ws = this.ws; this.ws = null;
+      try { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; ws.close(1000, 'wake'); } catch {}
+    }
+    // Tear down stale P2P connections.  _teardown() reschedules via _known
+    // so peers will rediscover each other once signaling is back up.
+    for (const fp of [...this.peers.keys()]) this._teardown(fp, 'wake');
+    this._retry = 0;
+    this._openWS();
+    this._startHB();
+  }
+
   _openWS() {
     if (this._dead) return;
     let ws; try { ws = new WebSocket(this._wsURL); } catch { this._schedWS(); return; }
@@ -86,7 +112,7 @@ export class TurquoiseNetwork {
       clearInterval(this._ping);
       this._ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) try { ws.send(JSON.stringify({type:'ping'})); } catch {}
-      }, 25_000);
+      }, 20_000); // 20s keeps render.com alive (drops WS at ~30s idle)
     };
 
     ws.onmessage = e => { try { this._onSig(JSON.parse(e.data)); } catch {} };

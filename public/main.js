@@ -89,16 +89,20 @@ async function boot() {
 
   // ── Lifecycle reconnects ──────────────────────────────────────────────────
   window.addEventListener('online', () => {
-    log.info('main','online','reconnecting signaling');
-    network.connect(wsUrl);
+    log.info('main','online','network restored — forcing full reconnect');
+    network.forceReconnect();
   });
   window.addEventListener('offline', () => log.warn('main','offline','browser offline'));
 
-  // Reconnect on tab/device wake — primary cause of "stuck connection after sleep"
+  // On device wake / tab restore: always force a hard reconnect.
+  // Mobile browsers hold the WS in readyState OPEN even after the TCP
+  // connection was killed during sleep.  The old guard (!_wsOK) silently
+  // missed this — the socket looked alive but was dead.  We must close it
+  // and rebuild every time the page becomes visible.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
-    log.info('main','visible','page visible — refreshing signaling');
-    if (!network._wsOK) network.connect(wsUrl);
+    log.info('main','visible','page visible — forcing reconnect');
+    network.forceReconnect();
   });
 }
 
