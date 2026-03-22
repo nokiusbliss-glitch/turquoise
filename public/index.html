@@ -574,6 +574,23 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .vm-controls{display:flex;gap:8px}
 .vm-err{font-size:10px;color:var(--err);padding:4px 0}
 
+/* ── Stone Paper Scissors ────────────────────────────────────────────────── */
+.tqapp-sps{font-size:11px;user-select:none}
+.sps-choices{display:flex;gap:8px;margin-top:8px;justify-content:center}
+.sps-choice{
+  font-size:1.8rem;cursor:pointer;padding:6px 10px;
+  background:var(--bg1);border:1px solid var(--mute);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  transition:background .1s,border-color .1s;
+}
+.sps-choice:hover{background:var(--bg2);border-color:var(--tq)}
+.sps-reveal{display:flex;align-items:center;justify-content:center;gap:16px;margin:10px 0}
+.sps-side{display:flex;flex-direction:column;align-items:center;gap:4px}
+.sps-big{font-size:2.2rem;line-height:1}
+.sps-label{font-size:9px;color:var(--dim);letter-spacing:.1em}
+.sps-vs{font-size:9px;color:var(--mute);letter-spacing:.15em}
+.sps-rounds{font-size:9px;color:var(--mute);margin-top:6px;text-align:center;letter-spacing:.05em}
+
 /* ── Tool embed (TicTacToe / Whiteboard in chat) ─────────────────────────── */
 .tool-embed{
   max-width:440px;padding:10px;

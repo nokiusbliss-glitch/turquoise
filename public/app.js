@@ -24,7 +24,7 @@ import { resetIdentity, importIdentityData } from './identity.js';
 import { TQLog } from './tqlog.js';
 import { FileTransfer }   from './files.js';
 import { FolderTransfer } from './folder.js';
-import { TicTacToe, VoiceMemo } from './tqapps.js';
+import { TicTacToe, StonePaperScissors, VoiceMemo } from './tqapps.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -265,8 +265,9 @@ export class TurquoiseApp {
       <div class="pm-item" id="pmi-folder">📁  folder</div>
       <div class="pm-item" id="pmi-memo">🎤  voice memo</div>
       <div class="pm-sep"></div>
-      <div class="pm-label">◈ apps</div>
+      <div class="pm-label">◈ games</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✂︎  stone paper scissors</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -275,22 +276,8 @@ export class TurquoiseApp {
     $('pmi-file')?.addEventListener('click',   guard(() => $('__file-input')?.click()));
     $('pmi-folder')?.addEventListener('click', guard(() => this._sendFolder()));
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
-    $('pmi-ttt')?.addEventListener('click', () => {
-      this._closePlus();
-      if (canGame) { this._startGame(fp,'ttt'); }
-      else if (isCircle) {
-        // In circle: pick a peer to play with
-        const gamePeers=this.net.getConnectedPeers();
-        if (!gamePeers.length) { this._sys('no peers in circle',true); return; }
-        if (gamePeers.length===1) { this._startGame(gamePeers[0],'ttt'); }
-        else {
-          const picked=gamePeers[0]; // pick first connected peer for now
-          this._sys('starting game with '+(this.peers.get(picked)?.nick||picked.slice(0,8)),'info',3000);
-          this._startGame(picked,'ttt');
-        }
-      }
-      else this._sys('peer offline',true);
-    });
+    $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('peer offline',true); });
+    $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('peer offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
   }
@@ -339,7 +326,10 @@ export class TurquoiseApp {
     if (p) p.connected=false;
     if (this.call?.fp===fp) this._endCallLocal(false);
     if (this.circleCall) this._removeCirclePeer(fp);
-    this.games.get(fp)?.destroy?.(); this.games.delete(fp);
+    // Destroy every game associated with this peer (keys are fp:gameType)
+    for (const [key, game] of this.games) {
+      if (key.startsWith(fp + ':')) { game?.destroy?.(); this.games.delete(key); }
+    }
     this._renderPeers();
     // Refresh header for the disconnected peer AND for circle (peer count changes)
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
@@ -717,30 +707,44 @@ export class TurquoiseApp {
 
   // ── Games ──────────────────────────────────────────────────────────────────
 
+  _makeGame(fp, gameType) {
+    const key  = fp + ':' + gameType;
+    const send = m => this.net.sendCtrl(fp, {type:'game',...m});
+    const close = () => { this.games.delete(key); };
+    if (gameType === 'sps') return new StonePaperScissors(fp, this.id.fingerprint, send, close);
+    return new TicTacToe(fp, this.id.fingerprint, send, close);
+  }
+
   _startGame(fp, gameType) {
-    if (gameType!=='ttt') return;
-    this._openSession(fp).then(()=>{
-      let game=this.games.get(fp);
+    if (gameType !== 'ttt' && gameType !== 'sps') return;
+    this._openSession(fp).then(() => {
+      // Each game type gets its own slot per peer; key = fp+gameType
+      const key = fp + ':' + gameType;
+      let game = this.games.get(key);
       if (!game) {
-        game=new TicTacToe(fp,this.id.fingerprint,m=>this.net.sendCtrl(fp,{type:'game',...m}),()=>this.games.delete(fp));
-        this.games.set(fp,game);
+        game = this._makeGame(fp, gameType);
+        this.games.set(key, game);
       }
-      this.net.sendCtrl(fp,{type:'game',gameType:'ttt',action:'invite'});
-      const ca=$('chat-area'); if(!ca) return;
-      const embed=document.createElement('div'); embed.className='tool-embed sent';
-      ca.appendChild(embed); ca.scrollTop=ca.scrollHeight; game.render(embed);
+      this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
+      const ca = $('chat-area'); if (!ca) return;
+      const embed = document.createElement('div'); embed.className = 'tool-embed sent';
+      ca.appendChild(embed); ca.scrollTop = ca.scrollHeight; game.render(embed);
     });
   }
 
   _dispatchGame(fp, msg) {
-    let game=this.games.get(fp);
-    if (!game&&msg.action==='invite') {
-      this._openSession(fp).then(()=>{
-        game=new TicTacToe(fp,this.id.fingerprint,m=>this.net.sendCtrl(fp,{type:'game',...m}),()=>this.games.delete(fp));
-        this.games.set(fp,game);
-        const ca=$('chat-area'); if(!ca) return;
-        const embed=document.createElement('div'); embed.className='tool-embed';
-        ca.appendChild(embed); ca.scrollTop=ca.scrollHeight; game.render(embed); game.handleMsg(msg);
+    const { gameType } = msg;
+    if (!gameType) return;
+    const key = fp + ':' + gameType;
+    let game = this.games.get(key);
+    if (!game && msg.action === 'invite') {
+      this._openSession(fp).then(() => {
+        game = this._makeGame(fp, gameType);
+        this.games.set(key, game);
+        const ca = $('chat-area'); if (!ca) return;
+        const embed = document.createElement('div'); embed.className = 'tool-embed';
+        ca.appendChild(embed); ca.scrollTop = ca.scrollHeight;
+        game.render(embed); game.handleMsg(msg);
       });
     } else { game?.handleMsg(msg); }
   }

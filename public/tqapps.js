@@ -13,8 +13,9 @@
 // ── App Registry ──────────────────────────────────────────────────────────────
 
 export const REGISTRY = [
-  { id: 'ttt',  label: 'tic tac toe', icon: '⊞', p2pOnly: true,  cls: null },
-  { id: 'memo', label: 'voice memo',  icon: '🎤', p2pOnly: false, cls: null },
+  { id: 'ttt',  label: 'tic tac toe',          icon: '⊞', p2pOnly: true,  cls: null },
+  { id: 'sps',  label: 'stone paper scissors',  icon: '✂️', p2pOnly: true,  cls: null },
+  { id: 'memo', label: 'voice memo',            icon: '🎤', p2pOnly: false, cls: null },
 ];
 
 // ── TicTacToe ─────────────────────────────────────────────────────────────────
@@ -348,6 +349,185 @@ export class VoiceMemo {
   }
 }
 
+// ── Stone Paper Scissors ──────────────────────────────────────────────────────
+
+const SPS_CHOICES = ['🪨', '📄', '✂️'];
+const SPS_NAMES   = ['stone', 'paper', 'scissors'];
+
+// beats[i] beats beats[j] if BEATS[i] === j
+// stone(0) beats scissors(2), paper(1) beats stone(0), scissors(2) beats paper(1)
+const SPS_BEATS = [2, 0, 1];
+
+export class StonePaperScissors {
+  constructor(peerFp, myFp, sendFn, onCloseFn) {
+    this.peerFp  = peerFp;
+    this.myFp    = myFp;
+    this.send    = sendFn;
+    this.onClose = onCloseFn;
+
+    this.state      = 'waiting';   // waiting | picking | reveal | done
+    this.myChoice   = null;        // 0|1|2
+    this.peerChoice = null;        // 0|1|2 — received after both have picked
+    this.myScore    = 0;
+    this.peerScore  = 0;
+    this.round      = 0;
+    this.lastResult = null;        // 'win'|'lose'|'draw'
+    this._invited   = false;
+    this._peerPicked= false;       // did peer commit this round?
+    this._dom       = null;
+  }
+
+  handleMsg(msg) {
+    const { action } = msg;
+
+    if (action === 'invite') {
+      this._invited = true;
+      this.state    = 'waiting';
+      this._draw();
+
+    } else if (action === 'accept') {
+      this.state = 'picking';
+      this._draw();
+
+    } else if (action === 'pick') {
+      // Peer has committed their choice — store it, check if we can reveal
+      this._peerPicked = true;
+      this.peerChoice  = typeof msg.choice === 'number' ? msg.choice : null;
+      this._tryReveal();
+
+    } else if (action === 'reset') {
+      this._resetRound();
+      this._draw();
+
+    } else if (action === 'resign') {
+      this.state = 'done';
+      this._draw();
+    }
+  }
+
+  _accept() {
+    this.state = 'picking';
+    this.send({ gameType:'sps', action:'accept' });
+    this._draw();
+  }
+
+  _pick(choice) {
+    if (this.state !== 'picking' || this.myChoice !== null) return;
+    this.myChoice = choice;
+    this.send({ gameType:'sps', action:'pick', choice });
+    this._tryReveal();
+    this._draw();   // show "waiting for opponent" after picking
+  }
+
+  _tryReveal() {
+    if (this.myChoice === null || !this._peerPicked) return;
+    this.state = 'reveal';
+    this.round++;
+    // Determine result
+    if (this.myChoice === this.peerChoice) {
+      this.lastResult = 'draw';
+    } else if (SPS_BEATS[this.myChoice] === this.peerChoice) {
+      this.lastResult = 'win'; this.myScore++;
+    } else {
+      this.lastResult = 'lose'; this.peerScore++;
+    }
+    this._draw();
+  }
+
+  _resetRound() {
+    this.myChoice   = null;
+    this.peerChoice = null;
+    this._peerPicked = false;
+    this.lastResult  = null;
+    this.state       = 'picking';
+  }
+
+  _requestReset() {
+    this._resetRound();
+    this.send({ gameType:'sps', action:'reset' });
+    this._draw();
+  }
+
+  _resign() {
+    this.state = 'done';
+    this.send({ gameType:'sps', action:'resign' });
+    this._draw();
+  }
+
+  render(container) { this._dom = container; this._draw(); }
+
+  _draw() {
+    const c = this._dom; if (!c) return;
+
+    let status = '';
+
+    if (this.state === 'waiting' && this._invited) {
+      status = `<div class="ta-invite">
+        <div class="ta-inv-text">challenge received</div>
+        <div class="ta-btns">
+          <div class="ta-btn accept" id="sps-acc">accept</div>
+          <div class="ta-btn danger" id="sps-dec">decline</div>
+        </div>
+      </div>`;
+    } else if (this.state === 'waiting') {
+      status = '<div class="ta-status">waiting for opponent…</div>';
+    } else if (this.state === 'picking') {
+      if (this.myChoice !== null) {
+        status = `<div class="ta-status" style="color:var(--uy)">✓ ${SPS_NAMES[this.myChoice]} chosen — waiting for opponent…</div>`;
+      } else {
+        // Show choice buttons
+        const btns = SPS_CHOICES.map((e,i) =>
+          `<div class="sps-choice" data-i="${i}" title="${SPS_NAMES[i]}">${e}</div>`
+        ).join('');
+        status = `<div class="ta-status ta-myturn">your turn — pick one</div>
+          <div class="sps-choices">${btns}</div>`;
+      }
+    } else if (this.state === 'reveal') {
+      const myE   = this.myChoice !== null   ? SPS_CHOICES[this.myChoice]   : '?';
+      const peerE = this.peerChoice !== null ? SPS_CHOICES[this.peerChoice] : '?';
+      const resClass = this.lastResult==='win'?'ta-win':this.lastResult==='lose'?'ta-loss':'ta-draw';
+      const resText  = this.lastResult==='win'?'you win!':this.lastResult==='lose'?'you lose':'draw';
+      status = `
+        <div class="sps-reveal">
+          <div class="sps-side"><div class="sps-big">${myE}</div><div class="sps-label">you</div></div>
+          <div class="sps-vs">vs</div>
+          <div class="sps-side"><div class="sps-big">${peerE}</div><div class="sps-label">them</div></div>
+        </div>
+        <div class="ta-status ${resClass}" style="text-align:center">${resText}</div>
+        <div class="ta-btns" style="justify-content:center">
+          <div class="ta-btn" id="sps-next">next round</div>
+          <div class="ta-btn danger" id="sps-close">close</div>
+        </div>`;
+    } else if (this.state === 'done') {
+      status = `<div class="ta-status ta-loss" style="text-align:center">game over
+        <div class="ta-btns" style="justify-content:center;margin-top:6px">
+          <div class="ta-btn danger" id="sps-close">close</div>
+        </div>
+      </div>`;
+    }
+
+    c.innerHTML = `<div class="tqapp-sps">
+      <div class="tqapp-hdr">
+        <span>✂️ stone paper scissors</span>
+        <span class="tqapp-sym">🪨${this.myScore} · ${this.peerScore}📄</span>
+      </div>
+      ${status}
+      ${this.state==='picking'||this.state==='reveal'?`<div class="sps-rounds">round ${this.round+1} · scores ${this.myScore}–${this.peerScore}</div>`:''}
+    </div>`;
+
+    c.querySelectorAll('.sps-choice').forEach(el =>
+      el.addEventListener('click', () => this._pick(+el.dataset.i))
+    );
+    c.querySelector('#sps-acc')?.addEventListener('click',  () => this._accept());
+    c.querySelector('#sps-dec')?.addEventListener('click',  () => { this.send({gameType:'sps',action:'resign'}); this.onClose?.(); });
+    c.querySelector('#sps-next')?.addEventListener('click', () => this._requestReset());
+    c.querySelector('#sps-close')?.addEventListener('click',() => this.onClose?.());
+  }
+
+  destroy() { this._dom = null; }
+}
+
 // Populate registry classes
 REGISTRY.find(r => r.id === 'ttt').cls  = TicTacToe;
+REGISTRY.find(r => r.id === 'sps').cls  = StonePaperScissors;
 REGISTRY.find(r => r.id === 'memo').cls = VoiceMemo;
