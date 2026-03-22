@@ -244,6 +244,10 @@ export class TurquoiseApp {
     d.classList.add('hidden'); i.classList.add('visible'); i.focus(); i.select();
   }
 
+  _suppressVisibleReconnect(ms=60_000) {
+    try { window.__tqSuppressVisibleReconnectUntil = Date.now() + ms; } catch {}
+  }
+
   _togglePlus() {
     const m=$('plus-menu'), btn=$('plus-btn');
     if (!m||!btn) return;
@@ -287,7 +291,7 @@ export class TurquoiseApp {
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
 
     const guard = fn => () => { this._closePlus(); if (!canSend) { this._sys('no peers available',true); return; } fn(); };
-    $('pmi-file')?.addEventListener('click',   guard(() => $('__file-input')?.click()));
+    $('pmi-file')?.addEventListener('click',   guard(() => { this._suppressVisibleReconnect(); $('__file-input')?.click(); }));
     $('pmi-folder')?.addEventListener('click', guard(() => this._sendFolder()));
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
     $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('peer offline',true); });
@@ -295,7 +299,7 @@ export class TurquoiseApp {
     $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('peer offline',true); });
     $('pmi-airh')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'airh'); else this._sys('peer offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
-    $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
+    $('pmi-import')?.addEventListener('click', () => { this._closePlus(); this._suppressVisibleReconnect(); $('__import-input')?.click(); });
   }
 
   // ── Suggestion bar ────────────────────────────────────────────────────────
@@ -714,6 +718,7 @@ export class TurquoiseApp {
   async _sendFolder() {
     if (!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
+    this._suppressVisibleReconnect();
     const _peerOk = fp => this.net.isBinaryReady(fp);
     const connected = isCircle
       ? this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp))

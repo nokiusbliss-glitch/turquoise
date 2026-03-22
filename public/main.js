@@ -94,13 +94,17 @@ async function boot() {
   });
   window.addEventListener('offline', () => log.warn('main','offline','browser offline'));
 
-  // On device wake / tab restore: always force a hard reconnect.
-  // Mobile browsers hold the WS in readyState OPEN even after the TCP
-  // connection was killed during sleep.  The old guard (!_wsOK) silently
-  // missed this — the socket looked alive but was dead.  We must close it
-  // and rebuild every time the page becomes visible.
+  // On device wake / tab restore: usually force a hard reconnect.
+  // Mobile file/folder pickers can also trigger hidden/visible, so app.js can
+  // suppress exactly one return-to-page reconnect while a picker is open.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    const suppressUntil = Number(window.__tqSuppressVisibleReconnectUntil || 0);
+    if (suppressUntil > Date.now()) {
+      window.__tqSuppressVisibleReconnectUntil = 0;
+      log.info('main','visible','page visible — reconnect suppressed');
+      return;
+    }
     log.info('main','visible','page visible — forcing reconnect');
     network.forceReconnect();
   });
