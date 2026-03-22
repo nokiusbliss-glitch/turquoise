@@ -72,32 +72,6 @@ export class TurquoiseNetwork {
     this._startHB();
   }
 
-  /**
-   * Hard reconnect — use on device wake or network restore.
-   *
-   * The problem: mobile browsers keep a WebSocket in readyState OPEN even
-   * after the underlying TCP connection was silently killed during device
-   * sleep.  Checking _wsOK misses this case.  We must forcibly close the
-   * socket and tear down every stale P2P connection so _reconnectKnown()
-   * can rebuild them fresh once the new WS handshake completes.
-   */
-  forceReconnect() {
-    if (this._dead) return;
-    this._log.info(FILE, 'forceReconnect', 'forcing full reconnect after wake/network change');
-    this._wsOK = false;
-    clearInterval(this._ping);
-    if (this.ws) {
-      const ws = this.ws; this.ws = null;
-      try { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; ws.close(1000, 'wake'); } catch {}
-    }
-    // Tear down stale P2P connections.  _teardown() reschedules via _known
-    // so peers will rediscover each other once signaling is back up.
-    for (const fp of [...this.peers.keys()]) this._teardown(fp, 'wake');
-    this._retry = 0;
-    this._openWS();
-    this._startHB();
-  }
-
   _openWS() {
     if (this._dead) return;
     let ws; try { ws = new WebSocket(this._wsURL); } catch { this._schedWS(); return; }
@@ -112,7 +86,7 @@ export class TurquoiseNetwork {
       clearInterval(this._ping);
       this._ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) try { ws.send(JSON.stringify({type:'ping'})); } catch {}
-      }, 20_000); // 20s keeps render.com alive (drops WS at ~30s idle)
+      }, 25_000);
     };
 
     ws.onmessage = e => { try { this._onSig(JSON.parse(e.data)); } catch {} };
@@ -489,6 +463,30 @@ export class TurquoiseNetwork {
 
   getConnectedPeers() {
     return [...this.peers.entries()].filter(([,ps])=>ps.ready).map(([fp])=>fp);
+  }
+
+  /**
+   * Pre-register a peer so connections are retried on page reload without
+   * waiting for the signaling server to broadcast their presence.
+   *
+   * Call during app boot for every peer loaded from IDB.  After a reload
+   * _known is empty and _reconnectKnown() has nothing to work with — so
+   * reconnection stalls silently until the remote device happens to be on
+   * the server exactly when we connect.  Pre-populating _known bypasses
+   * that race: we actively initiate as soon as signaling is ready.
+   *
+   * Safe to call multiple times for the same fp — later server {type:'peer'}
+   * messages are still handled normally (they update nick, reset retry).
+   */
+  addKnownPeer(fp, nick) {
+    if (!fp || this._known.has(fp)) return;
+    const k = { retry: 0, timer: null, nick: nick || fp.slice(0, 8) };
+    this._known.set(fp, k);
+    // If signaling is already up, initiate immediately (async so caller returns first)
+    if (this._wsOK && !this.peers.has(fp)) {
+      setTimeout(() => this._initiate(fp, k.nick), 0);
+    }
+    this._log.debug(FILE, 'addKnownPeer', `pre-registered ${fp.slice(0,8)}`);
   }
 
   /** True if peer is connected and ready. Avoids exposing internal peers Map. */

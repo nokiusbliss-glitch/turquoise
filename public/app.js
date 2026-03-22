@@ -118,7 +118,14 @@ export class TurquoiseApp {
     if (ni) ni.value = nickname;
     if (fp) fp.textContent = fingerprint;
 
-    try { for (const p of await loadPeers()) this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false}); } catch {}
+    try { for (const p of await loadPeers()) {
+      this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false});
+      // Pre-register in network so _reconnectKnown() can find them on WS connect
+      // without waiting for the server to broadcast their presence — the key fix
+      // for "won't reconnect after page reload unless the peer happens to be online
+      // at the exact moment signaling connects".
+      this.net.addKnownPeer(p.fingerprint, p.nickname||p.fingerprint.slice(0,8));
+    }} catch {}
     try { this.sessions.set(CIRCLE, await loadMessages(CIRCLE)); } catch { this.sessions.set(CIRCLE,[]); }
 
     this._bindUI();
