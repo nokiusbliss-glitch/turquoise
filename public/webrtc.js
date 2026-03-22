@@ -385,6 +385,8 @@ export class TurquoiseNetwork {
         this.peers.delete(fp);
         ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
         clearTimeout(ps.hbTimer);
+        clearTimeout(ps._discTimer);
+        clearTimeout(ps._ctrlCloseTimer); // prevent the grace-period timer from firing on the new PS
         try { ps.pc.close(); } catch {}
         ps = null;
       }
