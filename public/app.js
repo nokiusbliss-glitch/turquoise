@@ -645,13 +645,19 @@ export class TurquoiseApp {
   _queueFile(file) {
     if (!file||!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
-    // isReady can briefly return false during PS replacement (~1-2s window).
-    // sendBinary/sendCtrl already fall back to WS relay, so we only need
-    // the WS to be up OR the peer to be p2p-ready to start the transfer.
-    const _peerOk = (fp) => this.net.isReady(fp) ||
-      (this.peers.get(fp)?.connected && this.net.ws?.readyState === 1 /* OPEN */);
-    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(sid&&_peerOk(sid)?[sid]:[]);
-    if (!fps.length) { this._sys(isCircle?'no peers in circle':'peer offline',true); return; }
+    // Keep file ctrl/meta/end and binary chunks on the same live transport.
+    // Starting in the ctrl-open/data-closed gap can mix WS-relayed chunks with
+    // ctrl-channel end markers, which races and breaks assembly.
+    const _peerOk = fp => this.net.isBinaryReady(fp);
+    const connected = isCircle
+      ? this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp))
+      : (sid && this.net.isReady(sid) ? [sid] : []);
+    const fps = connected.filter(_peerOk);
+    if (!fps.length) {
+      const waiting = connected.length > 0;
+      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
+      return;
+    }
     const fileId=crypto.randomUUID();
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
@@ -705,13 +711,16 @@ export class TurquoiseApp {
   async _sendFolder() {
     if (!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
-    // isReady can briefly return false during PS replacement (~1-2s window).
-    // sendBinary/sendCtrl already fall back to WS relay, so we only need
-    // the WS to be up OR the peer to be p2p-ready to start the transfer.
-    const _peerOk = (fp) => this.net.isReady(fp) ||
-      (this.peers.get(fp)?.connected && this.net.ws?.readyState === 1 /* OPEN */);
-    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(sid&&_peerOk(sid)?[sid]:[]);
-    if (!fps.length) { this._sys(isCircle?'no peers in circle':'peer offline',true); return; }
+    const _peerOk = fp => this.net.isBinaryReady(fp);
+    const connected = isCircle
+      ? this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp))
+      : (sid && this.net.isReady(sid) ? [sid] : []);
+    const fps = connected.filter(_peerOk);
+    if (!fps.length) {
+      const waiting = connected.length > 0;
+      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
+      return;
+    }
 
     const folderId=crypto.randomUUID();
     let entries; try { entries=await FolderTransfer.pickFiles(); } catch(e){ this._sys('folder error: '+e.message,true); return; }

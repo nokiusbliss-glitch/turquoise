@@ -177,6 +177,11 @@ export class TurquoiseNetwork {
       case 'answer': this._onAnswer(msg); break;
       case 'answer-reneg': this._onAnswerReneg(msg); break;
       case 'ice':    this._onIce(msg);    break;
+      case 'bin-relay':
+        if (typeof msg.data === 'string') {
+          try { this.onBinaryChunk?.(from, b642ab(msg.data)); } catch {}
+        }
+        break;
       // offer-reneg is forwarded to app.js for media handling.
       // answer-reneg is handled internally (applied as an SDP answer).
       default: this.onMessage?.(from, msg);
@@ -192,7 +197,8 @@ export class TurquoiseNetwork {
     this.peers.set(fp, ps);
 
     ps.ctrl = this._mkDC(fp, ps, 'ctrl', {ordered:true,  negotiated:true, id:0});
-    ps.data = this._mkDC(fp, ps, 'data', {ordered:false, maxRetransmits:0, negotiated:true, id:1});
+    // File chunks must arrive in order and without loss.
+    ps.data = this._mkDC(fp, ps, 'data', {ordered:true, negotiated:true, id:1});
 
     ps.pc.onnegotiationneeded = async () => {
       if (ps.makingOffer) return;
@@ -398,7 +404,7 @@ export class TurquoiseNetwork {
       ps = this._makePS(fp, null);
       this.peers.set(fp, ps);
       ps.ctrl = this._mkDC(fp, ps, 'ctrl', {ordered:true,  negotiated:true, id:0});
-      ps.data = this._mkDC(fp, ps, 'data', {ordered:false, maxRetransmits:0, negotiated:true, id:1});
+      ps.data = this._mkDC(fp, ps, 'data', {ordered:true, negotiated:true, id:1});
     }
 
     const polite   = this.id.fingerprint < fp;
@@ -504,6 +510,9 @@ export class TurquoiseNetwork {
       if (ps.data.bufferedAmount > HIGH) return false;
       try { ps.data.send(buf); return true; } catch {}
     }
+    // Do not mix WS-relayed chunks with ctrl-channel file markers on an active
+    // peer session. If the file channel drops mid-transfer, abort cleanly.
+    if (ps?.ctrl?.readyState === 'open' || ps?.ready) return false;
     if (this.ws?.readyState === WebSocket.OPEN) {
       try { this.ws.send(JSON.stringify({type:'bin-relay', to:fp, data:ab2b64(buf)})); return true; } catch {}
     }
@@ -646,6 +655,12 @@ export class TurquoiseNetwork {
   /** True if peer is connected and ready. Avoids exposing internal peers Map. */
   isReady(fp) {
     return this.peers.get(fp)?.ready === true;
+  }
+
+  /** True when the binary/file channel is ready for transfer. */
+  isBinaryReady(fp) {
+    const ps = this.peers.get(fp);
+    return ps?.ready === true && ps.ctrl?.readyState === 'open' && ps.data?.readyState === 'open';
   }
 
   connTier(fp) {
