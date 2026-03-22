@@ -719,6 +719,47 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .msg,.file-card,.folder-card,.tool-embed{animation:fadein .18s ease-out}
 
 #peers-list::-webkit-scrollbar{width:2px}
+
+/* ── Sidebar footer (log download — mobile-visible) ─────────────────────── */
+#sidebar-footer{
+  flex-shrink:0;border-top:1px solid var(--mute);padding:8px 10px;
+}
+#sidebar-log-btn{
+  width:100%;font-family:inherit;font-size:9px;letter-spacing:.1em;
+  background:rgba(64,224,208,.04);border:1px solid var(--mute);
+  color:var(--dim);padding:5px 0;cursor:pointer;text-transform:uppercase;
+  clip-path:polygon(0 0,calc(100%-6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100%-6px));
+  transition:all .15s;
+}
+#sidebar-log-btn:hover{border-color:var(--tq2);color:var(--tq)}
+
+/* ── Suggestion / quick-phrase bar ──────────────────────────────────────── */
+#suggest-bar{
+  flex-shrink:0;
+  border-top:1px solid rgba(30,85,80,.4);
+  background:var(--bg1);
+  padding:4px 10px 3px;
+  display:flex;flex-direction:column;gap:3px;
+}
+.sg-phrases,.sg-emojis{
+  display:flex;gap:5px;overflow-x:auto;
+  scrollbar-width:none;
+}
+.sg-phrases::-webkit-scrollbar,.sg-emojis::-webkit-scrollbar{display:none}
+.sg-chip{
+  flex-shrink:0;font-size:10px;color:var(--dim);
+  background:var(--bg2);border:1px solid var(--mute);
+  padding:2px 8px;cursor:pointer;white-space:nowrap;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+  transition:color .12s,border-color .12s;letter-spacing:.04em;
+}
+.sg-chip:hover{color:var(--tq);border-color:var(--tq2)}
+.sg-emoji{
+  flex-shrink:0;font-size:13px;cursor:pointer;padding:1px 4px;
+  color:var(--tq2);transition:color .12s;line-height:1.4;
+}
+.sg-emoji:hover{color:var(--tq)}
+
 </style>
 </head>
 <body>
@@ -749,6 +790,9 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   <nav id="sidebar">
     <div id="peers-label">Peers <span id="peer-count"></span></div>
     <div id="peers-list"></div>
+    <div id="sidebar-footer">
+      <button id="sidebar-log-btn" title="download diagnostic log">↓ logs</button>
+    </div>
   </nav>
 
   <!-- Main chat -->
@@ -768,6 +812,12 @@ body{font-family:'Space Mono',monospace;font-size:13px}
     <div id="tool-panel"></div>
 
     <div id="chat-area"></div>
+
+    <!-- Suggestion bar -->
+    <div id="suggest-bar">
+      <div class="sg-phrases"></div>
+      <div class="sg-emojis"></div>
+    </div>
 
     <!-- Status bar — inside #main so it's always visible, even on mobile -->
     <div id="status-line">initialising…</div>

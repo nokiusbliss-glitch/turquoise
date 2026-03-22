@@ -151,6 +151,7 @@ export class TurquoiseApp {
     this._mountLog();
     await this._openSession(CIRCLE);
 
+    this._buildSuggestions();
     if (this.id.isNewUser) {
       this._status('tap your name to set it','info');
       setTimeout(() => this._startNickEdit(), 500);
@@ -211,6 +212,8 @@ export class TurquoiseApp {
     }
 
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
+    // Sidebar log download — visible on mobile where the netlog panel is hidden
+    $('sidebar-log-btn')?.addEventListener('click', () => TQLog.get().exportToFile(this.id.fingerprint));
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
 
@@ -291,6 +294,32 @@ export class TurquoiseApp {
     $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('peer offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
+  }
+
+  // ── Suggestion bar ────────────────────────────────────────────────────────
+  _buildSuggestions() {
+    const bar = $('suggest-bar'); if (!bar) return;
+    const PHRASES = [
+      'hey','on my way','be right back','ok','got it',
+      'can you hear me?','send the file','try again','sounds good','let's go',
+    ];
+    const EMOJI = ['◈','◉','▸','△','▷','⬡','✦','✧','⟐','⊞','◌','◎','⋄','◆','❖'];
+    const pRow = bar.querySelector('.sg-phrases');
+    const eRow = bar.querySelector('.sg-emojis');
+    if (pRow && !pRow.children.length) {
+      PHRASES.forEach(t => {
+        const el=document.createElement('span'); el.className='sg-chip'; el.textContent=t;
+        el.addEventListener('click',()=>{ const i=$('msg-input'); if(i){i.value=(i.value?i.value+' ':'')+t;i.focus();i.dispatchEvent(new Event('input'));} });
+        pRow.appendChild(el);
+      });
+    }
+    if (eRow && !eRow.children.length) {
+      EMOJI.forEach(e => {
+        const el=document.createElement('span'); el.className='sg-emoji'; el.textContent=e;
+        el.addEventListener('click',()=>{ const i=$('msg-input'); if(i){i.value=(i.value||'')+e;i.focus();i.dispatchEvent(new Event('input'));} });
+        eRow.appendChild(el);
+      });
+    }
   }
 
   _showSidebar() {
@@ -742,14 +771,16 @@ export class TurquoiseApp {
   _startGame(fp, gameType) {
     if (!['ttt','sps','chess'].includes(gameType)) return;
     this._openSession(fp).then(() => {
-      // Each game type gets its own slot per peer; key = fp+gameType
       const key = fp + ':' + gameType;
-      let game = this.games.get(key);
-      if (!game) {
-        game = this._makeGame(fp, gameType);
-        this.games.set(key, game);
-      }
+      // Always create a fresh game so a new invite = new session
+      const game = this._makeGame(fp, gameType);
+      this.games.set(key, game);
       this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
+      // Persist a record so chat history survives reload
+      const label = gameType==='ttt'?'tic tac toe':gameType==='sps'?'stone paper scissors':'chess';
+      const rec={id:crypto.randomUUID(),sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,
+        type:'text',own:true,ts:Date.now(),text:`▶ started ${label}`};
+      this._pushMsg(fp,rec,()=>this._appendMsg(rec)); saveMessage(rec).catch(()=>{});
       const ca = $('chat-area'); if (!ca) return;
       const embed = document.createElement('div'); embed.className = 'tool-embed sent';
       ca.appendChild(embed); ca.scrollTop = ca.scrollHeight; game.render(embed);
@@ -765,6 +796,11 @@ export class TurquoiseApp {
       this._openSession(fp).then(() => {
         game = this._makeGame(fp, gameType);
         this.games.set(key, game);
+        const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
+        const label = gameType==='ttt'?'tic tac toe':gameType==='sps'?'stone paper scissors':'chess';
+        const rec={id:crypto.randomUUID(),sessionId:fp,from:fp,fromNick:nick,
+          type:'text',own:false,ts:Date.now(),text:`▶ ${nick} invited you to ${label}`};
+        this._pushMsg(fp,rec,()=>this._appendMsg(rec)); saveMessage(rec).catch(()=>{});
         const ca = $('chat-area'); if (!ca) return;
         const embed = document.createElement('div'); embed.className = 'tool-embed';
         ca.appendChild(embed); ca.scrollTop = ca.scrollHeight;
