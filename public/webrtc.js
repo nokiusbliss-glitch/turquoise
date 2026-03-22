@@ -519,7 +519,11 @@ export class TurquoiseNetwork {
   /** Register handler called when a remote track stream arrives for fp. */
   setRemoteStreamHandler(fp, handler) {
     const ps = this.peers.get(fp);
-    if (ps) ps.onRemoteStream = handler;
+    if (!ps) return;
+    ps.onRemoteStream = handler;
+    // If the track event already fired before this handler was registered
+    // (e.g. answer arrived very fast), deliver the cached stream immediately.
+    if (ps.stream && handler) handler(ps.stream);
   }
 
   /** Add local tracks and send offer-reneg (call initiator side). */

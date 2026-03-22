@@ -50,7 +50,7 @@ const RELAY_TYPES = new Set([
   'file-meta','file-end','file-abort','bin-relay',
   'nick-update','game','folder-manifest',
   'ping','pong','p2p-relay','tool-action',
-  'circle-peer-joined',  // coordinator message for full-mesh circle calls
+  'circle-peer-joined','circle-peer-left',  // coordinator messages for full-mesh circle calls
 ]);
 
 const MIME = {

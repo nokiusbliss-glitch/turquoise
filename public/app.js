@@ -578,6 +578,11 @@ export class TurquoiseApp {
       }
       return;
     }
+    if (type==='circle-peer-left'&&msg.circle) {
+      // A coordinator told us someone else left the circle call
+      if (msg.leftPeer && this.circleCall) this._removeCirclePeer(msg.leftPeer);
+      return;
+    }
     if (type==='permission-denied') {
       const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
       this._status(nick+': '+(msg.media||'mic')+' permission denied','err',8000);
@@ -835,8 +840,12 @@ export class TurquoiseApp {
   _onCallAccepted(fp) {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='inviting') return;
     clearTimeout(this.call.inviteTimer); this.call.phase='connecting';
-    this.net.offerWithStream(fp,this.call.localStream)
-      .then(()=>this._attachRemote1to1(fp))
+    // Register the remote stream handler BEFORE sending the offer so the track
+    // event cannot fire between offerWithStream and the .then() callback.
+    // Previously registered in .then() — if the remote answered very fast the
+    // track event fired while onRemoteStream was still null and audio was lost.
+    this._attachRemote1to1(fp);
+    this.net.offerWithStream(fp, this.call.localStream)
       .catch(e=>{ this._status('call failed: '+e.message,'err',5000); this._endCallLocal(true); });
   }
 
@@ -873,9 +882,24 @@ export class TurquoiseApp {
   // Called when we receive an offer-reneg (we are the answering side of the call).
   // msg.sdp is the offer SDP — must be passed to answerWithStream.
   _onOfferReneg(fp, msg) {
-    if (!this.call||this.call.fp!==fp||!this.call.localStream) return;
+    if (!this.call || this.call.fp !== fp) return;
+    if (!this.call.localStream) {
+      // getUserMedia may still be in flight (acceptCall is async).
+      // Retry once per 200ms for up to 5s rather than silently dropping.
+      if (!this.call._offerRenegPending) this.call._offerRenegPending = msg;
+      const retry = () => {
+        if (!this.call || this.call.fp !== fp) return;
+        if (this.call.localStream) { this._onOfferReneg(fp, this.call._offerRenegPending||msg); return; }
+        if ((this.call._offerRenegRetries = (this.call._offerRenegRetries||0)+1) < 25)
+          setTimeout(retry, 200);
+        else this._status('media not ready — call failed','err',5000);
+      };
+      setTimeout(retry, 200);
+      return;
+    }
+    // Register handler first so track event can't race ahead
+    this._attachRemote1to1(fp);
     this.net.answerWithStream(fp, msg.sdp, this.call.localStream)
-      .then(()=>this._attachRemote1to1(fp))
       .catch(e=>{ this._status('call answer failed: '+e.message,'err',5000); this._endCallLocal(true); });
   }
 
@@ -962,14 +986,9 @@ export class TurquoiseApp {
   _onCircleCallAccepted(fp) {
     if (!this.circleCall?.localStream) return;
     this.circleCall.phase='active';
-    // Our stream goes to this new participant
-    this.net.offerWithStream(fp,this.circleCall.localStream)
-      .then(()=>this._attachCircleRemote(fp)).catch(()=>{});
-
-    // Coordinator role: tell every OTHER existing circle member about this new
-    // participant so they each do offerWithStream to fp and complete the mesh.
-    // Without this, existing members B and C would never exchange streams — only
-    // A (the initiator) would have streams to/from each of them.
+    // Register handler before offering so track event cannot race ahead
+    this._attachCircleRemote(fp);
+    this.net.offerWithStream(fp, this.circleCall.localStream).catch(()=>{});
     this.circleCall.remoteStreams.forEach((_stream, existingFp) => {
       if (existingFp === fp) return;
       this.net.sendCtrl(existingFp, {type:'circle-peer-joined', newPeer:fp, circle:true});
@@ -980,7 +999,18 @@ export class TurquoiseApp {
   _onCircleCallDeclined(fp) { this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' declined circle call','warn',3000); }
 
   _onCircleOfferReneg(fp, msg) {
-    if (!this.circleCall?.localStream||!msg.sdp) return;
+    if (!this.circleCall || !msg.sdp) return;
+    if (!this.circleCall.localStream) {
+      const retry = () => {
+        if (!this.circleCall) return;
+        if (this.circleCall.localStream) { this._onCircleOfferReneg(fp, msg); return; }
+        if ((this.circleCall._renegRetries = (this.circleCall._renegRetries||0)+1) < 25)
+          setTimeout(retry, 200);
+      };
+      setTimeout(retry, 200);
+      return;
+    }
+    this._attachCircleRemote(fp);
     this.net.answerWithStream(fp, msg.sdp, this.circleCall.localStream).catch(()=>{});
     this.circleCall.phase='active'; this._renderCircleCallPanel();
   }
@@ -1001,6 +1031,10 @@ export class TurquoiseApp {
     this.circleCall.remoteStreams.delete(fp);
     const el=this.circleCall.audioEls.get(fp);
     if (el) { el.srcObject=null; try{el.remove();}catch{} this.circleCall.audioEls.delete(fp); }
+    // Notify remaining circle members that this peer left, so their UI updates too
+    this.circleCall.remoteStreams.forEach((_s, otherFp) => {
+      this.net.sendCtrl(otherFp, {type:'circle-peer-left', leftPeer:fp, circle:true});
+    });
     if (this.circleCall.remoteStreams.size===0) this._endCircleCall();
     else this._renderCircleCallPanel();
   }
