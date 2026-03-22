@@ -386,7 +386,9 @@ export class TurquoiseNetwork {
         ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
         clearTimeout(ps.hbTimer);
         clearTimeout(ps._discTimer);
-        clearTimeout(ps._ctrlCloseTimer); // prevent the grace-period timer from firing on the new PS
+        clearTimeout(ps._ctrlCloseTimer); // CRITICAL: stop grace timer before new PS exists
+        // Null out timer refs so any closure still holding the old ps cannot call methods
+        ps.hbTimer = null; ps._discTimer = null; ps._ctrlCloseTimer = null;
         try { ps.pc.close(); } catch {}
         ps = null;
       }
@@ -556,7 +558,24 @@ export class TurquoiseNetwork {
     if (!ps || !sdp) return;
     try {
       await ps.pc.setRemoteDescription({type:'offer', sdp});
-      stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
+      // Use replaceTrack on transceivers created by setRemoteDescription
+      // instead of addTrack. addTrack adds NEW transceivers which changes the
+      // m-line count/order → Chrome rejects the answer with "m-lines order mismatch".
+      // After setRemoteDescription the PC already has transceivers for each
+      // audio/video m-line from the offer; we just need to assign our tracks.
+      const tracks = stream.getTracks();
+      for (const track of tracks) {
+        const tc = ps.pc.getTransceivers().find(t =>
+          t.receiver.track?.kind === track.kind && !t.sender.track
+        );
+        if (tc) {
+          await tc.sender.replaceTrack(track);
+          if (tc.direction === 'recvonly') tc.direction = 'sendrecv';
+        } else {
+          // Fallback: no matching transceiver found — add track normally
+          ps.pc.addTrack(track, stream);
+        }
+      }
       await ps.pc.setLocalDescription();
       this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
@@ -567,8 +586,17 @@ export class TurquoiseNetwork {
     if (!ps) return;
     ps.pc.getSenders().forEach(s => {
       if (!s.track) return;
-      try { s.track.stop(); ps.pc.removeTrack(s); } catch {}
+      try { s.track.stop(); } catch {}
+      try { ps.pc.removeTrack(s); } catch {}
     });
+    // Stop all transceivers so their m-lines are marked 'stopped' in future
+    // SDP negotiations. Without this, inactive transceivers from a previous call
+    // remain in the PC and add extra m-lines that confuse subsequent offer/answer.
+    try {
+      ps.pc.getTransceivers().forEach(t => {
+        try { if (t.direction !== 'stopped') t.stop(); } catch {}
+      });
+    } catch {}
     ps.stream = null;
   }
 

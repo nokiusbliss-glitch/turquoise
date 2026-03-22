@@ -301,7 +301,7 @@ export class TurquoiseApp {
     const bar = $('suggest-bar'); if (!bar) return;
     const PHRASES = [
       'hey','on my way','be right back','ok','got it',
-      'can you hear me?','send the file','try again','sounds good','Play a game?',
+      'can you hear me?','send the file','try again','sounds good','let's go',
     ];
     const EMOJI = ['◈','◉','▸','△','▷','⬡','✦','✧','⟐','⊞','◌','◎','⋄','◆','❖'];
     const pRow = bar.querySelector('.sg-phrases');
@@ -565,7 +565,12 @@ export class TurquoiseApp {
     if (type==='answer-reneg') { /* SDP answer handled by webrtc.js _onAnswer via net — no app action needed */ return; }
     if (type==='call-end')     {
       if(this.circleCall) this._removeCirclePeer(fp);
-      if(this.call?.fp===fp){this._endCallLocal(false);this._status('call ended','info',3000);}
+      if(this.call?.fp===fp) {
+        this._endCallLocal(false); this._status('call ended','info',3000);
+      } else {
+        // call already null but panel might still be visible — always close it
+        this._renderCallPanel();
+      }
       this._hideCallIncoming(); return;
     }
     // Coordinator notifies existing circle members when a new peer joins.
@@ -637,7 +642,12 @@ export class TurquoiseApp {
   _queueFile(file) {
     if (!file||!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
-    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(this.net.isReady(sid)?[sid]:[]);
+    // isReady can briefly return false during PS replacement (~1-2s window).
+    // sendBinary/sendCtrl already fall back to WS relay, so we only need
+    // the WS to be up OR the peer to be p2p-ready to start the transfer.
+    const _peerOk = (fp) => this.net.isReady(fp) ||
+      (this.peers.get(fp)?.connected && this.net.ws?.readyState === 1 /* OPEN */);
+    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(sid&&_peerOk(sid)?[sid]:[]);
     if (!fps.length) { this._sys(isCircle?'no peers in circle':'peer offline',true); return; }
     const fileId=crypto.randomUUID();
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
@@ -692,7 +702,12 @@ export class TurquoiseApp {
   async _sendFolder() {
     if (!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
-    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(this.net.isReady(sid)?[sid]:[]);
+    // isReady can briefly return false during PS replacement (~1-2s window).
+    // sendBinary/sendCtrl already fall back to WS relay, so we only need
+    // the WS to be up OR the peer to be p2p-ready to start the transfer.
+    const _peerOk = (fp) => this.net.isReady(fp) ||
+      (this.peers.get(fp)?.connected && this.net.ws?.readyState === 1 /* OPEN */);
+    const fps=isCircle?this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp)):(sid&&_peerOk(sid)?[sid]:[]);
     if (!fps.length) { this._sys(isCircle?'no peers in circle':'peer offline',true); return; }
 
     const folderId=crypto.randomUUID();
@@ -1073,12 +1088,12 @@ export class TurquoiseApp {
     // walkie-tile class triggers audio-only CSS (centered name + mic pulse, no video box)
     remote.className='call-video-tile'+(c.type==='walkie'?' walkie-tile':'');
     remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
-    if (c.remoteStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); }
+    if (c.remoteStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); v.play().catch(()=>{}); }
     const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(c.fp)?.nick||c.fp.slice(0,8); remote.appendChild(lbl);
     if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
     // pip-hidden for walkie: empty PIP div is confusing when there is no local video
     const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'')+(c.type==='walkie'?' pip-hidden':'');
-    if (c.localStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=c.localStream; pip.appendChild(v); }
+    if (c.localStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.setAttribute('muted',''); v.srcObject=c.localStream; pip.appendChild(v); v.play().catch(()=>{}); }
     panel.appendChild(pip);
     this._pipCleanup=this._makePIPDraggable(pip);
     const mu=$('ctrl-mute'); if(mu) { mu.textContent=c.muted?'unmute':'mute'; mu.classList.toggle('active',!!c.muted); }
@@ -1117,7 +1132,7 @@ export class TurquoiseApp {
       if (cc.type === 'stream') {
         const v = document.createElement('video');
         v.autoplay=true; v.playsInline=true; v.muted=false; v.srcObject=stream;
-        tile.appendChild(v);
+        tile.appendChild(v); v.play().catch(()=>{});
       }
       const lbl = document.createElement('div');
       lbl.className = 'vtile-label';
@@ -1131,8 +1146,8 @@ export class TurquoiseApp {
     pip.className = 'call-pip' + (cc.camOff?' cam-off':'') + (cc.type==='walkie'?' pip-hidden':'');
     if (cc.localStream && cc.type === 'stream') {
       const v = document.createElement('video');
-      v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=cc.localStream;
-      pip.appendChild(v);
+      v.autoplay=true; v.playsInline=true; v.muted=true; v.setAttribute('muted',''); v.srcObject=cc.localStream;
+      pip.appendChild(v); v.play().catch(()=>{});
     }
     panel.appendChild(pip);
     this._pipCleanup = this._makePIPDraggable(pip);
