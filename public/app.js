@@ -24,7 +24,7 @@ import { resetIdentity, importIdentityData } from './identity.js';
 import { TQLog } from './tqlog.js';
 import { FileTransfer }   from './files.js';
 import { FolderTransfer } from './folder.js';
-import { TicTacToe, StonePaperScissors, Chess, VoiceMemo } from './tqapps.js';
+import { TicTacToe, StonePaperScissors, Chess, AirHockey, VoiceMemo } from './tqapps.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -281,6 +281,7 @@ export class TurquoiseApp {
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✂︎  stone paper scissors</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-chess">♟  chess</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-airh">◉  air hockey</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -292,6 +293,7 @@ export class TurquoiseApp {
     $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('peer offline',true); });
     $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('peer offline',true); });
     $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('peer offline',true); });
+    $('pmi-airh')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'airh'); else this._sys('peer offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
   }
@@ -568,7 +570,8 @@ export class TurquoiseApp {
       if(this.call?.fp===fp) {
         this._endCallLocal(false); this._status('call ended','info',3000);
       } else {
-        // call already null but panel might still be visible — always close it
+        // Panel may still be visible (e.g. race between disconnect and call-end)
+        this._audioEl.srcObject=null;
         this._renderCallPanel();
       }
       this._hideCallIncoming(); return;
@@ -785,11 +788,12 @@ export class TurquoiseApp {
     const close = () => { this.games.delete(key); };
     if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
     if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
+    if (gameType === 'airh')  return new AirHockey(fp, this.id.fingerprint, send, close);
     return new TicTacToe(fp, this.id.fingerprint, send, close);
   }
 
   _startGame(fp, gameType) {
-    if (!['ttt','sps','chess'].includes(gameType)) return;
+    if (!['ttt','sps','chess','airh'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       const key = fp + ':' + gameType;
       // Always create a fresh game so a new invite = new session
@@ -937,7 +941,11 @@ export class TurquoiseApp {
     clearTimeout(this.call.inviteTimer);
     this.call.localStream?.getTracks().forEach(t=>t.stop());
     this.call=null; this._stopStatsPolling();
-    if (sendEnd) this.net.stopMedia(fp);
+    if (sendEnd) {
+      // Notify remote so their panel closes immediately
+      this.net.sendCtrl(fp, {type:'call-end'});
+      this.net.stopMedia(fp);
+    }
     this._audioEl.srcObject=null; this._renderCallPanel();
   }
 

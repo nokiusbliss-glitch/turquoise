@@ -16,6 +16,7 @@ export const REGISTRY = [
   { id: 'ttt',   label: 'tic tac toe',          icon: '⊞', p2pOnly: true,  cls: null },
   { id: 'sps',   label: 'stone paper scissors',  icon: '✂️', p2pOnly: true,  cls: null },
   { id: 'chess', label: 'chess',                 icon: '♟', p2pOnly: true,  cls: null },
+  { id: 'airh',  label: 'air hockey',             icon: '◉', p2pOnly: true,  cls: null },
   { id: 'memo',  label: 'voice memo',            icon: '🎤', p2pOnly: false, cls: null },
 ];
 
@@ -836,8 +837,271 @@ export class Chess {
   destroy() { this._dom=null; }
 }
 
-// Populate registry classes
+// (registry populated at end of file)
+
+// ── Air Hockey ────────────────────────────────────────────────────────────────
+// 2-player real-time air hockey over the game message bus.
+// Physics run locally on both devices; authoritative state synced every frame.
+// Player 1 (inviter) controls bottom paddle, Player 2 (acceptor) controls top.
+
+const AH_W = 320, AH_H = 480;  // canvas logical size
+const AH_PR = 24;               // paddle radius
+const AH_BR = 12;               // ball radius
+const AH_GW = 80;               // goal width half
+const AH_SYNC_MS = 33;          // ~30fps sync
+
+function ahClamp(v,mn,mx){return v<mn?mn:v>mx?mx:v;}
+function ahCirclesCollide(ax,ay,ar,bx,by,br){const dx=ax-bx,dy=ay-by;return dx*dx+dy*dy<(ar+br)*(ar+br);}
+function ahReflect(bvx,bvy,ax,ay,bx,by){const nx=bx-ax,ny=by-ay,d=Math.hypot(nx,ny)||1;const dot=bvx*(nx/d)+bvy*(ny/d);return[bvx-2*dot*(nx/d),bvy-2*dot*(ny/d)];}
+
+export class AirHockey {
+  constructor(peerFp, myFp, sendFn, onCloseFn) {
+    this.peerFp  = peerFp;
+    this.myFp    = myFp;
+    this.send    = sendFn;
+    this.onClose = onCloseFn;
+
+    this.mySlot  = null;  // 1=bottom, 2=top
+    this.state   = 'waiting';
+    this._invited= false;
+    this._dom    = null;
+    this._canvas = null;
+    this._ctx    = null;
+    this._raf    = null;
+    this._syncT  = 0;
+    this._inputX = AH_W/2;
+    this._inputY = AH_H*3/4;
+    this._dragging=false;
+
+    // Game state (both devices run same simulation)
+    this.ball  = {x:AH_W/2, y:AH_H/2, vx:2, vy:3};
+    this.p1    = {x:AH_W/2, y:AH_H-50};   // bottom
+    this.p2    = {x:AH_W/2, y:50};          // top
+    this.score = {p1:0, p2:0};
+    this.maxScore = 7;
+    this._gameOver=false;
+  }
+
+  handleMsg(msg) {
+    const {action}=msg;
+    if (action==='invite') { this._invited=true; this.mySlot=2; this.state='waiting'; this._draw(); }
+    else if (action==='accept') { this.mySlot=1; this.state='active'; this._startLoop(); this._draw(); }
+    else if (action==='state') {
+      // Remote sends their paddle + ball position
+      if (this.mySlot===1) {
+        this.p2.x=msg.px; this.p2.y=msg.py;
+        if (msg.ball) { this.ball.x=msg.ball.x; this.ball.y=msg.ball.y; this.ball.vx=msg.ball.vx; this.ball.vy=msg.ball.vy; }
+        if (msg.score) { this.score=msg.score; }
+      } else {
+        this.p1.x=msg.px; this.p1.y=msg.py;
+      }
+    }
+    else if (action==='goal') { this.score=msg.score; this._checkOver(); }
+    else if (action==='reset') { this._resetBall(); }
+    else if (action==='resign') { this.state='done'; this._draw(); this._stopLoop(); }
+  }
+
+  _accept() {
+    this.mySlot=2; this.state='active';
+    this.send({gameType:'airh',action:'accept'});
+    this._startLoop(); this._draw();
+  }
+
+  _startLoop() {
+    if (this._raf) return;
+    const loop = (ts) => {
+      this._raf = requestAnimationFrame(loop);
+      if (this.state!=='active') return;
+      this._updateBall();
+      this._drawFrame();
+      if (ts - this._syncT > AH_SYNC_MS) {
+        this._syncT=ts;
+        const myP = this.mySlot===1 ? this.p1 : this.p2;
+        const msg = {gameType:'airh',action:'state',px:myP.x,py:myP.y};
+        // Player 1 (bottom) is authoritative for ball physics
+        if (this.mySlot===1) {
+          msg.ball={x:this.ball.x,y:this.ball.y,vx:this.ball.vx,vy:this.ball.vy};
+          msg.score=this.score;
+        }
+        this.send(msg);
+      }
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  _stopLoop() {
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf=null; }
+  }
+
+  _updateBall() {
+    if (this.mySlot!==1) return; // only p1 runs physics
+    const b=this.ball;
+    b.x+=b.vx; b.y+=b.vy;
+    // Wall bounce
+    if (b.x-AH_BR<0) { b.x=AH_BR; b.vx=Math.abs(b.vx); }
+    if (b.x+AH_BR>AH_W) { b.x=AH_W-AH_BR; b.vx=-Math.abs(b.vx); }
+    // Paddle collisions
+    if (ahCirclesCollide(b.x,b.y,AH_BR,this.p1.x,this.p1.y,AH_PR)) {
+      [b.vx,b.vy]=ahReflect(b.vx,b.vy,this.p1.x,this.p1.y,b.x,b.y);
+      const spd=Math.hypot(b.vx,b.vy); b.vx=b.vx/spd*Math.min(spd*1.05,12); b.vy=b.vy/spd*Math.min(spd*1.05,12);
+      b.x+=b.vx*2; b.y+=b.vy*2;
+    }
+    if (ahCirclesCollide(b.x,b.y,AH_BR,this.p2.x,this.p2.y,AH_PR)) {
+      [b.vx,b.vy]=ahReflect(b.vx,b.vy,this.p2.x,this.p2.y,b.x,b.y);
+      const spd=Math.hypot(b.vx,b.vy); b.vx=b.vx/spd*Math.min(spd*1.05,12); b.vy=b.vy/spd*Math.min(spd*1.05,12);
+      b.x+=b.vx*2; b.y+=b.vy*2;
+    }
+    // Goals
+    if (b.y-AH_BR<0) {
+      if (Math.abs(b.x-AH_W/2)<AH_GW) { this.score.p1++; this._onGoal(); return; }
+      b.y=AH_BR; b.vy=Math.abs(b.vy);
+    }
+    if (b.y+AH_BR>AH_H) {
+      if (Math.abs(b.x-AH_W/2)<AH_GW) { this.score.p2++; this._onGoal(); return; }
+      b.y=AH_H-AH_BR; b.vy=-Math.abs(b.vy);
+    }
+  }
+
+  _onGoal() {
+    this.send({gameType:'airh',action:'goal',score:this.score});
+    this._checkOver();
+    if (!this._gameOver) { setTimeout(()=>{ this._resetBall(); this.send({gameType:'airh',action:'reset'}); },1200); }
+  }
+
+  _checkOver() {
+    if (this.score.p1>=this.maxScore||this.score.p2>=this.maxScore) {
+      this._gameOver=true; this.state='done'; this._stopLoop(); this._draw();
+    }
+  }
+
+  _resetBall() {
+    const angle=(Math.random()*Math.PI/2+Math.PI/4)*(Math.random()<.5?1:-1);
+    const spd=4;
+    this.ball={x:AH_W/2,y:AH_H/2,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd};
+  }
+
+  _drawFrame() {
+    const cv=this._canvas, ctx=this._ctx; if(!cv||!ctx) return;
+    const dpr=window.devicePixelRatio||1;
+    // Background
+    ctx.fillStyle='#040a09'; ctx.fillRect(0,0,cv.width,cv.height);
+    const sx=cv.width/(AH_W*dpr)*AH_W, sy=cv.height/(AH_H*dpr)*AH_H;
+    ctx.save(); ctx.scale(cv.width/(AH_W),cv.height/(AH_H));
+
+    // Field
+    ctx.strokeStyle='rgba(64,224,208,.15)'; ctx.lineWidth=1;
+    ctx.strokeRect(1,1,AH_W-2,AH_H-2);
+    ctx.beginPath(); ctx.moveTo(0,AH_H/2); ctx.lineTo(AH_W,AH_H/2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(AH_W/2,AH_H/2,40,0,Math.PI*2); ctx.stroke();
+
+    // Goals
+    const gx1=AH_W/2-AH_GW, gx2=AH_W/2+AH_GW;
+    ctx.fillStyle='rgba(64,224,208,.08)';
+    ctx.fillRect(gx1,0,AH_GW*2,8);
+    ctx.fillRect(gx1,AH_H-8,AH_GW*2,8);
+    ctx.strokeStyle='rgba(64,224,208,.4)'; ctx.lineWidth=2;
+    ctx.strokeRect(gx1,0,AH_GW*2,8);
+    ctx.strokeRect(gx1,AH_H-8,AH_GW*2,8);
+
+    // Paddles
+    const drawPaddle=(x,y,mine)=>{
+      ctx.beginPath(); ctx.arc(x,y,AH_PR,0,Math.PI*2);
+      ctx.fillStyle=mine?'rgba(64,224,208,.25)':'rgba(107,255,123,.2)';
+      ctx.fill();
+      ctx.strokeStyle=mine?'#40e0d0':'#6bff7b'; ctx.lineWidth=2; ctx.stroke();
+    };
+    const iBottom=this.mySlot===1;
+    drawPaddle(this.p1.x,this.p1.y,iBottom);
+    drawPaddle(this.p2.x,this.p2.y,!iBottom);
+
+    // Ball
+    ctx.beginPath(); ctx.arc(this.ball.x,this.ball.y,AH_BR,0,Math.PI*2);
+    ctx.fillStyle='rgba(255,255,255,.9)'; ctx.fill();
+    ctx.strokeStyle='rgba(64,224,208,.6)'; ctx.lineWidth=2; ctx.stroke();
+
+    ctx.restore();
+  }
+
+  render(container) { this._dom=container; this._draw(); }
+
+  _draw() {
+    const c=this._dom; if(!c) return;
+    if (this.state==='waiting'&&this._invited) {
+      c.innerHTML=`<div class="tqapp-airh">
+        <div class="tqapp-hdr"><span>◉ air hockey</span></div>
+        <div class="ta-invite"><div class="ta-inv-text">air hockey challenge</div>
+        <div class="ta-btns">
+          <div class="ta-btn accept" id="ah-acc">accept</div>
+          <div class="ta-btn danger" id="ah-dec">decline</div>
+        </div></div></div>`;
+      c.querySelector('#ah-acc')?.addEventListener('click',()=>this._accept());
+      c.querySelector('#ah-dec')?.addEventListener('click',()=>{this.send({gameType:'airh',action:'resign'});this.onClose?.();});
+      return;
+    }
+    if (this.state==='waiting') {
+      c.innerHTML=`<div class="tqapp-airh"><div class="tqapp-hdr"><span>◉ air hockey</span></div><div class="ta-status">waiting for opponent…</div></div>`;
+      return;
+    }
+    if (this.state==='done') {
+      const won=this.score.p1>=this.maxScore?(this.mySlot===1):(this.mySlot===2);
+      const draw=this.score.p1===this.score.p2;
+      c.innerHTML=`<div class="tqapp-airh">
+        <div class="tqapp-hdr"><span>◉ air hockey</span><span class="tqapp-sym">${this.score.p1}–${this.score.p2}</span></div>
+        <div class="ta-status ${draw?'ta-draw':won?'ta-win':'ta-loss'}">${draw?'draw':won?'you win!':'you lose'}
+          <div class="ta-btns" style="margin-top:5px">
+            <div class="ta-btn danger" id="ah-close">close</div>
+          </div></div></div>`;
+      c.querySelector('#ah-close')?.addEventListener('click',()=>this.onClose?.());
+      return;
+    }
+    // Active — build canvas if needed
+    if (!this._canvas) {
+      c.innerHTML=`<div class="tqapp-airh">
+        <div class="tqapp-hdr"><span>◉ air hockey</span><span class="tqapp-sym" id="ah-score">${this.score.p1}–${this.score.p2}</span></div>
+        <div class="ah-field"><canvas id="ah-canvas"></canvas></div>
+        <div class="ta-status" id="ah-side" style="font-size:9px;color:var(--dim);margin-top:3px">you: ${this.mySlot===1?'bottom (teal)':'top (green)'}</div>
+        <div class="ta-btns"><div class="ta-btn danger" id="ah-resign">resign</div></div>
+      </div>`;
+      this._canvas=c.querySelector('#ah-canvas');
+      this._ctx=this._canvas.getContext('2d');
+      this._resizeCanvas();
+      this._bindInput();
+      c.querySelector('#ah-resign')?.addEventListener('click',()=>{ this.send({gameType:'airh',action:'resign'}); this.state='done'; this._stopLoop(); this._draw(); });
+    }
+    // Update score display
+    const sc=c.querySelector('#ah-score'); if(sc) sc.textContent=`${this.score.p1}–${this.score.p2}`;
+  }
+
+  _resizeCanvas() {
+    const cv=this._canvas; if(!cv) return;
+    const w=Math.min(cv.parentElement?.clientWidth||320,320);
+    const dpr=window.devicePixelRatio||1;
+    cv.width=w*dpr; cv.height=w*(AH_H/AH_W)*dpr;
+    cv.style.width=w+'px'; cv.style.height=(w*(AH_H/AH_W))+'px';
+  }
+
+  _bindInput() {
+    const cv=this._canvas; if(!cv) return;
+    const pos=(e)=>{
+      const r=cv.getBoundingClientRect();
+      const src=e.touches?e.touches[0]:e;
+      const rx=(src.clientX-r.left)/r.width*AH_W;
+      const ry=(src.clientY-r.top)/r.height*AH_H;
+      const p=this.mySlot===1?this.p1:this.p2;
+      // Constrain to own half
+      p.x=ahClamp(rx,AH_PR,AH_W-AH_PR);
+      p.y=ahClamp(ry, this.mySlot===1?AH_H/2+AH_PR:AH_PR, this.mySlot===1?AH_H-AH_PR:AH_H/2-AH_PR);
+    };
+    cv.addEventListener('mousemove',e=>{ if(this.state==='active') pos(e); });
+    cv.addEventListener('touchmove',e=>{ if(this.state==='active'){e.preventDefault();pos(e);} },{passive:false});
+  }
+
+  destroy() { this._stopLoop(); this._canvas=null; this._ctx=null; this._dom=null; }
+}
+
+// Update registry
 REGISTRY.find(r => r.id === 'ttt').cls   = TicTacToe;
 REGISTRY.find(r => r.id === 'sps').cls   = StonePaperScissors;
 REGISTRY.find(r => r.id === 'chess').cls = Chess;
+REGISTRY.find(r => r.id === 'airh').cls  = AirHockey;
 REGISTRY.find(r => r.id === 'memo').cls  = VoiceMemo;

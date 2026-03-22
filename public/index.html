@@ -626,6 +626,13 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .vm-controls{display:flex;gap:8px}
 .vm-err{font-size:10px;color:var(--err);padding:4px 0}
 
+/* ── Air Hockey ──────────────────────────────────────────────────────────── */
+.tqapp-airh{font-size:11px;user-select:none}
+.ah-field{position:relative;margin:6px 0;line-height:0}
+.ah-field canvas{display:block;cursor:none;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  border:1px solid var(--mute);}
+
 /* ── Chess ───────────────────────────────────────────────────────────────── */
 .tqapp-chess{font-size:11px;user-select:none;min-width:260px}
 .ch-wrap{display:flex;align-items:flex-start;gap:3px}
