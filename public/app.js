@@ -330,8 +330,20 @@ export class TurquoiseApp {
     for (const [key, game] of this.games) {
       if (key.startsWith(fp + ':')) { game?.destroy?.(); this.games.delete(key); }
     }
+    // Cancel all in-flight file sends to this peer immediately.
+    // Without this, FileTransfer waits for its 30s stall timer before reporting
+    // failure, leaving the progress bar frozen with no feedback.
+    for (const [fileId, info] of this._fileOwners) {
+      if (info.fps.includes(fp)) {
+        this.ft.cancelSend(fileId, fp);
+        info.fps = info.fps.filter(f => f !== fp);
+        if (!info.fps.length) this._fileOwners.delete(fileId);
+      }
+    }
+    // Cancel any in-progress receive from this peer (get fileId from recv state)
+    const recvState = this.ft._recv?.get(fp);
+    if (recvState?.fileId) this.ft.cancelRecv(fp, recvState.fileId);
     this._renderPeers();
-    // Refresh header for the disconnected peer AND for circle (peer count changes)
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' disconnected','warn',5000);
   }

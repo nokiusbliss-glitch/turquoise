@@ -215,8 +215,9 @@ export class TurquoiseNetwork {
       pc, nick: nick||fp.slice(0,8), ready:false,
       ctrl:null, data:null, stream:null,
       makingOffer:false, ignoreOffer:false, pendingIce:[],
-      hbMiss:0, hbTimer:null, _discTimer:null, _resolve:null, _reject:null,
-      onRemoteStream: null,   // set via setRemoteStreamHandler(fp, fn)
+      hbMiss:0, hbTimer:null, _discTimer:null, _ctrlCloseTimer:null,
+      _resolve:null, _reject:null,
+      onRemoteStream: null,
     };
 
     pc.onicecandidate = e => {
@@ -226,11 +227,10 @@ export class TurquoiseNetwork {
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       this._log.debug(FILE, 'conn', `${fp.slice(0,8)}: ${s}`);
-      if (s === 'connected' && !ps.ready) { ps.ready = true; this._onReady(fp, ps); }
+      // _onReady now fires from ctrl.onopen so the logged tier is always accurate.
+      // (Previously fired here — before ctrl DC opened — so tier was always 'ws-relay'.)
       if (s === 'disconnected') {
-        // Attempt ICE restart immediately. Mobile radios often briefly drop.
         try { pc.restartIce(); } catch {}
-        // If still disconnected after 10s, tear down for a full reconnect.
         clearTimeout(ps._discTimer);
         ps._discTimer = setTimeout(() => {
           if (ps.pc.connectionState === 'disconnected' || ps.pc.connectionState === 'failed') {
@@ -263,16 +263,37 @@ export class TurquoiseNetwork {
     dc.bufferedAmountLowThreshold = LOW;
 
     if (label === 'ctrl') {
-      dc.onopen    = () => { this._log.debug(FILE,'dc',`ctrl open ${fp.slice(0,8)}`); if (!ps.ready) { ps.ready=true; this._onReady(fp,ps); } };
+      dc.onopen    = () => {
+        this._log.debug(FILE,'dc',`ctrl open ${fp.slice(0,8)}`);
+        // Fire _onReady here — ctrl just opened so connTier returns 'p2p' correctly.
+        if (!ps.ready) { ps.ready = true; this._onReady(fp, ps); }
+      };
       dc.onmessage = e => this._onCtrl(fp, e.data);
-      // Teardown immediately when ctrl closes — don't wait for HB.
-      // HB skips peers whose ctrl.readyState !== 'open', so a closed ctrl was
-      // invisible to HB and the peer got stuck in a permanent reconnect loop.
+      // Fix A: don't immediately teardown when ctrl closes — give the PC 1.5s to
+      // report its own state change first.  Tearing down instantly creates a cascade
+      // where both peers chase each other's reconnects, producing rapid ctrl-open/
+      // ctrl-close cycles.  If the PC is still 'connected' after the grace period,
+      // try an ICE restart instead of a full teardown.
       dc.onclose   = () => {
         this._log.debug(FILE, 'dc', `ctrl closed ${fp.slice(0,8)}`);
-        if (this.peers.has(fp)) this._teardown(fp, 'ctrl-closed');
+        if (!this.peers.has(fp)) return;
+        clearTimeout(ps._ctrlCloseTimer);
+        ps._ctrlCloseTimer = setTimeout(() => {
+          const cur = this.peers.get(fp);
+          if (!cur) return; // already torn down by PC state change
+          const s = cur.pc.connectionState;
+          if (s === 'connected' || s === 'connecting') {
+            // PC is still alive — attempt ICE restart; let onconnectionstatechange
+            // handle teardown if it actually fails.
+            this._log.debug(FILE, 'dc', `ctrl closed but PC ${s} (${fp.slice(0,8)}) — restarting ICE`);
+            try { cur.pc.restartIce(); } catch {}
+          } else {
+            this._teardown(fp, 'ctrl-closed');
+          }
+        }, 1500);
       };
     } else {
+      dc.onopen    = () => { this._log.debug(FILE,'dc',`data open ${fp.slice(0,8)}`); };
       dc.onmessage = e => {
         const d = e.data;
         if (d instanceof ArrayBuffer) { this.onBinaryChunk?.(fp, d); return; }
@@ -299,6 +320,7 @@ export class TurquoiseNetwork {
     ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
     clearTimeout(ps.hbTimer);
     clearTimeout(ps._discTimer);
+    clearTimeout(ps._ctrlCloseTimer);
     try { ps.pc.close(); } catch {}
     ps._reject?.(new Error('peer gone'));
 
