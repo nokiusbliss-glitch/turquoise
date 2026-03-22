@@ -861,7 +861,7 @@ export class AirHockey {
     this.send    = sendFn;
     this.onClose = onCloseFn;
 
-    this.mySlot  = null;  // 1=bottom, 2=top
+    this.mySlot  = null;   // 1=inviter, 2=acceptor
     this.state   = 'waiting';
     this._invited= false;
     this._dom    = null;
@@ -869,41 +869,48 @@ export class AirHockey {
     this._ctx    = null;
     this._raf    = null;
     this._syncT  = 0;
-    this._inputX = AH_W/2;
-    this._inputY = AH_H*3/4;
-    this._dragging=false;
 
-    // Game state (both devices run same simulation)
+    // Game state — P1 is physics authority
     this.ball  = {x:AH_W/2, y:AH_H/2, vx:2, vy:3};
-    this.p1    = {x:AH_W/2, y:AH_H-50};   // bottom
-    this.p2    = {x:AH_W/2, y:50};          // top
+    this.p1    = {x:AH_W/2, y:AH_H-50};  // inviter paddle (game coords)
+    this.p2    = {x:AH_W/2, y:50};         // acceptor paddle (game coords)
     this.score = {p1:0, p2:0};
     this.maxScore = 7;
-    this._gameOver=false;
+    this._gameOver = false;
   }
 
   handleMsg(msg) {
-    const {action}=msg;
-    if (action==='invite') { this._invited=true; this.mySlot=2; this.state='waiting'; this._draw(); }
-    else if (action==='accept') { this.mySlot=1; this.state='active'; this._startLoop(); this._draw(); }
-    else if (action==='state') {
-      // Remote sends their paddle + ball position
-      if (this.mySlot===1) {
-        this.p2.x=msg.px; this.p2.y=msg.py;
-        if (msg.ball) { this.ball.x=msg.ball.x; this.ball.y=msg.ball.y; this.ball.vx=msg.ball.vx; this.ball.vy=msg.ball.vy; }
-        if (msg.score) { this.score=msg.score; }
+    const {action} = msg;
+    if (action === 'invite') {
+      this._invited = true; this.mySlot = 2; this.state = 'waiting'; this._draw();
+    } else if (action === 'accept') {
+      // Inviter learns the acceptor accepted — inviter is slot 1 (physics authority)
+      this.mySlot = 1; this.state = 'active'; this._startLoop(); this._draw();
+    } else if (action === 'state') {
+      if (this.mySlot === 1) {
+        // P1 receives P2's paddle position
+        this.p2.x = msg.px; this.p2.y = msg.py;
       } else {
-        this.p1.x=msg.px; this.p1.y=msg.py;
+        // P2 receives P1's paddle + authoritative ball + score
+        this.p1.x = msg.px; this.p1.y = msg.py;
+        if (msg.ball) {
+          this.ball.x=msg.ball.x; this.ball.y=msg.ball.y;
+          this.ball.vx=msg.ball.vx; this.ball.vy=msg.ball.vy;
+        }
+        if (msg.score) { this.score = msg.score; }
       }
+    } else if (action === 'goal') {
+      this.score = msg.score; this._checkOver();
+    } else if (action === 'reset') {
+      this._resetBall();
+    } else if (action === 'resign') {
+      this.state = 'done'; this._stopLoop(); this._draw();
     }
-    else if (action==='goal') { this.score=msg.score; this._checkOver(); }
-    else if (action==='reset') { this._resetBall(); }
-    else if (action==='resign') { this.state='done'; this._draw(); this._stopLoop(); }
   }
 
   _accept() {
-    this.mySlot=2; this.state='active';
-    this.send({gameType:'airh',action:'accept'});
+    this.mySlot = 2; this.state = 'active';
+    this.send({gameType:'airh', action:'accept'});
     this._startLoop(); this._draw();
   }
 
@@ -911,17 +918,18 @@ export class AirHockey {
     if (this._raf) return;
     const loop = (ts) => {
       this._raf = requestAnimationFrame(loop);
-      if (this.state!=='active') return;
-      this._updateBall();
+      if (this.state !== 'active') return;
+      if (this.mySlot === 1) this._updateBall();
       this._drawFrame();
       if (ts - this._syncT > AH_SYNC_MS) {
-        this._syncT=ts;
-        const myP = this.mySlot===1 ? this.p1 : this.p2;
-        const msg = {gameType:'airh',action:'state',px:myP.x,py:myP.y};
-        // Player 1 (bottom) is authoritative for ball physics
-        if (this.mySlot===1) {
-          msg.ball={x:this.ball.x,y:this.ball.y,vx:this.ball.vx,vy:this.ball.vy};
-          msg.score=this.score;
+        this._syncT = ts;
+        // Each player sends their own paddle position
+        const myP = this.mySlot === 1 ? this.p1 : this.p2;
+        const msg = {gameType:'airh', action:'state', px:myP.x, py:myP.y};
+        // P1 is authoritative: also sends ball state and score to P2
+        if (this.mySlot === 1) {
+          msg.ball  = {x:this.ball.x, y:this.ball.y, vx:this.ball.vx, vy:this.ball.vy};
+          msg.score = this.score;
         }
         this.send(msg);
       }
@@ -930,173 +938,234 @@ export class AirHockey {
   }
 
   _stopLoop() {
-    if (this._raf) { cancelAnimationFrame(this._raf); this._raf=null; }
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
   }
 
   _updateBall() {
-    if (this.mySlot!==1) return; // only p1 runs physics
-    const b=this.ball;
-    b.x+=b.vx; b.y+=b.vy;
-    // Wall bounce
-    if (b.x-AH_BR<0) { b.x=AH_BR; b.vx=Math.abs(b.vx); }
-    if (b.x+AH_BR>AH_W) { b.x=AH_W-AH_BR; b.vx=-Math.abs(b.vx); }
-    // Paddle collisions
-    if (ahCirclesCollide(b.x,b.y,AH_BR,this.p1.x,this.p1.y,AH_PR)) {
-      [b.vx,b.vy]=ahReflect(b.vx,b.vy,this.p1.x,this.p1.y,b.x,b.y);
-      const spd=Math.hypot(b.vx,b.vy); b.vx=b.vx/spd*Math.min(spd*1.05,12); b.vy=b.vy/spd*Math.min(spd*1.05,12);
-      b.x+=b.vx*2; b.y+=b.vy*2;
+    const b = this.ball;
+    b.x += b.vx; b.y += b.vy;
+    // Side wall bounce
+    if (b.x - AH_BR < 0)    { b.x = AH_BR;       b.vx =  Math.abs(b.vx); }
+    if (b.x + AH_BR > AH_W) { b.x = AH_W - AH_BR; b.vx = -Math.abs(b.vx); }
+    // Paddle collisions — speed up slightly on each hit, cap at 12
+    const hitPaddle = (px, py) => {
+      if (ahCirclesCollide(b.x, b.y, AH_BR, px, py, AH_PR)) {
+        [b.vx, b.vy] = ahReflect(b.vx, b.vy, px, py, b.x, b.y);
+        const spd = Math.hypot(b.vx, b.vy);
+        const ns  = Math.min(spd * 1.05, 12);
+        b.vx = b.vx / spd * ns; b.vy = b.vy / spd * ns;
+        b.x += b.vx * 2; b.y += b.vy * 2;  // push out of collision
+        return true;
+      }
+      return false;
+    };
+    hitPaddle(this.p1.x, this.p1.y);
+    hitPaddle(this.p2.x, this.p2.y);
+    // Goals — ball exits top (P2's end) or bottom (P1's end)
+    if (b.y - AH_BR < 0) {
+      if (Math.abs(b.x - AH_W / 2) < AH_GW) {
+        this.score.p1++;   // P1 scored: ball through P2's goal (top)
+        this._onGoal(); return;
+      }
+      b.y = AH_BR; b.vy = Math.abs(b.vy);
     }
-    if (ahCirclesCollide(b.x,b.y,AH_BR,this.p2.x,this.p2.y,AH_PR)) {
-      [b.vx,b.vy]=ahReflect(b.vx,b.vy,this.p2.x,this.p2.y,b.x,b.y);
-      const spd=Math.hypot(b.vx,b.vy); b.vx=b.vx/spd*Math.min(spd*1.05,12); b.vy=b.vy/spd*Math.min(spd*1.05,12);
-      b.x+=b.vx*2; b.y+=b.vy*2;
-    }
-    // Goals
-    if (b.y-AH_BR<0) {
-      if (Math.abs(b.x-AH_W/2)<AH_GW) { this.score.p1++; this._onGoal(); return; }
-      b.y=AH_BR; b.vy=Math.abs(b.vy);
-    }
-    if (b.y+AH_BR>AH_H) {
-      if (Math.abs(b.x-AH_W/2)<AH_GW) { this.score.p2++; this._onGoal(); return; }
-      b.y=AH_H-AH_BR; b.vy=-Math.abs(b.vy);
+    if (b.y + AH_BR > AH_H) {
+      if (Math.abs(b.x - AH_W / 2) < AH_GW) {
+        this.score.p2++;   // P2 scored: ball through P1's goal (bottom)
+        this._onGoal(); return;
+      }
+      b.y = AH_H - AH_BR; b.vy = -Math.abs(b.vy);
     }
   }
 
   _onGoal() {
-    this.send({gameType:'airh',action:'goal',score:this.score});
+    this.send({gameType:'airh', action:'goal', score:this.score});
     this._checkOver();
-    if (!this._gameOver) { setTimeout(()=>{ this._resetBall(); this.send({gameType:'airh',action:'reset'}); },1200); }
+    if (!this._gameOver) {
+      setTimeout(() => {
+        this._resetBall();
+        this.send({gameType:'airh', action:'reset'});
+      }, 1200);
+    }
   }
 
   _checkOver() {
-    if (this.score.p1>=this.maxScore||this.score.p2>=this.maxScore) {
-      this._gameOver=true; this.state='done'; this._stopLoop(); this._draw();
+    if (this.score.p1 >= this.maxScore || this.score.p2 >= this.maxScore) {
+      this._gameOver = true; this.state = 'done'; this._stopLoop(); this._draw();
     }
   }
 
   _resetBall() {
-    const angle=(Math.random()*Math.PI/2+Math.PI/4)*(Math.random()<.5?1:-1);
-    const spd=4;
-    this.ball={x:AH_W/2,y:AH_H/2,vx:Math.cos(angle)*spd,vy:Math.sin(angle)*spd};
+    const angle = (Math.random() * Math.PI / 2 + Math.PI / 4) * (Math.random() < .5 ? 1 : -1);
+    this.ball = {x:AH_W/2, y:AH_H/2, vx:Math.cos(angle)*4, vy:Math.sin(angle)*4};
   }
 
   _drawFrame() {
-    const cv=this._canvas, ctx=this._ctx; if(!cv||!ctx) return;
-    const dpr=window.devicePixelRatio||1;
-    // Background
-    ctx.fillStyle='#040a09'; ctx.fillRect(0,0,cv.width,cv.height);
-    const sx=cv.width/(AH_W*dpr)*AH_W, sy=cv.height/(AH_H*dpr)*AH_H;
-    ctx.save(); ctx.scale(cv.width/(AH_W),cv.height/(AH_H));
+    const cv = this._canvas, ctx = this._ctx;
+    if (!cv || !ctx) return;
 
-    // Field
-    ctx.strokeStyle='rgba(64,224,208,.15)'; ctx.lineWidth=1;
-    ctx.strokeRect(1,1,AH_W-2,AH_H-2);
-    ctx.beginPath(); ctx.moveTo(0,AH_H/2); ctx.lineTo(AH_W,AH_H/2); ctx.stroke();
-    ctx.beginPath(); ctx.arc(AH_W/2,AH_H/2,40,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle = '#040a09';
+    ctx.fillRect(0, 0, cv.width, cv.height);
 
-    // Goals
-    const gx1=AH_W/2-AH_GW, gx2=AH_W/2+AH_GW;
-    ctx.fillStyle='rgba(64,224,208,.08)';
-    ctx.fillRect(gx1,0,AH_GW*2,8);
-    ctx.fillRect(gx1,AH_H-8,AH_GW*2,8);
-    ctx.strokeStyle='rgba(64,224,208,.4)'; ctx.lineWidth=2;
-    ctx.strokeRect(gx1,0,AH_GW*2,8);
-    ctx.strokeRect(gx1,AH_H-8,AH_GW*2,8);
+    ctx.save();
+    // Scale to logical size
+    ctx.scale(cv.width / AH_W, cv.height / AH_H);
 
-    // Paddles
-    const drawPaddle=(x,y,mine)=>{
-      ctx.beginPath(); ctx.arc(x,y,AH_PR,0,Math.PI*2);
-      ctx.fillStyle=mine?'rgba(64,224,208,.25)':'rgba(107,255,123,.2)';
-      ctx.fill();
-      ctx.strokeStyle=mine?'#40e0d0':'#6bff7b'; ctx.lineWidth=2; ctx.stroke();
+    // P2 sees the board flipped 180° so their paddle is always at the bottom
+    // and they attack upward — matching the natural perspective for each player.
+    const flip = this.mySlot === 2;
+    if (flip) {
+      ctx.translate(AH_W, AH_H);
+      ctx.scale(-1, -1);
+    }
+
+    // Field lines
+    ctx.strokeStyle = 'rgba(64,224,208,.15)'; ctx.lineWidth = 1;
+    ctx.strokeRect(1, 1, AH_W - 2, AH_H - 2);
+    ctx.beginPath(); ctx.moveTo(0, AH_H/2); ctx.lineTo(AH_W, AH_H/2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(AH_W/2, AH_H/2, 40, 0, Math.PI*2); ctx.stroke();
+
+    // Goals (top = P2's goal, bottom = P1's goal)
+    const gx1 = AH_W/2 - AH_GW;
+    ctx.fillStyle = 'rgba(64,224,208,.08)';
+    ctx.fillRect(gx1, 0,        AH_GW*2, 8);
+    ctx.fillRect(gx1, AH_H - 8, AH_GW*2, 8);
+    ctx.strokeStyle = 'rgba(64,224,208,.4)'; ctx.lineWidth = 2;
+    ctx.strokeRect(gx1, 0,        AH_GW*2, 8);
+    ctx.strokeRect(gx1, AH_H - 8, AH_GW*2, 8);
+
+    // Paddles — "mine" is always teal, "opponent" is green
+    const drawPaddle = (x, y, mine) => {
+      ctx.beginPath(); ctx.arc(x, y, AH_PR, 0, Math.PI*2);
+      ctx.fillStyle   = mine ? 'rgba(64,224,208,.3)' : 'rgba(107,255,123,.2)';
+      ctx.strokeStyle = mine ? '#40e0d0' : '#6bff7b';
+      ctx.lineWidth = 2.5; ctx.fill(); ctx.stroke();
     };
-    const iBottom=this.mySlot===1;
-    drawPaddle(this.p1.x,this.p1.y,iBottom);
-    drawPaddle(this.p2.x,this.p2.y,!iBottom);
+    const myIsP1 = this.mySlot === 1;
+    drawPaddle(this.p1.x, this.p1.y,  myIsP1);
+    drawPaddle(this.p2.x, this.p2.y, !myIsP1);
 
     // Ball
-    ctx.beginPath(); ctx.arc(this.ball.x,this.ball.y,AH_BR,0,Math.PI*2);
-    ctx.fillStyle='rgba(255,255,255,.9)'; ctx.fill();
-    ctx.strokeStyle='rgba(64,224,208,.6)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(this.ball.x, this.ball.y, AH_BR, 0, Math.PI*2);
+    ctx.fillStyle   = 'rgba(255,255,255,.92)';
+    ctx.strokeStyle = 'rgba(64,224,208,.7)';
+    ctx.lineWidth = 2; ctx.fill(); ctx.stroke();
 
     ctx.restore();
+
+    // Update score DOM element every frame — avoids stale display
+    const sc = this._dom?.querySelector('#ah-score');
+    if (sc) {
+      const myScore   = this.mySlot === 1 ? this.score.p1 : this.score.p2;
+      const oppScore  = this.mySlot === 1 ? this.score.p2 : this.score.p1;
+      sc.textContent = `${myScore}–${oppScore}`;
+    }
   }
 
-  render(container) { this._dom=container; this._draw(); }
+  render(container) { this._dom = container; this._draw(); }
 
   _draw() {
-    const c=this._dom; if(!c) return;
-    if (this.state==='waiting'&&this._invited) {
-      c.innerHTML=`<div class="tqapp-airh">
+    const c = this._dom; if (!c) return;
+
+    if (this.state === 'waiting' && this._invited) {
+      c.innerHTML = `<div class="tqapp-airh">
         <div class="tqapp-hdr"><span>◉ air hockey</span></div>
-        <div class="ta-invite"><div class="ta-inv-text">air hockey challenge</div>
-        <div class="ta-btns">
-          <div class="ta-btn accept" id="ah-acc">accept</div>
-          <div class="ta-btn danger" id="ah-dec">decline</div>
-        </div></div></div>`;
-      c.querySelector('#ah-acc')?.addEventListener('click',()=>this._accept());
-      c.querySelector('#ah-dec')?.addEventListener('click',()=>{this.send({gameType:'airh',action:'resign'});this.onClose?.();});
+        <div class="ta-invite">
+          <div class="ta-inv-text">air hockey challenge</div>
+          <div class="ta-btns">
+            <div class="ta-btn accept" id="ah-acc">accept</div>
+            <div class="ta-btn danger" id="ah-dec">decline</div>
+          </div>
+        </div>
+      </div>`;
+      c.querySelector('#ah-acc')?.addEventListener('click', () => this._accept());
+      c.querySelector('#ah-dec')?.addEventListener('click', () => {
+        this.send({gameType:'airh', action:'resign'}); this.onClose?.();
+      });
       return;
     }
-    if (this.state==='waiting') {
-      c.innerHTML=`<div class="tqapp-airh"><div class="tqapp-hdr"><span>◉ air hockey</span></div><div class="ta-status">waiting for opponent…</div></div>`;
+    if (this.state === 'waiting') {
+      c.innerHTML = `<div class="tqapp-airh"><div class="tqapp-hdr"><span>◉ air hockey</span></div><div class="ta-status">waiting for opponent…</div></div>`;
       return;
     }
-    if (this.state==='done') {
-      const won=this.score.p1>=this.maxScore?(this.mySlot===1):(this.mySlot===2);
-      const draw=this.score.p1===this.score.p2;
-      c.innerHTML=`<div class="tqapp-airh">
-        <div class="tqapp-hdr"><span>◉ air hockey</span><span class="tqapp-sym">${this.score.p1}–${this.score.p2}</span></div>
-        <div class="ta-status ${draw?'ta-draw':won?'ta-win':'ta-loss'}">${draw?'draw':won?'you win!':'you lose'}
+    if (this.state === 'done') {
+      const myScore  = this.mySlot === 1 ? this.score.p1 : this.score.p2;
+      const oppScore = this.mySlot === 1 ? this.score.p2 : this.score.p1;
+      const won = myScore >= this.maxScore;
+      c.innerHTML = `<div class="tqapp-airh">
+        <div class="tqapp-hdr"><span>◉ air hockey</span><span class="tqapp-sym">${myScore}–${oppScore}</span></div>
+        <div class="ta-status ${won?'ta-win':'ta-loss'}">${won?'you win!':'you lose'}
           <div class="ta-btns" style="margin-top:5px">
             <div class="ta-btn danger" id="ah-close">close</div>
-          </div></div></div>`;
-      c.querySelector('#ah-close')?.addEventListener('click',()=>this.onClose?.());
+          </div>
+        </div>
+      </div>`;
+      c.querySelector('#ah-close')?.addEventListener('click', () => this.onClose?.());
       return;
     }
-    // Active — build canvas if needed
+    // Active state — create canvas once
     if (!this._canvas) {
-      c.innerHTML=`<div class="tqapp-airh">
-        <div class="tqapp-hdr"><span>◉ air hockey</span><span class="tqapp-sym" id="ah-score">${this.score.p1}–${this.score.p2}</span></div>
+      c.innerHTML = `<div class="tqapp-airh">
+        <div class="tqapp-hdr">
+          <span>◉ air hockey</span>
+          <span class="tqapp-sym" id="ah-score">0–0</span>
+        </div>
         <div class="ah-field"><canvas id="ah-canvas"></canvas></div>
-        <div class="ta-status" id="ah-side" style="font-size:9px;color:var(--dim);margin-top:3px">you: ${this.mySlot===1?'bottom (teal)':'top (green)'}</div>
+        <div class="ta-status" style="font-size:9px;color:var(--dim);margin-top:3px">
+          you: ${this.mySlot===1?'teal (bottom)':'teal (bottom)'} · move your paddle · first to ${this.maxScore}
+        </div>
         <div class="ta-btns"><div class="ta-btn danger" id="ah-resign">resign</div></div>
       </div>`;
-      this._canvas=c.querySelector('#ah-canvas');
-      this._ctx=this._canvas.getContext('2d');
+      this._canvas = c.querySelector('#ah-canvas');
+      this._ctx    = this._canvas.getContext('2d');
       this._resizeCanvas();
       this._bindInput();
-      c.querySelector('#ah-resign')?.addEventListener('click',()=>{ this.send({gameType:'airh',action:'resign'}); this.state='done'; this._stopLoop(); this._draw(); });
+      c.querySelector('#ah-resign')?.addEventListener('click', () => {
+        this.send({gameType:'airh', action:'resign'});
+        this.state = 'done'; this._stopLoop(); this._draw();
+      });
     }
-    // Update score display
-    const sc=c.querySelector('#ah-score'); if(sc) sc.textContent=`${this.score.p1}–${this.score.p2}`;
   }
 
   _resizeCanvas() {
-    const cv=this._canvas; if(!cv) return;
-    const w=Math.min(cv.parentElement?.clientWidth||320,320);
-    const dpr=window.devicePixelRatio||1;
-    cv.width=w*dpr; cv.height=w*(AH_H/AH_W)*dpr;
-    cv.style.width=w+'px'; cv.style.height=(w*(AH_H/AH_W))+'px';
+    const cv = this._canvas; if (!cv) return;
+    const w   = Math.min(cv.parentElement?.clientWidth || 300, 300);
+    const dpr = window.devicePixelRatio || 1;
+    cv.width  = w * dpr;
+    cv.height = w * (AH_H / AH_W) * dpr;
+    cv.style.width  = w + 'px';
+    cv.style.height = (w * (AH_H / AH_W)) + 'px';
   }
 
   _bindInput() {
-    const cv=this._canvas; if(!cv) return;
-    const pos=(e)=>{
-      const r=cv.getBoundingClientRect();
-      const src=e.touches?e.touches[0]:e;
-      const rx=(src.clientX-r.left)/r.width*AH_W;
-      const ry=(src.clientY-r.top)/r.height*AH_H;
-      const p=this.mySlot===1?this.p1:this.p2;
-      // Constrain to own half
-      p.x=ahClamp(rx,AH_PR,AH_W-AH_PR);
-      p.y=ahClamp(ry, this.mySlot===1?AH_H/2+AH_PR:AH_PR, this.mySlot===1?AH_H-AH_PR:AH_H/2-AH_PR);
+    const cv = this._canvas; if (!cv) return;
+    const pos = (e) => {
+      const r   = cv.getBoundingClientRect();
+      const src = e.touches ? e.touches[0] : e;
+      // Convert screen coords to game coords, accounting for board flip
+      let rx = (src.clientX - r.left) / r.width  * AH_W;
+      let ry = (src.clientY - r.top)  / r.height * AH_H;
+      if (this.mySlot === 2) {
+        // Board is flipped 180° for P2, so invert both axes
+        rx = AH_W - rx;
+        ry = AH_H - ry;
+      }
+      const p = this.mySlot === 1 ? this.p1 : this.p2;
+      // Constrain to own half in game coordinates
+      // P1 owns bottom half (y: AH_H/2 to AH_H)
+      // P2 owns top half    (y: 0 to AH_H/2)
+      p.x = ahClamp(rx, AH_PR, AH_W - AH_PR);
+      if (this.mySlot === 1) {
+        p.y = ahClamp(ry, AH_H/2 + AH_PR, AH_H - AH_PR);
+      } else {
+        p.y = ahClamp(ry, AH_PR, AH_H/2 - AH_PR);
+      }
     };
-    cv.addEventListener('mousemove',e=>{ if(this.state==='active') pos(e); });
-    cv.addEventListener('touchmove',e=>{ if(this.state==='active'){e.preventDefault();pos(e);} },{passive:false});
+    cv.addEventListener('mousemove', e => { if (this.state === 'active') pos(e); });
+    cv.addEventListener('touchmove', e => { if (this.state === 'active') { e.preventDefault(); pos(e); } }, {passive:false});
   }
 
-  destroy() { this._stopLoop(); this._canvas=null; this._ctx=null; this._dom=null; }
+  destroy() { this._stopLoop(); this._canvas = null; this._ctx = null; this._dom = null; }
 }
 
 // Update registry
