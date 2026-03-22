@@ -72,6 +72,31 @@ export class TurquoiseNetwork {
     this._startHB();
   }
 
+  /**
+   * Hard reconnect — call on device wake or network-change event.
+   *
+   * Mobile browsers keep WebSocket readyState=OPEN after the underlying TCP
+   * connection was silently killed during sleep.  Checking _wsOK misses this.
+   * We forcibly close the dead socket, tear down every stale peer connection
+   * (which re-queues them in _known so they reconnect on next WS open), then
+   * open a fresh WebSocket.  _reconnectKnown() fires on ws.onopen and
+   * rediscovers all previously-known peers automatically.
+   */
+  forceReconnect() {
+    if (this._dead) return;
+    this._log.info(FILE, 'forceReconnect', 'forcing full reconnect');
+    this._wsOK = false;
+    clearInterval(this._ping);
+    if (this.ws) {
+      const dead = this.ws; this.ws = null;
+      try { dead.onopen=dead.onclose=dead.onerror=dead.onmessage=null; dead.close(1000,'wake'); } catch {}
+    }
+    for (const fp of [...this.peers.keys()]) this._teardown(fp, 'wake');
+    this._retry = 0;
+    this._openWS();
+    this._startHB();
+  }
+
   _openWS() {
     if (this._dead) return;
     let ws; try { ws = new WebSocket(this._wsURL); } catch { this._schedWS(); return; }
@@ -86,7 +111,7 @@ export class TurquoiseNetwork {
       clearInterval(this._ping);
       this._ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) try { ws.send(JSON.stringify({type:'ping'})); } catch {}
-      }, 25_000);
+      }, 20_000); // 20s: render.com drops idle WS at ~30s
     };
 
     ws.onmessage = e => { try { this._onSig(JSON.parse(e.data)); } catch {} };
@@ -228,7 +253,15 @@ export class TurquoiseNetwork {
     if (label === 'ctrl') {
       dc.onopen    = () => { this._log.debug(FILE,'dc',`ctrl open ${fp.slice(0,8)}`); if (!ps.ready) { ps.ready=true; this._onReady(fp,ps); } };
       dc.onmessage = e => this._onCtrl(fp, e.data);
-      dc.onclose   = () => this._log.debug(FILE,'dc',`ctrl closed ${fp.slice(0,8)}`);
+      // Teardown immediately when ctrl closes.  The previous version only logged
+      // this event — the heartbeat would eventually notice (after HB_IV × HB_MAX
+      // = 24 s) but ONLY if ctrl.readyState was 'open'.  A closed ctrl causes HB
+      // to skip the peer entirely, so teardown never fired and the peer was stuck
+      // in an infinite connecting/connected loop with no DataChannel ever opening.
+      dc.onclose   = () => {
+        this._log.debug(FILE, 'dc', `ctrl closed ${fp.slice(0,8)}`);
+        if (this.peers.has(fp)) this._teardown(fp, 'ctrl-closed');
+      };
     } else {
       dc.onmessage = e => {
         const d = e.data;
@@ -281,6 +314,28 @@ export class TurquoiseNetwork {
     const { from:fp, sdp } = msg;
     if (!fp || !sdp) return;
     let ps = this.peers.get(fp);
+
+    // If we already have a PS for this peer, check whether it is still healthy.
+    // When the remote side tears down and immediately sends a fresh offer, our
+    // old PS has a closed ctrl DC and possibly a failed/closed PeerConnection.
+    // Negotiating the new offer on that dead PC re-establishes ICE but the
+    // pre-negotiated DataChannels (id:0/1) cannot reopen through SDP alone —
+    // they stay in 'closed' state forever.  We must discard the stale PS first.
+    if (ps) {
+      const pcState = ps.pc.connectionState;
+      const ctrlOk  = ps.ctrl?.readyState === 'open' || ps.ctrl?.readyState === 'connecting';
+      if (pcState === 'failed' || pcState === 'closed' || !ctrlOk) {
+        this._log.debug(FILE, '_onOffer', `${fp.slice(0,8)}: replacing stale PS (pc=${pcState} ctrl=${ps.ctrl?.readyState})`);
+        // Remove from map and close silently — the incoming offer IS the reconnect,
+        // so we must NOT schedule another _initiate from _teardown's _known timer.
+        this.peers.delete(fp);
+        ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
+        clearTimeout(ps.hbTimer);
+        try { ps.pc.close(); } catch {}
+        ps = null;
+      }
+    }
+
     if (!ps) {
       ps = this._makePS(fp, null);
       this.peers.set(fp, ps);
