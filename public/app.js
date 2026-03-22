@@ -118,14 +118,7 @@ export class TurquoiseApp {
     if (ni) ni.value = nickname;
     if (fp) fp.textContent = fingerprint;
 
-    try { for (const p of await loadPeers()) {
-      this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false});
-      // Pre-register in network so _reconnectKnown() can find them on WS connect
-      // without waiting for the server to broadcast their presence — the key fix
-      // for "won't reconnect after page reload unless the peer happens to be online
-      // at the exact moment signaling connects".
-      this.net.addKnownPeer(p.fingerprint, p.nickname||p.fingerprint.slice(0,8));
-    }} catch {}
+    try { for (const p of await loadPeers()) this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false}); } catch {}
     try { this.sessions.set(CIRCLE, await loadMessages(CIRCLE)); } catch { this.sessions.set(CIRCLE,[]); }
 
     this._bindUI();
@@ -248,6 +241,8 @@ export class TurquoiseApp {
     const online   = !isCircle && this.net.isReady(fp||'');
     const anyOnline= this.net.getConnectedPeers().length > 0;
     const canSend  = isCircle ? anyOnline : online;
+    // Games need a single known opponent, not a broadcast group
+    const canGame  = online && !isCircle;
 
     menu.innerHTML = `
       <div class="pm-item" id="pmi-file">📎  file</div>
@@ -255,7 +250,7 @@ export class TurquoiseApp {
       <div class="pm-item" id="pmi-memo">🎤  voice memo</div>
       <div class="pm-sep"></div>
       <div class="pm-label">◈ apps</div>
-      <div class="pm-item${(!online||isCircle)?' pm-dim':''}" id="pmi-ttt">⊞  tic tac toe</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -266,8 +261,8 @@ export class TurquoiseApp {
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
     $('pmi-ttt')?.addEventListener('click', () => {
       this._closePlus();
-      if (!isCircle && online) this._startGame(fp,'ttt');
-      else this._sys(isCircle?'games are 1:1 only':'peer offline',true);
+      if (canGame) this._startGame(fp,'ttt');
+      else this._sys(isCircle?'games need a 1\u20131 chat — tap a peer name first':'peer offline',true);
     });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
@@ -307,7 +302,8 @@ export class TurquoiseApp {
     if (!this.sessions.has(fp)) {
       loadMessages(fp).then(msgs => { this.sessions.set(fp,msgs); this._renderPeers(); if(this.active===fp) this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
     } else this._renderPeers();
-    if (this.active===fp) this._renderHeader();
+    // Refresh header for the connected peer AND for circle (peer count changes)
+    if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' joined','ok',3000);
   }
 
@@ -317,7 +313,9 @@ export class TurquoiseApp {
     if (this.call?.fp===fp) this._endCallLocal(false);
     if (this.circleCall) this._removeCirclePeer(fp);
     this.games.get(fp)?.destroy?.(); this.games.delete(fp);
-    this._renderPeers(); if(this.active===fp) this._renderHeader();
+    this._renderPeers();
+    // Refresh header for the disconnected peer AND for circle (peer count changes)
+    if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' disconnected','warn',5000);
   }
 
@@ -352,9 +350,17 @@ export class TurquoiseApp {
     const fp = this.active;
     const isCircle = fp===CIRCLE;
     const p = this.peers.get(fp)||{};
-    const name = isCircle ? '◉ circle' : (p.nick || fp?.slice(0,8) || '—');
-    const el=$('chat-peer-name'); if(el) el.textContent=name;
-    const fpe=$('chat-peer-fp'); if(fpe) fpe.textContent = fp&&!isCircle ? fp.slice(0,16)+'…' : '';
+    const el=$('chat-peer-name'); if(el) el.textContent= isCircle ? '◉ circle' : (p.nick || fp?.slice(0,8) || '—');
+    const fpe=$('chat-peer-fp');
+    if (fpe) {
+      if (isCircle) {
+        const n = this.net.getConnectedPeers().length;
+        fpe.textContent = n === 0 ? 'no peers online' : n === 1 ? '1 peer online' : `${n} peers online`;
+      } else {
+        const tier = this.net.connTier(fp);
+        fpe.textContent = tier === 'p2p' ? 'p2p · direct' : tier === 'ws-relay' ? 'relay' : fp ? fp.slice(0,16)+'…' : '';
+      }
+    }
     const bw=$('btn-walkie'), bv=$('btn-stream');
     if(bw) bw.textContent = isCircle ? '☎ walkie circle' : '☎ walkie';
     if(bv) bv.textContent = isCircle ? '⬡ video circle'  : '⬡ video';
@@ -880,17 +886,30 @@ export class TurquoiseApp {
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
+
+    // Phase status placeholder (ringing / connecting) — same pattern as circle panel
+    if (c.phase !== 'active') {
+      const ph = document.createElement('div');
+      ph.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:.72rem;font-family:"Space Mono",monospace;padding:20px';
+      ph.textContent = c.phase === 'ringing' ? 'incoming call…' : c.phase === 'inviting' ? 'calling…' : 'connecting…';
+      vids.appendChild(ph);
+    }
+
     const remote=document.createElement('div');
     remote.className='call-video-tile'; remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
     if (c.remoteStream) { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); }
-    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(c.fp)?.nick||c.fp.slice(0,8); remote.appendChild(lbl);
-    vids.appendChild(remote);
+    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=(this.peers.get(c.fp)?.nick||c.fp.slice(0,8))+(c.type==='walkie'?' 🎤':''); remote.appendChild(lbl);
+    if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
     const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'');
     if (c.localStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=c.localStream; pip.appendChild(v); }
     panel.appendChild(pip);
     this._pipCleanup=this._makePIPDraggable(pip);
-    const mu=$('ctrl-mute'); if(mu) mu.textContent=c.muted?'unmute':'mute';
-    const cam=$('ctrl-cam'); if(cam) cam.textContent=c.camOff?'cam on':'cam off';
+    const mu=$('ctrl-mute'); if(mu) { mu.textContent=c.muted?'unmute':'mute'; mu.classList.toggle('active',!!c.muted); }
+    const cam=$('ctrl-cam');
+    if (cam) {
+      cam.style.display = c.type==='walkie' ? 'none' : '';
+      cam.textContent = c.camOff?'cam on':'cam off';
+    }
   }
 
   _renderCircleCallPanel() {
@@ -902,15 +921,53 @@ export class TurquoiseApp {
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
-    cc.remoteStreams.forEach((stream,fp)=>{
-      const tile=document.createElement('div'); tile.className='call-video-tile'; tile.style.cssText='flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
-      if (cc.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=false; v.srcObject=stream; tile.appendChild(v); }
-      const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(fp)?.nick||fp.slice(0,8); tile.appendChild(lbl); vids.appendChild(tile);
+
+    // Show phase status when not yet active (same as 1:1 call panel)
+    if (cc.phase !== 'active' || cc.remoteStreams.size === 0) {
+      const ph = document.createElement('div');
+      ph.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:.72rem;font-family:"Space Mono",monospace;padding:20px;text-align:center';
+      ph.textContent = cc.phase === 'ringing' ? 'incoming circle call…' :
+                       cc.phase === 'connecting' ? 'calling circle…' :
+                       cc.remoteStreams.size === 0 ? 'waiting for peers to join…' : '';
+      if (ph.textContent) vids.appendChild(ph);
+    }
+
+    // Render a tile per remote peer (audio walkie shows name-only tile; video shows stream)
+    cc.remoteStreams.forEach((stream, fp) => {
+      const tile = document.createElement('div');
+      tile.className = 'call-video-tile';
+      tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
+      if (cc.type === 'stream') {
+        const v = document.createElement('video');
+        v.autoplay=true; v.playsInline=true; v.muted=false; v.srcObject=stream;
+        tile.appendChild(v);
+      }
+      const lbl = document.createElement('div');
+      lbl.className = 'vtile-label';
+      lbl.textContent = (this.peers.get(fp)?.nick || fp.slice(0,8)) + (cc.type==='walkie'?' 🎤':'');
+      tile.appendChild(lbl);
+      vids.appendChild(tile);
     });
-    const pip=document.createElement('div'); pip.className='call-pip'+(cc.camOff?' cam-off':'');
-    if (cc.localStream&&cc.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=cc.localStream; pip.appendChild(v); }
+
+    // Local PIP (video mode only)
+    const pip = document.createElement('div');
+    pip.className = 'call-pip' + (cc.camOff?' cam-off':'');
+    if (cc.localStream && cc.type === 'stream') {
+      const v = document.createElement('video');
+      v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=cc.localStream;
+      pip.appendChild(v);
+    }
     panel.appendChild(pip);
-    this._pipCleanup=this._makePIPDraggable(pip);
+    this._pipCleanup = this._makePIPDraggable(pip);
+
+    // Sync mute / cam buttons — same as 1:1 panel
+    const mu = $('ctrl-mute'); if (mu) { mu.textContent = cc.muted ? 'unmute' : 'mute'; mu.classList.toggle('active', !!cc.muted); }
+    const cam = $('ctrl-cam');
+    if (cam) {
+      // Hide cam button entirely for walkie (audio-only) calls
+      cam.style.display = cc.type === 'walkie' ? 'none' : '';
+      cam.textContent = cc.camOff ? 'cam on' : 'cam off';
+    }
   }
 
   /** Returns a cleanup function that removes all added listeners. */

@@ -4,7 +4,7 @@
  * Graceful partial install: a failing asset doesn't abort the install.
  */
 
-const CACHE = 'tq-v9';
+const CACHE = 'tq-v10';
 
 const CORE = [
   '/',
