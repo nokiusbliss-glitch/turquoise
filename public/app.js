@@ -94,15 +94,22 @@ export class TurquoiseApp {
     this._audioEl = Object.assign(document.createElement('audio'), {autoplay:true, playsInline:true, style:'display:none'});
     document.body.appendChild(this._audioEl);
 
-    // circleFileIds: files queued from circle session — wrapper injects circle:true
-    this._circleFileIds = new Set();
+    // circleFileIds: Map<fileId, remainingPeerCount>
+    // Each file-end/abort decrements the counter; delete only when it reaches 0.
+    // Using a plain Set caused premature deletion on the FIRST file-end (one per
+    // recipient), so subsequent recipients received no circle:true flag and the
+    // file card was routed to their individual chat instead of the circle session.
+    this._circleFileIds = new Map();
     this.ft = new FileTransfer(
       (fp,m) => {
-        // Inject circle:true for file control messages that originated in circle,
-        // so the receiver routes the file card to CIRCLE session not individual chat.
-        const isCircleFile = m.fileId && this._circleFileIds.has(m.fileId);
+        const remaining = m.fileId ? this._circleFileIds.get(m.fileId) : undefined;
+        const isCircleFile = remaining !== undefined;
         const extra = isCircleFile ? {circle:true} : {};
-        if (m.type==='file-end'||m.type==='file-abort') this._circleFileIds.delete(m.fileId);
+        if ((m.type==='file-end'||m.type==='file-abort') && isCircleFile) {
+          const newCount = remaining - 1;
+          if (newCount <= 0) this._circleFileIds.delete(m.fileId);
+          else               this._circleFileIds.set(m.fileId, newCount);
+        }
         return network.sendCtrl(fp, {...m, ...extra});
       },
       (fp,b) => network.sendBinary(fp,b),
@@ -519,6 +526,16 @@ export class TurquoiseApp {
       if(this.call?.fp===fp){this._endCallLocal(false);this._status('call ended','info',3000);}
       this._hideCallIncoming(); return;
     }
+    // Coordinator notifies existing circle members when a new peer joins.
+    // We offer our stream to that new peer to complete the full mesh.
+    if (type==='circle-peer-joined'&&msg.circle) {
+      const newFp=msg.newPeer;
+      if (newFp && this.circleCall?.localStream && !this.circleCall.remoteStreams.has(newFp)) {
+        this._attachCircleRemote(newFp);
+        this.net.offerWithStream(newFp, this.circleCall.localStream).catch(()=>{});
+      }
+      return;
+    }
     if (type==='permission-denied') {
       const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
       this._status(nick+': '+(msg.media||'mic')+' permission denied','err',8000);
@@ -580,7 +597,7 @@ export class TurquoiseApp {
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
     this._fileOwners.set(fileId,{fps:[...fps]});
     // Register fileId as circle-origin so ft._ctrl wrapper injects circle:true
-    if (isCircle) this._circleFileIds.add(fileId);
+    if (isCircle) this._circleFileIds.set(fileId, fps.length);
     fps.forEach(fp=>this.ft.send(file,fp,fileId));
     this._status('sending '+file.name+'…','info');
   }
@@ -826,7 +843,7 @@ export class TurquoiseApp {
     if (!fps.length) { this._sys('no peers in circle',true); return; }
     const video=callType==='stream';
     let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this._handleMediaError(e,null); return; }
-    this.circleCall={type:callType,phase:'connecting',localStream:s,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false};
+    this.circleCall={type:callType,phase:'connecting',localStream:s,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false,_inviters:new Set()};
     fps.forEach(fp=>{ this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname,circle:true}); this._attachCircleRemote(fp); });
     this._renderCircleCallPanel();
   }
@@ -834,13 +851,17 @@ export class TurquoiseApp {
   _onCircleCallInvite(fp, msg) {
     if (this.call) { this.net.sendCtrl(fp,{type:'call-decline',circle:true}); return; }
     const callType=msg.callType==='stream'?'stream':'walkie';
-    // If we're already in an active circle call, auto-accept new participants
-    // joining mid-call rather than showing a redundant incoming call popup.
+    // If already in an active circle call, auto-accept new participants.
     if (this.circleCall?.phase==='active'&&this.circleCall.localStream) {
       this.net.sendCtrl(fp,{type:'call-accept',circle:true});
       this._attachCircleRemote(fp); this._renderCircleCallPanel(); return;
     }
-    if (!this.circleCall) this.circleCall={type:callType,phase:'ringing',localStream:null,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false};
+    if (!this.circleCall) {
+      this.circleCall={type:callType,phase:'ringing',localStream:null,
+        remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false,
+        _inviters:new Set()};  // track ALL inviters so accept goes to all
+    }
+    this.circleCall._inviters.add(fp);
     this._showCallIncoming(fp,callType,msg.nick,true);
   }
 
@@ -850,15 +871,21 @@ export class TurquoiseApp {
     const video=this.circleCall.type==='stream';
     let s;
     if (this.circleCall.localStream) { s=this.circleCall.localStream; }
-    else { try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,null); return; } this.circleCall.localStream=s; }
+    else {
+      try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
+      catch(e) { this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,null); return; }
+      this.circleCall.localStream=s;
+    }
     this.circleCall.phase='active';
-    // Tell the original caller we accepted (they will offerWithStream to us)
-    this.net.sendCtrl(fp,{type:'call-accept',circle:true});
-    this._attachCircleRemote(fp);
-    // Also invite every other connected peer who isn't the original caller and
-    // isn't already in this call — so the circle call is truly multi-peer.
-    const others=this.net.getConnectedPeers().filter(p=>p!==fp&&!this.circleBlocked.has(p)&&!this.circleCall.remoteStreams.has(p));
-    others.forEach(p=>{ this.net.sendCtrl(p,{type:'call-invite',callType:this.circleCall.type,nick:this.id.nickname,circle:true}); this._attachCircleRemote(p); });
+
+    // Send call-accept to EVERY peer who invited us (they may all be waiting).
+    // Previously only sent to fp (the last inviter shown in the UI), which meant
+    // other inviters never called offerWithStream and their audio/video was missing.
+    const inviters = this.circleCall._inviters?.size ? this.circleCall._inviters : new Set([fp]);
+    inviters.forEach(p => {
+      this.net.sendCtrl(p,{type:'call-accept',circle:true});
+      this._attachCircleRemote(p);
+    });
     this._renderCircleCallPanel();
   }
 
@@ -867,7 +894,18 @@ export class TurquoiseApp {
   _onCircleCallAccepted(fp) {
     if (!this.circleCall?.localStream) return;
     this.circleCall.phase='active';
-    this.net.offerWithStream(fp,this.circleCall.localStream).then(()=>this._attachCircleRemote(fp)).catch(()=>{});
+    // Our stream goes to this new participant
+    this.net.offerWithStream(fp,this.circleCall.localStream)
+      .then(()=>this._attachCircleRemote(fp)).catch(()=>{});
+
+    // Coordinator role: tell every OTHER existing circle member about this new
+    // participant so they each do offerWithStream to fp and complete the mesh.
+    // Without this, existing members B and C would never exchange streams — only
+    // A (the initiator) would have streams to/from each of them.
+    this.circleCall.remoteStreams.forEach((_stream, existingFp) => {
+      if (existingFp === fp) return;
+      this.net.sendCtrl(existingFp, {type:'circle-peer-joined', newPeer:fp, circle:true});
+    });
     this._renderCircleCallPanel();
   }
 
