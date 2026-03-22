@@ -49,13 +49,17 @@ export class TurquoiseNetwork {
     this._wsOK       = false;
     this._dead       = false;
     this._known      = new Map();
+    this._present    = new Map();
     this._initiating = new Set();
     this._hbTimer    = null;
     this._ping       = null;
+    this._remoteHandlers = new Map();
     this._log        = TQLog.get();
 
     this.onPeerConnected         = null;
     this.onPeerDisconnected      = null;
+    this.onPeerPresenceChanged   = null;
+    this.onTransportStateChanged = null;
     this.onMessage               = null;
     this.onBinaryChunk           = null;
     this.onLog                   = null;
@@ -83,6 +87,7 @@ export class TurquoiseNetwork {
     if (this._dead) return;
     this._log.info(FILE, 'forceReconnect', 'forcing full reconnect');
     this._wsOK = false;
+    this._clearPresence();
     clearInterval(this._ping);
     if (this.ws) {
       const dead = this.ws; this.ws = null;
@@ -115,6 +120,7 @@ export class TurquoiseNetwork {
     ws.onerror   = () => {};
     ws.onclose   = e => {
       this._wsOK = false; clearInterval(this._ping);
+       this._clearPresence();
       if (this._dead) return;
       this._log.warn(FILE, 'ws', `closed code=${e.code}`);
       this.onSignalingDisconnected?.();
@@ -151,13 +157,31 @@ export class TurquoiseNetwork {
       return;
     }
 
-    if (type === 'peer') {
-      const fp = msg.fingerprint;
+    if (type === 'presence-snapshot' && Array.isArray(msg.peers)) {
+      const seen = new Set();
+      for (const peer of msg.peers) {
+        const fp = String(peer?.fingerprint || '').toLowerCase();
+        if (!fp || fp === this.id.fingerprint) continue;
+        seen.add(fp);
+        this._setPresent(fp, peer?.nick || fp.slice(0, 8), true);
+      }
+      for (const fp of [...this._present.keys()]) {
+        if (!seen.has(fp)) this._setPresent(fp, this._present.get(fp)?.nick || fp.slice(0, 8), false);
+      }
+      return;
+    }
+
+    if (type === 'peer-up' || type === 'peer') {
+      const fp = String(msg.fingerprint || '').toLowerCase();
       if (!fp || fp === this.id.fingerprint) return;
-      const k = this._known.get(fp) || { retry:0, timer:null };
-      k.nick = msg.nick || fp.slice(0,8);
-      this._known.set(fp, k);
-      if (!this.peers.has(fp)) this._initiate(fp, k.nick);
+      this._setPresent(fp, msg.nick || fp.slice(0,8), true);
+      return;
+    }
+
+    if (type === 'peer-down') {
+      const fp = String(msg.fingerprint || '').toLowerCase();
+      if (!fp || fp === this.id.fingerprint) return;
+      this._setPresent(fp, this._present.get(fp)?.nick || fp.slice(0,8), false);
       return;
     }
 
@@ -208,7 +232,7 @@ export class TurquoiseNetwork {
       ctrl:null, data:null, stream:null,
       makingOffer:false, ignoreOffer:false, pendingIce:[],
       hbMiss:0, hbTimer:null, _resolve:null, _reject:null,
-      onRemoteStream: null,   // set via setRemoteStreamHandler(fp, fn)
+      onRemoteStream: this._remoteHandlers.get(fp) || null,
     };
 
     pc.onicecandidate = e => {
@@ -275,6 +299,7 @@ export class TurquoiseNetwork {
     this._log.info(FILE, 'ready', `${fp.slice(0,8)} (${this.connTier(fp)})`);
     this.onLog?.(`▲ ${ps.nick}`);
     this.onPeerConnected?.(fp, ps.nick);
+    this.onTransportStateChanged?.(fp, this.transportState(fp));
   }
 
   _teardown(fp, reason) {
@@ -291,6 +316,7 @@ export class TurquoiseNetwork {
       this.onLog?.(`▼ ${ps.nick}`);
       this.onPeerDisconnected?.(fp, ps.nick);
     }
+    this.onTransportStateChanged?.(fp, this.transportState(fp));
 
     const k = this._known.get(fp);
     if (k && !this._dead) {
@@ -300,7 +326,9 @@ export class TurquoiseNetwork {
   }
 
   _reconnectKnown() {
-    for (const [fp, k] of this._known) if (!this.peers.has(fp)) this._initiate(fp, k.nick);
+    for (const [fp, k] of this._known) {
+      if (this._present.has(fp) && !this.peers.has(fp)) this._initiate(fp, k.nick);
+    }
   }
 
   // ── Signaling handlers ────────────────────────────────────────────────────
@@ -421,7 +449,7 @@ export class TurquoiseNetwork {
     if (ps?.ctrl?.readyState === 'open') {
       try { ps.ctrl.send(JSON.stringify(msg)); return true; } catch {}
     }
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.canRelay(fp) && this.ws?.readyState === WebSocket.OPEN) {
       try { this.ws.send(JSON.stringify({...msg, to:fp, _relay:true})); return true; } catch {}
     }
     return false;
@@ -433,7 +461,7 @@ export class TurquoiseNetwork {
       if (ps.data.bufferedAmount > HIGH) return false;
       try { ps.data.send(buf); return true; } catch {}
     }
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.canRelay(fp) && this.ws?.readyState === WebSocket.OPEN) {
       try { this.ws.send(JSON.stringify({type:'bin-relay', to:fp, data:ab2b64(buf)})); return true; } catch {}
     }
     return false;
@@ -449,12 +477,15 @@ export class TurquoiseNetwork {
 
   /** Register handler called when a remote track stream arrives for fp. */
   setRemoteStreamHandler(fp, handler) {
+    if (!fp) return;
+    this._remoteHandlers.set(fp, handler);
     const ps = this.peers.get(fp);
     if (ps) ps.onRemoteStream = handler;
   }
 
   /** Add local tracks and send offer-reneg (call initiator side). */
-  async offerWithStream(fp, stream) {
+  async offerWithStream(fp, stream, extra={}) {
+    this.ensurePeer(fp);
     const ps = this.peers.get(fp);
     if (!ps) return;
     // Use addTransceiver (NOT addTrack + createOffer) to append new audio/video
@@ -468,7 +499,7 @@ export class TurquoiseNetwork {
       // setLocalDescription() with no args = implicit offer. It appends new
       // m-lines after existing ones rather than reordering them.
       await ps.pc.setLocalDescription();
-      this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
+      this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint, ...extra});
     } catch(e) { this._log.warn(FILE,'offerWithStream',e.message); }
   }
 
@@ -478,14 +509,15 @@ export class TurquoiseNetwork {
    * @param {string} sdp  — the SDP from offer-reneg
    * @param {MediaStream} stream
    */
-  async answerWithStream(fp, sdp, stream) {
+  async answerWithStream(fp, sdp, stream, extra={}) {
+    this.ensurePeer(fp);
     const ps = this.peers.get(fp);
     if (!ps || !sdp) return;
     try {
       await ps.pc.setRemoteDescription({type:'offer', sdp});
       stream.getTracks().forEach(t => ps.pc.addTrack(t, stream));
       await ps.pc.setLocalDescription();
-      this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
+      this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint, ...extra});
     } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
   }
 
@@ -515,6 +547,30 @@ export class TurquoiseNetwork {
     return [...this.peers.entries()].filter(([,ps])=>ps.ready).map(([fp])=>fp);
   }
 
+  listPresentPeers() {
+    return [...new Set([...this._present.keys(), ...this.getConnectedPeers()])];
+  }
+
+  canRelay(fp) {
+    return !!fp && this._wsOK && this._present.has(fp);
+  }
+
+  canDirect(fp) {
+    return this.isReady(fp);
+  }
+
+  transportState(fp) {
+    if (this.canDirect(fp)) return 'p2p';
+    if (this.canRelay(fp)) return 'relay';
+    return 'offline';
+  }
+
+  ensurePeer(fp, nick) {
+    if (!fp) return;
+    this.addKnownPeer(fp, nick);
+    if (this._present.has(fp) && !this.peers.has(fp)) this._initiate(fp, nick || this._known.get(fp)?.nick);
+  }
+
   /**
    * Pre-register a peer so connections are retried on page reload without
    * waiting for the signaling server to broadcast their presence.
@@ -532,8 +588,9 @@ export class TurquoiseNetwork {
     if (!fp || this._known.has(fp)) return;
     const k = { retry: 0, timer: null, nick: nick || fp.slice(0, 8) };
     this._known.set(fp, k);
-    // If signaling is already up, initiate immediately (async so caller returns first)
-    if (this._wsOK && !this.peers.has(fp)) {
+    // Wait for live presence before initiating so offline known peers do not
+    // look reachable or get stuck in a false "connecting" state.
+    if (this._wsOK && this._present.has(fp) && !this.peers.has(fp)) {
       setTimeout(() => this._initiate(fp, k.nick), 0);
     }
     this._log.debug(FILE, 'addKnownPeer', `pre-registered ${fp.slice(0,8)}`);
@@ -545,11 +602,8 @@ export class TurquoiseNetwork {
   }
 
   connTier(fp) {
-    const ps = this.peers.get(fp);
-    if (!ps?.ready) return 'disconnected';
-    if (ps.ctrl?.readyState === 'open') return 'p2p';
-    if (this._wsOK) return 'ws-relay';
-    return 'disconnected';
+    const tier = this.transportState(fp);
+    return tier === 'offline' ? 'disconnected' : tier;
   }
 
   destroy() {
@@ -559,5 +613,31 @@ export class TurquoiseNetwork {
     for (const fp of [...this.peers.keys()]) this._teardown(fp, 'destroy');
     try { this.ws?.close(1000); } catch {}
     this.ws = null;
+  }
+
+  _setPresent(fp, nick, present) {
+    if (!fp || fp === this.id.fingerprint) return;
+    const prev = this._present.get(fp);
+    const nextNick = nick || prev?.nick || fp.slice(0, 8);
+    if (present) this._present.set(fp, { nick: nextNick });
+    else this._present.delete(fp);
+
+    if (!this._known.has(fp)) this.addKnownPeer(fp, nextNick);
+    else if (this._known.get(fp).nick !== nextNick) this._known.get(fp).nick = nextNick;
+
+    const changed = !!prev !== !!present || prev?.nick !== nextNick;
+    if (present && !this.peers.has(fp)) this._initiate(fp, nextNick);
+    if (changed) this.onPeerPresenceChanged?.(fp, nextNick, present);
+    if (changed || this.peers.has(fp)) this.onTransportStateChanged?.(fp, this.transportState(fp));
+  }
+
+  _clearPresence() {
+    if (!this._present.size) return;
+    const gone = [...this._present.entries()];
+    this._present.clear();
+    gone.forEach(([fp, v]) => {
+      this.onPeerPresenceChanged?.(fp, v?.nick || fp.slice(0, 8), false);
+      this.onTransportStateChanged?.(fp, this.transportState(fp));
+    });
   }
 }

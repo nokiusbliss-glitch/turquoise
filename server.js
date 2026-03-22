@@ -50,6 +50,7 @@ const RELAY_TYPES = new Set([
   'file-meta','file-end','file-abort','bin-relay',
   'nick-update','game','folder-manifest',
   'ping','pong','p2p-relay','tool-action',
+  'delivery-ack','transfer-state','call-state',
 ]);
 
 const MIME = {
@@ -123,6 +124,12 @@ const rateOk = (ipAddr) => {
 setInterval(() => { const now=Date.now(); for(const[k,v] of rates) if(now>v.resetAt) rates.delete(k); }, 30_000).unref();
 
 const send = (ws, obj) => ws.readyState === WebSocket.OPEN && (ws.send(JSON.stringify(obj)), true);
+const broadcast = (obj, exceptFp = null) => {
+  for (const [pfp, pw] of peers) {
+    if (exceptFp && pfp === exceptFp) continue;
+    send(pw, obj);
+  }
+};
 
 httpServer.on('upgrade', (req, socket, head) => {
   let pn; try { pn = new URL(req.url||'/', 'http://x').pathname; } catch { socket.destroy(); return; }
@@ -161,18 +168,27 @@ wss.on('connection', (ws, req) => {
       const nick = (msg.nick||fp.slice(0,8)).slice(0,32);
       peers.set(fp, ws); fpOf.set(ws, fp); nicks.set(fp, nick);
       slog('CONNECT', {fp:fp.slice(0,8), nick, n:peers.size});
-      // Deliver ICE config + existing peer list to newcomer
+      // Deliver ICE config + presence snapshot to newcomer, then announce the
+      // newcomer to everyone else so existing tabs track relay reachability.
       send(ws, {type:'ice-config', iceServers:ICE_SERVERS});
-      for (const [efp] of peers) {
-        if (efp !== fp) send(ws, {type:'peer', fingerprint:efp, nick:nicks.get(efp)||efp.slice(0,8)});
-      }
+      send(ws, {
+        type: 'presence-snapshot',
+        peers: [...peers.keys()]
+          .filter(efp => efp !== fp)
+          .map(efp => ({ fingerprint: efp, nick: nicks.get(efp) || efp.slice(0, 8) })),
+      });
+      broadcast({ type:'peer-up', fingerprint:fp, nick }, fp);
       return;
     }
 
     if (msg.type === 'ping') { send(ws, {type:'pong'}); return; }
     if (msg.type === 'pong') return;
     if (!fp) return;
-    if (msg.type === 'nick-update' && msg.nick) nicks.set(fp, String(msg.nick).slice(0,32));
+    if (msg.type === 'nick-update' && msg.nick) {
+      const nick = String(msg.nick).slice(0,32);
+      nicks.set(fp, nick);
+      broadcast({ type:'peer-up', fingerprint:fp, nick }, fp);
+    }
     if (!RELAY_TYPES.has(msg.type)) return;
 
     // ── Relay ─────────────────────────────────────────────────────────────
@@ -191,6 +207,7 @@ wss.on('connection', (ws, req) => {
     if (mfp && peers.get(mfp) === ws) {
       peers.delete(mfp); nicks.delete(mfp);
       slog('DISCONNECT', {fp:mfp.slice(0,8), n:peers.size});
+      broadcast({ type:'peer-down', fingerprint:mfp }, mfp);
     }
     fpOf.delete(ws);
   });
