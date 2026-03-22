@@ -301,7 +301,7 @@ export class TurquoiseApp {
     const bar = $('suggest-bar'); if (!bar) return;
     const PHRASES = [
       'hey','on my way','be right back','ok','got it',
-      'can you hear me?','send the file','try again','sounds good','let's go',
+      'can you hear me?','send the file','try again','sounds good','Play a game?',
     ];
     const EMOJI = ['◈','◉','▸','△','▷','⬡','✦','✧','⟐','⊞','◌','◎','⋄','◆','❖'];
     const pRow = bar.querySelector('.sg-phrases');
