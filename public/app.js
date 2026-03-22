@@ -655,9 +655,11 @@ export class TurquoiseApp {
     const fps = connected.filter(_peerOk);
     if (!fps.length) {
       const waiting = connected.length > 0;
+      this._log.warn('app','_queueFile', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no peers in circle':'peer offline'}`, { active:sid, circle:isCircle, connected:connected.length });
       this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
       return;
     }
+    this._log.info('app','_queueFile', `sending ${file.name}`, { size:file.size, peers:fps.length, circle:isCircle });
     const fileId=crypto.randomUUID();
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
@@ -698,6 +700,7 @@ export class TurquoiseApp {
   }
 
   _onFileErr(fileId, errMsg) {
+    this._log.warn('app','_onFileErr', errMsg, { fileId });
     this._fileOwners.delete(fileId);
     document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
       card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove(); card.querySelector('.file-cancel')?.remove();
@@ -718,6 +721,7 @@ export class TurquoiseApp {
     const fps = connected.filter(_peerOk);
     if (!fps.length) {
       const waiting = connected.length > 0;
+      this._log.warn('app','_sendFolder', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no peers in circle':'peer offline'}`, { active:sid, circle:isCircle, connected:connected.length });
       this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
       return;
     }
@@ -732,6 +736,7 @@ export class TurquoiseApp {
 
     const fmsg={id:folderId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'folder',folderId,name:folderName,totalSize,fileCount:fileList.length,manifest:fileList,ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFolderCard(fmsg));
+    this._log.info('app','_sendFolder', `sending folder ${folderName}`, { files:fileList.length, totalSize, peers:fps.length, circle:isCircle });
 
     fps.forEach(fp=>{
       this.net.sendCtrl(fp,{type:'folder-manifest',folderId,name:folderName,totalSize,files:fileList,circle:isCircle||undefined});

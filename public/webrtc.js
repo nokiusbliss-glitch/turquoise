@@ -283,6 +283,11 @@ export class TurquoiseNetwork {
       dc.onclose   = () => {
         this._log.debug(FILE, 'dc', `ctrl closed ${fp.slice(0,8)}`);
         if (!this.peers.has(fp)) return;
+        if (ps.ready) {
+          ps.ready = false;
+          this.onLog?.(`▼ ${ps.nick}`);
+          this.onPeerDisconnected?.(fp, ps.nick);
+        }
         clearTimeout(ps._ctrlCloseTimer);
         ps._ctrlCloseTimer = setTimeout(() => {
           const cur = this.peers.get(fp);
@@ -432,6 +437,10 @@ export class TurquoiseNetwork {
     // An *answer* is always a valid response to our own offer and must be applied.
     // Blocking it here left the impolite peer stuck in 'have-local-offer' forever,
     // so its DataChannels never opened — causing one-way-only connectivity.
+    if (ps.pc.signalingState !== 'have-local-offer') {
+      this._log.debug(FILE, '_onAnswer', `${msg.from.slice(0,8)}: ignoring stale answer (state=${ps.pc.signalingState})`);
+      return;
+    }
     try {
       await ps.pc.setRemoteDescription({type:'answer', sdp:msg.sdp});
       ps.ignoreOffer = false; // safe to clear now — collision resolved
@@ -625,7 +634,7 @@ export class TurquoiseNetwork {
   }
 
   getConnectedPeers() {
-    return [...this.peers.entries()].filter(([,ps])=>ps.ready).map(([fp])=>fp);
+    return [...this.peers.keys()].filter(fp => this.isReady(fp));
   }
 
   /**
@@ -654,7 +663,8 @@ export class TurquoiseNetwork {
 
   /** True if peer is connected and ready. Avoids exposing internal peers Map. */
   isReady(fp) {
-    return this.peers.get(fp)?.ready === true;
+    const ps = this.peers.get(fp);
+    return ps?.ready === true && ps.ctrl?.readyState === 'open';
   }
 
   /** True when the binary/file channel is ready for transfer. */
