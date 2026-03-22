@@ -972,11 +972,14 @@ export class TurquoiseApp {
     }
 
     const remote=document.createElement('div');
-    remote.className='call-video-tile'; remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
-    if (c.remoteStream) { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); }
-    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=(this.peers.get(c.fp)?.nick||c.fp.slice(0,8))+(c.type==='walkie'?' 🎤':''); remote.appendChild(lbl);
+    // walkie-tile class triggers audio-only CSS (centered name + mic pulse, no video box)
+    remote.className='call-video-tile'+(c.type==='walkie'?' walkie-tile':'');
+    remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
+    if (c.remoteStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); }
+    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(c.fp)?.nick||c.fp.slice(0,8); remote.appendChild(lbl);
     if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
-    const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'');
+    // pip-hidden for walkie: empty PIP div is confusing when there is no local video
+    const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'')+(c.type==='walkie'?' pip-hidden':'');
     if (c.localStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=c.localStream; pip.appendChild(v); }
     panel.appendChild(pip);
     this._pipCleanup=this._makePIPDraggable(pip);
@@ -1011,7 +1014,7 @@ export class TurquoiseApp {
     // Render a tile per remote peer (audio walkie shows name-only tile; video shows stream)
     cc.remoteStreams.forEach((stream, fp) => {
       const tile = document.createElement('div');
-      tile.className = 'call-video-tile';
+      tile.className = 'call-video-tile' + (cc.type === 'walkie' ? ' walkie-tile' : '');
       tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
       if (cc.type === 'stream') {
         const v = document.createElement('video');
@@ -1020,14 +1023,14 @@ export class TurquoiseApp {
       }
       const lbl = document.createElement('div');
       lbl.className = 'vtile-label';
-      lbl.textContent = (this.peers.get(fp)?.nick || fp.slice(0,8)) + (cc.type==='walkie'?' 🎤':'');
+      lbl.textContent = this.peers.get(fp)?.nick || fp.slice(0,8);
       tile.appendChild(lbl);
       vids.appendChild(tile);
     });
 
-    // Local PIP (video mode only)
+    // Local PIP (video mode only); hidden for walkie — no local video to show
     const pip = document.createElement('div');
-    pip.className = 'call-pip' + (cc.camOff?' cam-off':'');
+    pip.className = 'call-pip' + (cc.camOff?' cam-off':'') + (cc.type==='walkie'?' pip-hidden':'');
     if (cc.localStream && cc.type === 'stream') {
       const v = document.createElement('video');
       v.autoplay=true; v.playsInline=true; v.muted=true; v.srcObject=cc.localStream;

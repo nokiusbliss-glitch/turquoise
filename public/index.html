@@ -449,50 +449,102 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   backdrop-filter:blur(4px);
 }
 #call-panel.visible{display:flex}
+
+/* Video area fills the panel; controls float above it */
 #call-videos{
   display:flex;gap:12px;flex-wrap:wrap;justify-content:center;
-  /* No fixed width — tiles use flex:1 with min/max so they reflow on mobile */
-  width:100%;padding:16px;
+  width:100%;
+  /* top padding makes room for the fixed controls bar */
+  padding:56px 16px 16px;
+  flex:1;align-content:center;
 }
 .call-video-tile{
-  /* flex:1 + min/max instead of fixed 480px — works on any screen */
-  flex:1;min-width:200px;max-width:480px;min-height:160px;
+  flex:1;min-width:200px;max-width:480px;min-height:200px;
   background:var(--bg2);position:relative;overflow:hidden;
   clip-path:polygon(0 0,calc(100%-14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100%-14px));
 }
-.call-video-tile video{width:100%;height:100%;object-fit:cover;display:block;min-height:160px}
+.call-video-tile video{
+  width:100%;height:100%;object-fit:cover;display:block;min-height:200px;
+}
+/* Video call: peer name at bottom-left */
 .call-video-tile .vtile-label{
   position:absolute;bottom:6px;left:10px;font-size:9px;
   color:var(--tq);letter-spacing:.1em;
   background:rgba(4,10,9,.6);padding:2px 6px;
 }
-.call-pip{
-  position:fixed;width:120px;height:80px;z-index:101;
-  bottom:80px;right:16px;cursor:grab;
+
+/* ── Walkie (audio-only) tile ── */
+.call-video-tile.walkie-tile{
+  min-height:130px;max-width:200px;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;
 }
-@media(min-width:900px){.call-pip{right:276px}}
+.call-video-tile.walkie-tile .vtile-label{
+  position:static;background:none;font-size:11px;
+  color:var(--text);letter-spacing:.05em;padding:0;
+}
+/* Pulsing mic ring for audio-only tiles */
+.walkie-tile::before{
+  content:'🎤';font-size:1.6rem;line-height:1;
+  animation:walkie-pulse 1.6s ease-in-out infinite;
+}
+@keyframes walkie-pulse{
+  0%,100%{opacity:.5;transform:scale(1)}
+  50%{opacity:1;transform:scale(1.12)}
+}
+
+/* ── PIP (local video — video calls only) ── */
+.call-pip{
+  position:fixed;width:120px;height:80px;z-index:102;
+  /* bottom-left keeps it away from the top-right controls */
+  bottom:20px;left:16px;cursor:grab;
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  border:1px solid var(--tq3);
+  box-shadow:0 4px 16px rgba(0,0,0,.6);
+}
+.call-pip.pip-hidden{display:none}
 .call-pip video{width:100%;height:100%;object-fit:cover;display:block}
 .call-pip.cam-off::after{
   content:'CAM OFF';position:absolute;inset:0;
   background:var(--bg0);display:flex;align-items:center;justify-content:center;
   font-size:8px;letter-spacing:.2em;color:var(--mute);
 }
+
+/* ── Call controls — fixed top-right strip ── */
+/* Float above the video so they never push the layout */
 #call-controls{
-  display:flex;gap:8px;align-items:center;justify-content:center;
-  flex-wrap:wrap;padding:10px;flex-shrink:0;
+  position:fixed;top:12px;right:12px;z-index:103;
+  display:flex;gap:6px;align-items:center;
+  background:rgba(4,10,9,.75);
+  border:1px solid var(--mute);
+  padding:6px 8px;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  backdrop-filter:blur(6px);
 }
 .ctrl-btn{
-  font-family:inherit;font-size:10px;letter-spacing:.08em;
+  font-family:inherit;font-size:10px;letter-spacing:.06em;
   background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
-  padding:8px 16px;cursor:pointer;min-width:80px;
-  clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,7px 100%,0 calc(100%-7px));
-  transition:all .15s;
+  padding:6px 12px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+  transition:all .15s;white-space:nowrap;
 }
 .ctrl-btn:hover{border-color:var(--tq);color:var(--tq)}
 .ctrl-btn.active{background:rgba(64,224,208,.1);border-color:var(--tq);color:var(--tq)}
-.ctrl-btn.danger{border-color:rgba(255,96,64,.4)}
-.ctrl-btn.danger:hover{background:rgba(255,96,64,.1);border-color:var(--err);color:var(--err)}
-#call-stats{font-size:9px;color:var(--dim);padding:4px 14px;letter-spacing:.05em}
+/* End call: red, prominent, slightly larger */
+.ctrl-btn.danger{
+  border-color:var(--err);color:var(--err);
+  background:rgba(255,96,64,.12);
+  font-weight:700;padding:6px 16px;
+}
+.ctrl-btn.danger:hover{background:rgba(255,96,64,.25);border-color:var(--err)}
+
+/* RTT stat — small overlay bottom-right of video area */
+#call-stats{
+  position:fixed;bottom:16px;right:16px;z-index:101;
+  font-size:8px;color:var(--dim);letter-spacing:.06em;
+  background:rgba(4,10,9,.5);padding:2px 6px;
+  pointer-events:none;
+}
 
 /* ── Incoming call overlay ───────────────────────────────────────────────── */
 #call-incoming{
