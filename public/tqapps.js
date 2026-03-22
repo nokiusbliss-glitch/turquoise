@@ -670,7 +670,7 @@ export class Chess {
   handleMsg(msg) {
     const {action}=msg;
     if (action==='invite') { this._invited=true; this.myColor='b'; this.state='waiting'; this._draw(); }
-    else if (action==='accept') { this.state='active'; this._draw(); }
+    else if (action==='accept') { this.myColor='w'; this.state='active'; this._draw(); }
     else if (action==='move') { this._applyMove(msg.from,msg.to,false); }
     else if (action==='resign') { this.result='resign'; this.winner=this.myColor==='w'?'w':'b'; this.state='done'; this._draw(); }
     else if (action==='reset') { this._resetGame(); this._draw(); }

@@ -774,6 +774,10 @@ export class TurquoiseApp {
       const key = fp + ':' + gameType;
       // Always create a fresh game so a new invite = new session
       const game = this._makeGame(fp, gameType);
+      // Inviter is always white; set immediately so the board renders correctly
+      // while waiting for the accept. The accept handler also sets it but this
+      // ensures the waiting state shows the right orientation and "you: white".
+      if (gameType === 'chess') game.myColor = 'w';
       this.games.set(key, game);
       this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
       // Persist a record so chat history survives reload
