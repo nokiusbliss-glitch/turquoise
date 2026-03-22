@@ -558,22 +558,25 @@ export class TurquoiseNetwork {
     if (!ps || !sdp) return;
     try {
       await ps.pc.setRemoteDescription({type:'offer', sdp});
-      // Use replaceTrack on transceivers created by setRemoteDescription
-      // instead of addTrack. addTrack adds NEW transceivers which changes the
-      // m-line count/order → Chrome rejects the answer with "m-lines order mismatch".
-      // After setRemoteDescription the PC already has transceivers for each
-      // audio/video m-line from the offer; we just need to assign our tracks.
-      const tracks = stream.getTracks();
-      for (const track of tracks) {
-        const tc = ps.pc.getTransceivers().find(t =>
-          t.receiver.track?.kind === track.kind && !t.sender.track
-        );
+      // Parse m-line kinds from the offer SDP to determine transceiver order.
+      // After setRemoteDescription the PC has one transceiver per m-line in the
+      // same order. We assign our tracks by matching kind in that order.
+      // This avoids calling addTrack (which appends new m-lines → order mismatch)
+      // and avoids relying on receiver.track.kind which is null until media flows.
+      const mKinds = sdp.split('\nm=').slice(1).map(s => s.split(/[ \r]/)[0]); // ['audio','video',...]
+      const tcs    = ps.pc.getTransceivers(); // same order as m-lines
+      const kindQueues = {};
+      mKinds.forEach((kind, i) => {
+        if (!kindQueues[kind]) kindQueues[kind] = [];
+        if (tcs[i]) kindQueues[kind].push(tcs[i]);
+      });
+      for (const track of stream.getTracks()) {
+        const tc = kindQueues[track.kind]?.shift();
         if (tc) {
           await tc.sender.replaceTrack(track);
           if (tc.direction === 'recvonly') tc.direction = 'sendrecv';
         } else {
-          // Fallback: no matching transceiver found — add track normally
-          ps.pc.addTrack(track, stream);
+          ps.pc.addTrack(track, stream); // shouldn't happen but safe fallback
         }
       }
       await ps.pc.setLocalDescription();
