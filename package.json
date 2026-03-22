@@ -6,11 +6,8 @@
   "description": "Local-first cryptographic peer-to-peer communication",
   "scripts": {
     "start": "node server.js",
-    "dev":   "node --watch server.js",
-    "test":  "node --test"
+    "dev":   "node --watch server.js"
   },
   "engines": { "node": ">=18" },
-  "dependencies": {
-    "ws": "^8.0.0"
-  }
+  "dependencies": { "ws": "8.19.0" }
 }
