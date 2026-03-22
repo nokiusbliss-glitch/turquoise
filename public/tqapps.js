@@ -13,9 +13,10 @@
 // ── App Registry ──────────────────────────────────────────────────────────────
 
 export const REGISTRY = [
-  { id: 'ttt',  label: 'tic tac toe',          icon: '⊞', p2pOnly: true,  cls: null },
-  { id: 'sps',  label: 'stone paper scissors',  icon: '✂️', p2pOnly: true,  cls: null },
-  { id: 'memo', label: 'voice memo',            icon: '🎤', p2pOnly: false, cls: null },
+  { id: 'ttt',   label: 'tic tac toe',          icon: '⊞', p2pOnly: true,  cls: null },
+  { id: 'sps',   label: 'stone paper scissors',  icon: '✂️', p2pOnly: true,  cls: null },
+  { id: 'chess', label: 'chess',                 icon: '♟', p2pOnly: true,  cls: null },
+  { id: 'memo',  label: 'voice memo',            icon: '🎤', p2pOnly: false, cls: null },
 ];
 
 // ── TicTacToe ─────────────────────────────────────────────────────────────────
@@ -527,7 +528,316 @@ export class StonePaperScissors {
   destroy() { this._dom = null; }
 }
 
+// ── Chess ─────────────────────────────────────────────────────────────────────
+// Full legal-move enforcement: castling, en-passant, promotion (auto-queen),
+// check, checkmate, stalemate. No external libraries.
+
+const CH_INIT = [
+  'r','n','b','q','k','b','n','r',
+  'p','p','p','p','p','p','p','p',
+  '','','','','','','','',
+  '','','','','','','','',
+  '','','','','','','','',
+  '','','','','','','','',
+  'P','P','P','P','P','P','P','P',
+  'R','N','B','Q','K','B','N','R',
+];
+
+const CH_GLYPHS = {
+  K:'♔',Q:'♕',R:'♖',B:'♗',N:'♘',P:'♙',
+  k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟',
+};
+
+function chColor(p) { return p === p.toUpperCase() ? 'w' : 'b'; }
+
+function chMoves(board, sq, ep, castle) {
+  // Returns array of target squares for piece on sq (does NOT filter for check)
+  const p = board[sq]; if (!p) return [];
+  const col = chColor(p), opp = col==='w'?'b':'w';
+  const r = Math.floor(sq/8), c = sq%8;
+  const out = [], t = p.toLowerCase();
+
+  const add = (nr, nc) => {
+    if (nr<0||nr>7||nc<0||nc>7) return false;
+    const ti = nr*8+nc;
+    if (!board[ti]) { out.push(ti); return true; }
+    if (chColor(board[ti])===opp) { out.push(ti); return false; }
+    return false;
+  };
+  const slide = (dr, dc) => { let nr=r+dr, nc=c+dc; while(nr>=0&&nr<8&&nc>=0&&nc<8) { if (!add(nr,nc)) break; nr+=dr; nc+=dc; } };
+
+  if (t==='p') {
+    const dir = col==='w'?-1:1, start = col==='w'?6:1;
+    const f1 = (r+dir)*8+c;
+    if (f1>=0&&f1<64&&!board[f1]) {
+      out.push(f1);
+      const f2=(r+2*dir)*8+c;
+      if (r===start&&!board[f2]) out.push(f2);
+    }
+    for (const dc of [-1,1]) {
+      const nc=c+dc, nr=r+dir, ti=nr*8+nc;
+      if (nc>=0&&nc<8&&nr>=0&&nr<8) {
+        if (board[ti]&&chColor(board[ti])===opp) out.push(ti);
+        if (ti===ep) out.push(ti);
+      }
+    }
+  } else if (t==='n') {
+    for (const [dr,dc] of [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]) add(r+dr,c+dc);
+  } else if (t==='b') {
+    for (const [dr,dc] of [[-1,-1],[-1,1],[1,-1],[1,1]]) slide(dr,dc);
+  } else if (t==='r') {
+    for (const [dr,dc] of [[-1,0],[1,0],[0,-1],[0,1]]) slide(dr,dc);
+  } else if (t==='q') {
+    for (const [dr,dc] of [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]]) slide(dr,dc);
+  } else if (t==='k') {
+    for (const [dr,dc] of [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]]) add(r+dr,c+dc);
+    // Castling
+    if (castle) {
+      const row = col==='w'?7:0, kSq = row*8+4;
+      if (sq===kSq) {
+        if (castle[col+'K'] && !board[kSq+1] && !board[kSq+2]) out.push(kSq+2);
+        if (castle[col+'Q'] && !board[kSq-1] && !board[kSq-2] && !board[kSq-3]) out.push(kSq-2);
+      }
+    }
+  }
+  return out;
+}
+
+function chAttacked(board, sq, byColor) {
+  // Is sq attacked by byColor?
+  for (let i=0;i<64;i++) {
+    const p=board[i]; if(!p||chColor(p)!==byColor) continue;
+    if (chMoves(board,i,-1,null).includes(sq)) return true;
+  }
+  return false;
+}
+
+function chKingSq(board, col) {
+  const k = col==='w'?'K':'k';
+  return board.indexOf(k);
+}
+
+function chLegalMoves(board, sq, ep, castle) {
+  const p=board[sq]; if(!p) return [];
+  const col=chColor(p);
+  return chMoves(board,sq,ep,castle).filter(to => {
+    const b2=[...board]; b2[to]=b2[sq]; b2[sq]='';
+    // En-passant capture removes the pawn
+    if (p.toLowerCase()==='p' && to===ep && ep>=0) {
+      const dir=col==='w'?1:-1; b2[to+dir*8]='';
+    }
+    // Castling: king must not pass through check
+    if (p.toLowerCase()==='k' && Math.abs(to-sq)===2) {
+      const mid=(sq+to)/2;
+      if (chAttacked(b2,sq,col==='w'?'b':'w')) return false;
+      if (chAttacked(b2,mid,col==='w'?'b':'w')) return false;
+    }
+    return !chAttacked(b2, chKingSq(b2,col), col==='w'?'b':'w');
+  });
+}
+
+function chAllLegal(board, col, ep, castle) {
+  const moves=[];
+  for (let i=0;i<64;i++) {
+    if (board[i]&&chColor(board[i])===col) {
+      for (const to of chLegalMoves(board,i,ep,castle)) moves.push([i,to]);
+    }
+  }
+  return moves;
+}
+
+export class Chess {
+  constructor(peerFp, myFp, sendFn, onCloseFn) {
+    this.peerFp  = peerFp;
+    this.myFp    = myFp;
+    this.send    = sendFn;
+    this.onClose = onCloseFn;
+
+    this.board   = [...CH_INIT];
+    this.turn    = 'w';
+    this.myColor = null;   // set on accept/invite
+    this.ep      = -1;     // en-passant target square
+    this.castle  = {wK:true,wQ:true,bK:true,bQ:true};
+    this.state   = 'waiting';
+    this.result  = null;   // null | 'checkmate' | 'stalemate' | 'resign'
+    this.winner  = null;   // 'w'|'b'|null
+    this.selected= null;   // selected square index
+    this.legalTos= [];     // legal destinations for selected piece
+    this._invited= false;
+    this._dom    = null;
+  }
+
+  handleMsg(msg) {
+    const {action}=msg;
+    if (action==='invite') { this._invited=true; this.myColor='b'; this.state='waiting'; this._draw(); }
+    else if (action==='accept') { this.state='active'; this._draw(); }
+    else if (action==='move') { this._applyMove(msg.from,msg.to,false); }
+    else if (action==='resign') { this.result='resign'; this.winner=this.myColor==='w'?'w':'b'; this.state='done'; this._draw(); }
+    else if (action==='reset') { this._resetGame(); this._draw(); }
+  }
+
+  _accept() {
+    this.myColor='b'; this.state='active';
+    this.send({gameType:'chess',action:'accept'});
+    this._draw();
+  }
+
+  _resetGame() {
+    this.board=[...CH_INIT]; this.turn='w'; this.ep=-1;
+    this.castle={wK:true,wQ:true,bK:true,bQ:true};
+    this.state='active'; this.result=null; this.winner=null;
+    this.selected=null; this.legalTos=[];
+  }
+
+  _requestReset() { this._resetGame(); this.send({gameType:'chess',action:'reset'}); this._draw(); }
+  _resign() { this.result='resign'; this.winner=this.myColor==='w'?'b':'w'; this.state='done'; this.send({gameType:'chess',action:'resign'}); this._draw(); }
+
+  _selectSquare(sq) {
+    if (this.state!=='active'||this.turn!==this.myColor) return;
+    const p=this.board[sq];
+    // If clicking a legal destination — make the move
+    if (this.selected!==null && this.legalTos.includes(sq)) {
+      this._applyMove(this.selected, sq, true); return;
+    }
+    // Select own piece
+    if (p && chColor(p)===this.myColor) {
+      this.selected=sq;
+      this.legalTos=chLegalMoves(this.board,sq,this.ep,this.castle);
+    } else {
+      this.selected=null; this.legalTos=[];
+    }
+    this._draw();
+  }
+
+  _applyMove(from, to, local) {
+    const b=this.board, p=b[from];
+    if (!p) return;
+    const col=chColor(p), opp=col==='w'?'b':'w';
+
+    // En-passant capture
+    let newEp=-1;
+    if (p.toLowerCase()==='p' && to===this.ep && this.ep>=0) {
+      const dir=col==='w'?1:-1; b[to+dir*8]='';
+    }
+    // Double pawn push — set ep square
+    if (p.toLowerCase()==='p' && Math.abs(to-from)===16) {
+      newEp=(from+to)/2;
+    }
+    // Castling rook move
+    if (p.toLowerCase()==='k' && Math.abs(to-from)===2) {
+      const row=Math.floor(from/8);
+      if (to>from) { b[row*8+5]=b[row*8+7]; b[row*8+7]=''; }
+      else         { b[row*8+3]=b[row*8+0]; b[row*8+0]=''; }
+    }
+    // Update castling rights
+    if (p==='K') { this.castle.wK=false; this.castle.wQ=false; }
+    if (p==='k') { this.castle.bK=false; this.castle.bQ=false; }
+    if (from===0||to===0) this.castle.bQ=false;
+    if (from===7||to===7) this.castle.bK=false;
+    if (from===56||to===56) this.castle.wQ=false;
+    if (from===63||to===63) this.castle.wK=false;
+
+    b[to]=b[from]; b[from]='';
+    // Promotion — auto-queen
+    if (b[to]==='P' && Math.floor(to/8)===0) b[to]='Q';
+    if (b[to]==='p' && Math.floor(to/8)===7) b[to]='q';
+
+    this.ep=newEp; this.turn=opp; this.selected=null; this.legalTos=[];
+
+    // Check game-end conditions
+    const oppMoves=chAllLegal(b,opp,newEp,this.castle);
+    if (!oppMoves.length) {
+      const inCheck=chAttacked(b,chKingSq(b,opp),col);
+      this.result=inCheck?'checkmate':'stalemate';
+      this.winner=inCheck?col:null;
+      this.state='done';
+    }
+
+    if (local) this.send({gameType:'chess',action:'move',from,to});
+    this._draw();
+  }
+
+  render(container) { this._dom=container; this._draw(); }
+
+  _draw() {
+    const c=this._dom; if(!c) return;
+    const myC=this.myColor, turn=this.turn;
+    const flipped=myC==='b';   // black plays from bottom
+
+    // Status line
+    let status='';
+    if (this.state==='waiting'&&this._invited) {
+      status=`<div class="ta-invite"><div class="ta-inv-text">chess challenge received</div>
+        <div class="ta-btns">
+          <div class="ta-btn accept" id="ch-acc">accept</div>
+          <div class="ta-btn danger" id="ch-dec">decline</div>
+        </div></div>`;
+    } else if (this.state==='waiting') {
+      status='<div class="ta-status">waiting for opponent…</div>';
+    } else if (this.state==='active') {
+      const myTurn=turn===myC;
+      const inCheck=myC&&chAttacked(this.board,chKingSq(this.board,turn),turn==='w'?'b':'w');
+      status=`<div class="ta-status ${myTurn?'ta-myturn':''}">
+        ${inCheck?'⚠ check — ':''}${myTurn?'your move':'opponent\'s move'}
+        <span style="color:var(--dim);margin-left:8px">you: ${myC==='w'?'white':'black'}</span>
+      </div>`;
+    } else if (this.state==='done') {
+      const won=this.winner===myC, draw=!this.winner;
+      const msg=this.result==='resign'?'opponent resigned':this.result==='stalemate'?'stalemate':won?'checkmate — you win!':'checkmate — you lose';
+      status=`<div class="ta-status ${draw?'ta-draw':won?'ta-win':'ta-loss'}">${msg}
+        <div class="ta-btns" style="margin-top:5px">
+          <div class="ta-btn" id="ch-reset">rematch</div>
+          <div class="ta-btn danger" id="ch-close">close</div>
+        </div></div>`;
+    }
+
+    // Board
+    let boardHtml='<div class="ch-board">';
+    for (let vi=0;vi<64;vi++) {
+      const sq=flipped?(63-vi):vi;
+      const r=Math.floor(sq/8), cf=sq%8;
+      const light=(r+cf)%2===0;
+      const p=this.board[sq];
+      const sel=this.selected===sq;
+      const hint=this.legalTos.includes(sq);
+      const kingSq=chKingSq(this.board,turn);
+      const inCheck=this.state==='active'&&sq===kingSq&&chAttacked(this.board,kingSq,turn==='w'?'b':'w');
+      let cls=`ch-sq ${light?'ch-light':'ch-dark'}${sel?' ch-sel':''}${hint?' ch-hint':''}${inCheck?' ch-check':''}`;
+      boardHtml+=`<div class="${cls}" data-sq="${sq}">${p?`<span class="ch-piece ${chColor(p)==='w'?'ch-w':'ch-b'}">${CH_GLYPHS[p]||''}</span>`:hint?'<span class="ch-dot"></span>':''}</div>`;
+    }
+    boardHtml+='</div>';
+
+    // Rank/file labels (tiny)
+    const files='abcdefgh', ranks='87654321';
+    const fileLabels=(flipped?[...files].reverse():files.split('').map(x=>x)).join('');
+    const rankLabels=(flipped?[...ranks].reverse():ranks.split('').map(x=>x)).join('');
+
+    c.innerHTML=`<div class="tqapp-chess">
+      <div class="tqapp-hdr"><span>♟ chess</span></div>
+      ${status}
+      <div class="ch-wrap">
+        <div class="ch-ranks">${rankLabels.split('').map(l=>`<span>${l}</span>`).join('')}</div>
+        ${boardHtml}
+      </div>
+      <div class="ch-files">${fileLabels.split('').map(l=>`<span>${l}</span>`).join('')}</div>
+      ${this.state==='active'?`<div class="ta-btns" style="margin-top:4px"><div class="ta-btn danger" id="ch-resign">resign</div></div>`:''}
+    </div>`;
+
+    c.querySelectorAll('.ch-sq').forEach(el=>
+      el.addEventListener('click',()=>this._selectSquare(+el.dataset.sq))
+    );
+    c.querySelector('#ch-acc')?.addEventListener('click',()=>this._accept());
+    c.querySelector('#ch-dec')?.addEventListener('click',()=>{ this.send({gameType:'chess',action:'resign'}); this.onClose?.(); });
+    c.querySelector('#ch-reset')?.addEventListener('click',()=>this._requestReset());
+    c.querySelector('#ch-close')?.addEventListener('click',()=>this.onClose?.());
+    c.querySelector('#ch-resign')?.addEventListener('click',()=>this._resign());
+  }
+
+  destroy() { this._dom=null; }
+}
+
 // Populate registry classes
-REGISTRY.find(r => r.id === 'ttt').cls  = TicTacToe;
-REGISTRY.find(r => r.id === 'sps').cls  = StonePaperScissors;
-REGISTRY.find(r => r.id === 'memo').cls = VoiceMemo;
+REGISTRY.find(r => r.id === 'ttt').cls   = TicTacToe;
+REGISTRY.find(r => r.id === 'sps').cls   = StonePaperScissors;
+REGISTRY.find(r => r.id === 'chess').cls = Chess;
+REGISTRY.find(r => r.id === 'memo').cls  = VoiceMemo;

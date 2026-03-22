@@ -626,6 +626,36 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .vm-controls{display:flex;gap:8px}
 .vm-err{font-size:10px;color:var(--err);padding:4px 0}
 
+/* ── Chess ───────────────────────────────────────────────────────────────── */
+.tqapp-chess{font-size:11px;user-select:none;min-width:260px}
+.ch-wrap{display:flex;align-items:flex-start;gap:3px}
+.ch-ranks{display:flex;flex-direction:column;justify-content:space-around;height:240px;font-size:8px;color:var(--dim);letter-spacing:.05em;padding:1px 0}
+.ch-ranks span,.ch-files span{display:flex;align-items:center;justify-content:center}
+.ch-files{display:flex;justify-content:space-around;width:240px;font-size:8px;color:var(--dim);letter-spacing:.05em;margin-left:14px}
+.ch-board{
+  display:grid;grid-template-columns:repeat(8,30px);
+  grid-template-rows:repeat(8,30px);
+  border:1px solid var(--mute);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+}
+.ch-sq{
+  width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;position:relative;transition:background .1s;
+}
+.ch-light{background:#0d2e2a}
+.ch-dark{background:#071a18}
+.ch-sq:hover{background:rgba(64,224,208,.12)}
+.ch-sel{background:rgba(64,224,208,.25)!important;outline:2px solid var(--tq);outline-offset:-2px}
+.ch-hint{background:rgba(64,224,208,.1)!important}
+.ch-hint .ch-dot{
+  width:8px;height:8px;border-radius:50%;
+  background:rgba(64,224,208,.4);pointer-events:none;
+}
+.ch-check{background:rgba(255,96,64,.2)!important}
+.ch-piece{font-size:1.2rem;line-height:1;pointer-events:none}
+.ch-w{color:#e8f4f0;text-shadow:0 1px 2px rgba(0,0,0,.8)}
+.ch-b{color:#0a3d39;text-shadow:0 0 3px rgba(64,224,208,.4),0 1px 3px rgba(0,0,0,.9)}
+
 /* ── Stone Paper Scissors ────────────────────────────────────────────────── */
 .tqapp-sps{font-size:11px;user-select:none}
 .sps-choices{display:flex;gap:8px;margin-top:8px;justify-content:center}

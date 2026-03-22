@@ -24,7 +24,7 @@ import { resetIdentity, importIdentityData } from './identity.js';
 import { TQLog } from './tqlog.js';
 import { FileTransfer }   from './files.js';
 import { FolderTransfer } from './folder.js';
-import { TicTacToe, StonePaperScissors, VoiceMemo } from './tqapps.js';
+import { TicTacToe, StonePaperScissors, Chess, VoiceMemo } from './tqapps.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -134,7 +134,16 @@ export class TurquoiseApp {
     if (ni) ni.value = nickname;
     if (fp) fp.textContent = fingerprint;
 
-    try { for (const p of await loadPeers()) this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false}); } catch {}
+    try {
+      for (const p of await loadPeers()) {
+        this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false});
+        // Pre-register in network's _known so _reconnectKnown() re-establishes
+        // connections immediately after reload without waiting for the server to
+        // broadcast their presence. Without this, _known is empty after reload
+        // and both sides stall waiting for each other to announce first.
+        this.net.addKnownPeer(p.fingerprint, p.nickname||p.fingerprint.slice(0,8));
+      }
+    } catch {}
     try { this.sessions.set(CIRCLE, await loadMessages(CIRCLE)); } catch { this.sessions.set(CIRCLE,[]); }
 
     this._bindUI();
@@ -268,6 +277,7 @@ export class TurquoiseApp {
       <div class="pm-label">◈ games</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✂︎  stone paper scissors</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-chess">♟  chess</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -278,6 +288,7 @@ export class TurquoiseApp {
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
     $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('peer offline',true); });
     $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('peer offline',true); });
+    $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('peer offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
   }
@@ -723,12 +734,13 @@ export class TurquoiseApp {
     const key  = fp + ':' + gameType;
     const send = m => this.net.sendCtrl(fp, {type:'game',...m});
     const close = () => { this.games.delete(key); };
-    if (gameType === 'sps') return new StonePaperScissors(fp, this.id.fingerprint, send, close);
+    if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
+    if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
     return new TicTacToe(fp, this.id.fingerprint, send, close);
   }
 
   _startGame(fp, gameType) {
-    if (gameType !== 'ttt' && gameType !== 'sps') return;
+    if (!['ttt','sps','chess'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       // Each game type gets its own slot per peer; key = fp+gameType
       const key = fp + ':' + gameType;
