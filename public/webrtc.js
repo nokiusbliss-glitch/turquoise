@@ -73,14 +73,11 @@ export class TurquoiseNetwork {
   }
 
   /**
-   * Hard reconnect — call on device wake or network-change event.
-   *
-   * Mobile browsers keep WebSocket readyState=OPEN after the underlying TCP
-   * connection was silently killed during sleep.  Checking _wsOK misses this.
-   * We forcibly close the dead socket, tear down every stale peer connection
-   * (which re-queues them in _known so they reconnect on next WS open), then
-   * open a fresh WebSocket.  _reconnectKnown() fires on ws.onopen and
-   * rediscovers all previously-known peers automatically.
+   * Hard reconnect on device wake / network change.
+   * Mobile browsers keep WS readyState=OPEN after TCP was killed during sleep,
+   * so the old (!_wsOK) guard did nothing.  We forcibly close the dead socket,
+   * tear down every stale peer (re-queuing in _known), then open fresh WS.
+   * _reconnectKnown() on ws.onopen re-establishes all known peers automatically.
    */
   forceReconnect() {
     if (this._dead) return;
@@ -253,11 +250,9 @@ export class TurquoiseNetwork {
     if (label === 'ctrl') {
       dc.onopen    = () => { this._log.debug(FILE,'dc',`ctrl open ${fp.slice(0,8)}`); if (!ps.ready) { ps.ready=true; this._onReady(fp,ps); } };
       dc.onmessage = e => this._onCtrl(fp, e.data);
-      // Teardown immediately when ctrl closes.  The previous version only logged
-      // this event — the heartbeat would eventually notice (after HB_IV × HB_MAX
-      // = 24 s) but ONLY if ctrl.readyState was 'open'.  A closed ctrl causes HB
-      // to skip the peer entirely, so teardown never fired and the peer was stuck
-      // in an infinite connecting/connected loop with no DataChannel ever opening.
+      // Teardown immediately when ctrl closes — don't wait for HB.
+      // HB skips peers whose ctrl.readyState !== 'open', so a closed ctrl was
+      // invisible to HB and the peer got stuck in a permanent reconnect loop.
       dc.onclose   = () => {
         this._log.debug(FILE, 'dc', `ctrl closed ${fp.slice(0,8)}`);
         if (this.peers.has(fp)) this._teardown(fp, 'ctrl-closed');
@@ -315,19 +310,19 @@ export class TurquoiseNetwork {
     if (!fp || !sdp) return;
     let ps = this.peers.get(fp);
 
-    // If we already have a PS for this peer, check whether it is still healthy.
-    // When the remote side tears down and immediately sends a fresh offer, our
-    // old PS has a closed ctrl DC and possibly a failed/closed PeerConnection.
-    // Negotiating the new offer on that dead PC re-establishes ICE but the
-    // pre-negotiated DataChannels (id:0/1) cannot reopen through SDP alone —
-    // they stay in 'closed' state forever.  We must discard the stale PS first.
+    // Discard stale PS before accepting a fresh offer.
+    // When the remote _initiate sends a new offer, negotiating it on the old
+    // PeerConnection (whose ctrl DC is closed) re-establishes ICE but the
+    // pre-negotiated DCs (id:0/1) can't reopen through SDP alone — they stay
+    // closed forever, producing the infinite connecting/connected loop.
     if (ps) {
       const pcState = ps.pc.connectionState;
       const ctrlOk  = ps.ctrl?.readyState === 'open' || ps.ctrl?.readyState === 'connecting';
       if (pcState === 'failed' || pcState === 'closed' || !ctrlOk) {
-        this._log.debug(FILE, '_onOffer', `${fp.slice(0,8)}: replacing stale PS (pc=${pcState} ctrl=${ps.ctrl?.readyState})`);
-        // Remove from map and close silently — the incoming offer IS the reconnect,
-        // so we must NOT schedule another _initiate from _teardown's _known timer.
+        this._log.debug(FILE, '_onOffer', `${fp.slice(0,8)}: stale PS (pc=${pcState} ctrl=${ps.ctrl?.readyState}), replacing`);
+        // Delete from map and close silently — do NOT call full _teardown()
+        // because that would schedule another _initiate via _known, conflicting
+        // with the incoming offer which IS the reconnect.
         this.peers.delete(fp);
         ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
         clearTimeout(ps.hbTimer);

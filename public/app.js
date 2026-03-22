@@ -94,8 +94,17 @@ export class TurquoiseApp {
     this._audioEl = Object.assign(document.createElement('audio'), {autoplay:true, playsInline:true, style:'display:none'});
     document.body.appendChild(this._audioEl);
 
+    // circleFileIds: files queued from circle session — wrapper injects circle:true
+    this._circleFileIds = new Set();
     this.ft = new FileTransfer(
-      (fp,m) => network.sendCtrl(fp,m),
+      (fp,m) => {
+        // Inject circle:true for file control messages that originated in circle,
+        // so the receiver routes the file card to CIRCLE session not individual chat.
+        const isCircleFile = m.fileId && this._circleFileIds.has(m.fileId);
+        const extra = isCircleFile ? {circle:true} : {};
+        if (m.type==='file-end'||m.type==='file-abort') this._circleFileIds.delete(m.fileId);
+        return network.sendCtrl(fp, {...m, ...extra});
+      },
       (fp,b) => network.sendBinary(fp,b),
       fp     => network.waitForBuffer(fp)
     );
@@ -261,8 +270,19 @@ export class TurquoiseApp {
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
     $('pmi-ttt')?.addEventListener('click', () => {
       this._closePlus();
-      if (canGame) this._startGame(fp,'ttt');
-      else this._sys(isCircle?'games need a 1\u20131 chat — tap a peer name first':'peer offline',true);
+      if (canGame) { this._startGame(fp,'ttt'); }
+      else if (isCircle) {
+        // In circle: pick a peer to play with
+        const gamePeers=this.net.getConnectedPeers();
+        if (!gamePeers.length) { this._sys('no peers in circle',true); return; }
+        if (gamePeers.length===1) { this._startGame(gamePeers[0],'ttt'); }
+        else {
+          const picked=gamePeers[0]; // pick first connected peer for now
+          this._sys('starting game with '+(this.peers.get(picked)?.nick||picked.slice(0,8)),'info',3000);
+          this._startGame(picked,'ttt');
+        }
+      }
+      else this._sys('peer offline',true);
     });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); $('__import-input')?.click(); });
@@ -559,6 +579,8 @@ export class TurquoiseApp {
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
     this._fileOwners.set(fileId,{fps:[...fps]});
+    // Register fileId as circle-origin so ft._ctrl wrapper injects circle:true
+    if (isCircle) this._circleFileIds.add(fileId);
     fps.forEach(fp=>this.ft.send(file,fp,fileId));
     this._status('sending '+file.name+'…','info');
   }
@@ -812,6 +834,12 @@ export class TurquoiseApp {
   _onCircleCallInvite(fp, msg) {
     if (this.call) { this.net.sendCtrl(fp,{type:'call-decline',circle:true}); return; }
     const callType=msg.callType==='stream'?'stream':'walkie';
+    // If we're already in an active circle call, auto-accept new participants
+    // joining mid-call rather than showing a redundant incoming call popup.
+    if (this.circleCall?.phase==='active'&&this.circleCall.localStream) {
+      this.net.sendCtrl(fp,{type:'call-accept',circle:true});
+      this._attachCircleRemote(fp); this._renderCircleCallPanel(); return;
+    }
     if (!this.circleCall) this.circleCall={type:callType,phase:'ringing',localStream:null,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false};
     this._showCallIncoming(fp,callType,msg.nick,true);
   }
@@ -824,8 +852,14 @@ export class TurquoiseApp {
     if (this.circleCall.localStream) { s=this.circleCall.localStream; }
     else { try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,null); return; } this.circleCall.localStream=s; }
     this.circleCall.phase='active';
+    // Tell the original caller we accepted (they will offerWithStream to us)
     this.net.sendCtrl(fp,{type:'call-accept',circle:true});
-    this._attachCircleRemote(fp); this._renderCircleCallPanel();
+    this._attachCircleRemote(fp);
+    // Also invite every other connected peer who isn't the original caller and
+    // isn't already in this call — so the circle call is truly multi-peer.
+    const others=this.net.getConnectedPeers().filter(p=>p!==fp&&!this.circleBlocked.has(p)&&!this.circleCall.remoteStreams.has(p));
+    others.forEach(p=>{ this.net.sendCtrl(p,{type:'call-invite',callType:this.circleCall.type,nick:this.id.nickname,circle:true}); this._attachCircleRemote(p); });
+    this._renderCircleCallPanel();
   }
 
   _declineCircleCall(fp) { this._hideCallIncoming(); this.net.sendCtrl(fp,{type:'call-decline',circle:true}); }
