@@ -88,7 +88,15 @@ export class TurquoiseNetwork {
       const dead = this.ws; this.ws = null;
       try { dead.onopen=dead.onclose=dead.onerror=dead.onmessage=null; dead.close(1000,'wake'); } catch {}
     }
+    // Tear down all peers. _teardown schedules exponential-backoff retries, but we
+    // want immediate reconnect — so after tearing down, reset every retry counter
+    // and cancel every pending timer. _reconnectKnown() on ws.onopen takes over.
     for (const fp of [...this.peers.keys()]) this._teardown(fp, 'wake');
+    for (const [, k] of this._known) {
+      k.retry = 0;
+      clearTimeout(k.timer);
+      k.timer = null;
+    }
     this._retry = 0;
     this._openWS();
     this._startHB();
@@ -207,7 +215,7 @@ export class TurquoiseNetwork {
       pc, nick: nick||fp.slice(0,8), ready:false,
       ctrl:null, data:null, stream:null,
       makingOffer:false, ignoreOffer:false, pendingIce:[],
-      hbMiss:0, hbTimer:null, _resolve:null, _reject:null,
+      hbMiss:0, hbTimer:null, _discTimer:null, _resolve:null, _reject:null,
       onRemoteStream: null,   // set via setRemoteStreamHandler(fp, fn)
     };
 
@@ -220,11 +228,18 @@ export class TurquoiseNetwork {
       this._log.debug(FILE, 'conn', `${fp.slice(0,8)}: ${s}`);
       if (s === 'connected' && !ps.ready) { ps.ready = true; this._onReady(fp, ps); }
       if (s === 'disconnected') {
+        // Attempt ICE restart immediately. Mobile radios often briefly drop.
         try { pc.restartIce(); } catch {}
-        setTimeout(() => { if (ps.pc.connectionState==='disconnected') this._teardown(fp,'disconnected-timeout'); }, 8_000);
+        // If still disconnected after 10s, tear down for a full reconnect.
+        clearTimeout(ps._discTimer);
+        ps._discTimer = setTimeout(() => {
+          if (ps.pc.connectionState === 'disconnected' || ps.pc.connectionState === 'failed') {
+            this._teardown(fp, 'disconnected-timeout');
+          }
+        }, 10_000);
       }
-      if (s === 'failed') this._teardown(fp, 'failed');
-      if (s === 'closed') this._teardown(fp, 'closed');
+      if (s === 'failed') { clearTimeout(ps._discTimer); this._teardown(fp, 'failed'); }
+      if (s === 'closed') { clearTimeout(ps._discTimer); this._teardown(fp, 'closed'); }
     };
 
     pc.ondatachannel = e => {
@@ -283,6 +298,7 @@ export class TurquoiseNetwork {
     this.peers.delete(fp);
     ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
     clearTimeout(ps.hbTimer);
+    clearTimeout(ps._discTimer);
     try { ps.pc.close(); } catch {}
     ps._reject?.(new Error('peer gone'));
 
@@ -300,7 +316,28 @@ export class TurquoiseNetwork {
   }
 
   _reconnectKnown() {
-    for (const [fp, k] of this._known) if (!this.peers.has(fp)) this._initiate(fp, k.nick);
+    for (const [fp, k] of this._known) {
+      const ps = this.peers.get(fp);
+      if (ps) {
+        // Peer exists but is stuck in a terminal or pre-ready state — tear it down
+        // silently so we can re-initiate below. Without this, a peer whose offer
+        // was lost (WS was down when onnegotiationneeded fired) stays in the map
+        // forever and _initiate is never retried.
+        const pcState = ps.pc.connectionState;
+        const stale   = !ps.ready && (pcState === 'failed' || pcState === 'closed');
+        const alsoStale = ps.ready && (pcState === 'failed' || pcState === 'closed');
+        if (stale || alsoStale) {
+          this._log.debug(FILE, '_reconnectKnown', `${fp.slice(0,8)}: stale (${pcState}), replacing`);
+          this.peers.delete(fp);
+          ['ctrl','data'].forEach(k => { try { ps[k]?.close(); } catch {} });
+          clearTimeout(ps.hbTimer);
+          try { ps.pc.close(); } catch {}
+          ps._reject?.(new Error('peer gone'));
+          if (alsoStale) { this.onLog?.(`▼ ${ps.nick}`); this.onPeerDisconnected?.(fp, ps.nick); }
+        }
+      }
+      if (!this.peers.has(fp)) this._initiate(fp, k.nick);
+    }
   }
 
   // ── Signaling handlers ────────────────────────────────────────────────────
@@ -357,8 +394,16 @@ export class TurquoiseNetwork {
 
   async _onAnswer(msg) {
     const ps = this.peers.get(msg.from);
-    if (!ps || ps.ignoreOffer || !msg.sdp) return;
-    try { await ps.pc.setRemoteDescription({type:'answer', sdp:msg.sdp}); } catch {}
+    if (!ps || !msg.sdp) return;
+    // NOTE: intentionally NOT checking ps.ignoreOffer here.
+    // ignoreOffer only gates incoming *offers* during a glare collision.
+    // An *answer* is always a valid response to our own offer and must be applied.
+    // Blocking it here left the impolite peer stuck in 'have-local-offer' forever,
+    // so its DataChannels never opened — causing one-way-only connectivity.
+    try {
+      await ps.pc.setRemoteDescription({type:'answer', sdp:msg.sdp});
+      ps.ignoreOffer = false; // safe to clear now — collision resolved
+    } catch(e) { this._log.warn(FILE, '_onAnswer', e.message); }
   }
 
   // answer-reneg is the SDP answer to offer-reneg; apply it like a normal answer.
