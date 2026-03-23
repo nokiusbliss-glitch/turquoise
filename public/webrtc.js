@@ -50,6 +50,7 @@ export class TurquoiseNetwork {
     this._dead       = false;
     this._known      = new Map();
     this._initiating = new Set();
+    this._streamHandlers = new Map();
     this._hbTimer    = null;
     this._ping       = null;
     this._log        = TQLog.get();
@@ -223,7 +224,7 @@ export class TurquoiseNetwork {
       makingOffer:false, ignoreOffer:false, pendingIce:[],
       hbMiss:0, hbTimer:null, _discTimer:null, _ctrlCloseTimer:null,
       _resolve:null, _reject:null,
-      onRemoteStream: null,
+      onRemoteStream: this._streamHandlers.get(fp) || null,
     };
 
     pc.onicecandidate = e => {
@@ -256,9 +257,20 @@ export class TurquoiseNetwork {
     // Use addEventListener so app.js callbacks registered via setRemoteStreamHandler
     // work independently without overwriting this handler.
     pc.addEventListener('track', e => {
-      const stream = e.streams[0] || null;
+      const stream = ps.stream || e.streams[0] || new MediaStream();
+      if (e.track && !stream.getTracks().some(t => t.id === e.track.id)) {
+        try { stream.addTrack(e.track); } catch {}
+      }
       ps.stream = stream;
       if (ps.onRemoteStream) ps.onRemoteStream(stream);
+      e.track?.addEventListener('ended', () => {
+        if (!ps.stream) return;
+        try { ps.stream.removeTrack(e.track); } catch {}
+        if (!ps.stream.getTracks().length) {
+          ps.stream = null;
+          if (ps.onRemoteStream) ps.onRemoteStream(null);
+        }
+      });
     });
 
     return ps;
@@ -538,6 +550,8 @@ export class TurquoiseNetwork {
 
   /** Register handler called when a remote track stream arrives for fp. */
   setRemoteStreamHandler(fp, handler) {
+    if (handler) this._streamHandlers.set(fp, handler);
+    else this._streamHandlers.delete(fp);
     const ps = this.peers.get(fp);
     if (!ps) return;
     ps.onRemoteStream = handler;

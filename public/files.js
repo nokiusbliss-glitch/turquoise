@@ -28,6 +28,7 @@ export class FileTransfer {
     this.onProgress  = null;   // (fileId, pct, dir, fp, stats) => void
     this.onFileReady = null;   // (fileInfo) => void
     this.onError     = null;   // (fileId, msg, fp) => void
+    this.onSent      = null;   // (fileId, fp, stats) => void
   }
 
   // ── Send ──────────────────────────────────────────────────────────────────
@@ -77,9 +78,11 @@ export class FileTransfer {
   async _sendOne(file, fp, fileId) {
     // Zero-byte files
     if (file.size === 0) {
-      this._ctrl(fp, { type:'file-meta', fileId, name:file.name, size:0, mimeType:file.type||'application/octet-stream', totalChunks:0 });
-      this._ctrl(fp, { type:'file-end',  fileId, totalChunks:0 });
+      const okMeta = this._ctrl(fp, { type:'file-meta', fileId, name:file.name, size:0, mimeType:file.type||'application/octet-stream', totalChunks:0 });
+      const okEnd  = this._ctrl(fp, { type:'file-end',  fileId, totalChunks:0 });
+      if (!okMeta || !okEnd) throw new Error('Control channel closed during transfer');
       this.onProgress?.(fileId, 1, 'send', fp, { bytesTransferred:0, totalBytes:0, speedBps:0, etaSec:0, elapsedSec:0 });
+      this.onSent?.(fileId, fp, { bytesTransferred:0, totalBytes:0, elapsedSec:0 });
       return;
     }
 
@@ -106,7 +109,9 @@ export class FileTransfer {
         lastPct = pctInt;
       }
     }
-    this._ctrl(fp, { type:'file-end', fileId, totalChunks:chunkIdx });
+    const okEnd = this._ctrl(fp, { type:'file-end', fileId, totalChunks:chunkIdx });
+    if (!okEnd) throw new Error('Control channel closed during transfer');
+    this.onSent?.(fileId, fp, { bytesTransferred:offset, totalBytes:file.size, elapsedSec:(Date.now()-t0)/1000 });
   }
 
   // ── Receive ───────────────────────────────────────────────────────────────

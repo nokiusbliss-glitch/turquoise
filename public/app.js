@@ -31,6 +31,7 @@ const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replac
 const fmt  = b => !b ? '0 B' : b < 1024 ? b+' B' : b < 1_048_576 ? (b/1024).toFixed(1)+' KB' : b < 1_073_741_824 ? (b/1_048_576).toFixed(1)+' MB' : (b/1_073_741_824).toFixed(2)+' GB';
 const fmtSpd = s => !s ? '—' : s < 1024 ? s.toFixed(0)+' B/s' : s < 1_048_576 ? (s/1024).toFixed(1)+' KB/s' : (s/1_048_576).toFixed(2)+' MB/s';
 const fmtEta = s => !s||s<=0||!isFinite(s) ? '—' : s<60 ? Math.ceil(s)+'s' : Math.floor(s/60)+'m'+Math.ceil(s%60)+'s';
+const gameLabel = type => type==='ttt' ? 'tic tac toe' : type==='sps' ? 'stone paper scissors' : type==='airh' ? 'air hockey' : 'chess';
 
 const CIRCLE = 'circle';
 const TTL    = 60_000;
@@ -86,6 +87,8 @@ export class TurquoiseApp {
     this.circleCall = null;
     this._fileUrls  = new Map();
     this._fileOwners= new Map();
+    this._folderSendState = new Map();
+    this._folderSendByFile = new Map();
     this._memo      = null;
     this._statsTimer= null;
     this._pipCleanup= null;   // cleanup fn for PIP drag listeners
@@ -116,8 +119,9 @@ export class TurquoiseApp {
       fp     => network.waitForBuffer(fp)
     );
     this.ft.onProgress  = (id,pct,_dir,_fp,s) => this._onFileProg(id,pct,s);
+    this.ft.onSent      = (id,fp,s) => this._onFileSent(id,fp,s);
     this.ft.onFileReady = f => this._onFileReady(f);
-    this.ft.onError     = (id,m) => this._onFileErr(id,m);
+    this.ft.onError     = (id,m,fp) => this._onFileErr(id,m,fp);
 
     this.folder = new FolderTransfer(this.ft, (fp,m) => network.sendCtrl(fp,m));
     this.folder.onProgress    = (fid,d,t) => this._onFolderProg(fid,d,t);
@@ -383,6 +387,7 @@ export class TurquoiseApp {
       if (info.fps.includes(fp)) {
         this.ft.cancelSend(fileId, fp);
         info.fps = info.fps.filter(f => f !== fp);
+        info.pending?.delete(fp);
         if (!info.fps.length) this._fileOwners.delete(fileId);
       }
     }
@@ -495,8 +500,23 @@ export class TurquoiseApp {
       btn.addEventListener('click',()=>this._cancelFile(msg)); el.appendChild(btn);
     } else if (msg.status==='done') {
       const f=this._fileUrls.get(msg.fileId); if(f) this._attachDownload(el,f);
+      else if (msg.own) this._setFileCardNote(el, 'sent');
+    } else if (msg.status==='error' && msg._sentError) {
+      this._setFileCardNote(el, `⚠ ${msg._sentError}`, 'err');
     }
     ca.appendChild(el); ca.scrollTop=ca.scrollHeight;
+  }
+
+  _setFileCardNote(card, text, tone='mute') {
+    if (!card) return;
+    let note = card.querySelector('.file-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'file-note';
+      card.appendChild(note);
+    }
+    note.style.cssText = `font-size:9px;margin-top:4px;color:${tone==='err'?'var(--err)':'var(--mute)'}`;
+    note.textContent = text;
   }
 
   _appendFolderCard(msg) {
@@ -514,11 +534,27 @@ export class TurquoiseApp {
     // History reloads have no download fns — show "files no longer available" instead.
     if (msg.status==='done' && msg._downloadFns) {
       this._finalizeFolderCard(el, msg._downloadFns);
+    } else if (msg.status==='done' && msg.own && msg._sentInfo) {
+      const peers = msg._sentInfo.peerCount || 1;
+      this._setFolderCardNote(el, `sent to ${peers} peer${peers===1?'':'s'}`);
+    } else if (msg.status==='error' && msg._sentError) {
+      this._setFolderCardNote(el, `⚠ ${msg._sentError}`, 'err');
     } else if (msg.status==='done') {
-      const note=document.createElement('div'); note.style.cssText='font-size:9px;color:var(--mute);margin-top:4px';
-      note.textContent='files not available after reload'; el.appendChild(note);
+      this._setFolderCardNote(el, 'files not available after reload');
     }
     ca.appendChild(el); ca.scrollTop=ca.scrollHeight;
+  }
+
+  _setFolderCardNote(card, text, tone='mute') {
+    if (!card) return;
+    let note = card.querySelector('.folder-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'folder-note';
+      card.appendChild(note);
+    }
+    note.style.cssText = `font-size:9px;margin-top:4px;color:${tone==='err'?'var(--err)':'var(--mute)'}`;
+    note.textContent = text;
   }
 
   _attachDownload(card, f) {
@@ -667,7 +703,7 @@ export class TurquoiseApp {
     const fileId=crypto.randomUUID();
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
-    this._fileOwners.set(fileId,{fps:[...fps]});
+    this._fileOwners.set(fileId,{fps:[...fps], pending:new Set(fps), totalPeers:fps.length});
     // Register fileId as circle-origin so ft._ctrl wrapper injects circle:true
     if (isCircle) this._circleFileIds.set(fileId, fps.length);
     fps.forEach(fp=>this.ft.send(file,fp,fileId));
@@ -688,6 +724,39 @@ export class TurquoiseApp {
     });
   }
 
+  _onFileSent(fileId, fp, _stats) {
+    const folderId = this._folderSendByFile.get(fileId);
+    if (!folderId) {
+      const ownMsgs = [...this.sessions.values()].flatMap(msgs => msgs.filter(m=>m.fileId===fileId && m.own));
+      if (ownMsgs.some(m => m.status === 'error' || m._sentError)) return;
+      const info = this._fileOwners.get(fileId);
+      if (info?.pending) {
+        info.pending.delete(fp);
+        if (info.pending.size > 0) return;
+      }
+      this._fileOwners.delete(fileId);
+      ownMsgs.forEach(m => { m.status='done'; });
+      document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
+        card.querySelector('.prog-track')?.remove();
+        card.querySelector('.file-stats')?.remove();
+        card.querySelector('.file-cancel')?.remove();
+        this._setFileCardNote(card, `sent${info?.totalPeers>1?` to ${info.totalPeers} peers`:''}`);
+      });
+      return;
+    }
+    const state = this._folderSendState.get(folderId);
+    if (!state) return;
+    const key = `${fp}:${fileId}`;
+    if (state.completed.has(key)) return;
+    state.completed.add(key);
+    state.doneTransfers++;
+    state.doneFiles.add(fileId);
+    const done = state.peerCount > 1 ? state.doneTransfers : state.doneFiles.size;
+    const total = state.peerCount > 1 ? state.totalTransfers : state.fileCount;
+    this._updateFolderCardProgress(folderId, done, total, state.peerCount > 1 ? 'transfers' : 'files');
+    if (state.doneTransfers >= state.totalTransfers) this._finalizeOutgoingFolder(folderId);
+  }
+
   _onFileReady(f) {
     if (this.folder.claimFile(f)) return;
     this._fileUrls.set(f.fileId, f);
@@ -703,12 +772,20 @@ export class TurquoiseApp {
     this._status(f.name+(cards.length?' received':' from '+nick+' — open chat to download'),'ok',6000);
   }
 
-  _onFileErr(fileId, errMsg) {
+  _onFileErr(fileId, errMsg, fp) {
     this._log.warn('app','_onFileErr', errMsg, { fileId });
+    const folderId = this._folderSendByFile.get(fileId);
+    if (folderId) this._failOutgoingFolder(folderId, errMsg, fp);
+    else {
+      for (const msgs of this.sessions.values()) {
+        const m=msgs.find(m=>m.fileId===fileId && m.own);
+        if (m) { m.status='error'; m._sentError=errMsg; }
+      }
+    }
     this._fileOwners.delete(fileId);
     document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
       card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove(); card.querySelector('.file-cancel')?.remove();
-      const d=document.createElement('div'); d.className='file-err'; d.textContent='⚠ '+errMsg; card.appendChild(d);
+      this._setFileCardNote(card, `⚠ ${errMsg}`, 'err');
     });
     if (errMsg!=='Cancelled') this._status('file error: '+errMsg,'err',5000);
   }
@@ -742,6 +819,13 @@ export class TurquoiseApp {
     const fmsg={id:folderId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'folder',folderId,name:folderName,totalSize,fileCount:fileList.length,manifest:fileList,ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFolderCard(fmsg));
     this._log.info('app','_sendFolder', `sending folder ${folderName}`, { files:fileList.length, totalSize, peers:fps.length, circle:isCircle });
+    this._folderSendState.set(folderId, {
+      folderId, name:folderName, peerCount:fps.length, fileCount:fileList.length,
+      totalTransfers:fileList.length * fps.length,
+      doneTransfers:0, doneFiles:new Set(), completed:new Set(),
+      fileIds:fileList.map(f => f.fileId),
+    });
+    fileList.forEach(f => this._folderSendByFile.set(f.fileId, folderId));
 
     fps.forEach(fp=>{
       this.net.sendCtrl(fp,{type:'folder-manifest',folderId,name:folderName,totalSize,files:fileList,circle:isCircle||undefined});
@@ -751,9 +835,13 @@ export class TurquoiseApp {
   }
 
   _onFolderProg(folderId, done, total) {
+    this._updateFolderCardProgress(folderId, done, total, 'files');
+  }
+
+  _updateFolderCardProgress(folderId, done, total, noun='files') {
     const card=document.querySelector(`[data-folderid="${folderId}"]`); if(!card) return;
     const fill=card.querySelector('.prog-fill'); if(fill) fill.style.width=((total>0?done/total:0)*100).toFixed(1)+'%';
-    const lbl=card.querySelector('.folder-count'); if(lbl) lbl.textContent=`${done} / ${total} files`;
+    const lbl=card.querySelector('.folder-count'); if(lbl) lbl.textContent=`${done} / ${total} ${noun}`;
   }
 
   _onFolderReady(info) {
@@ -784,6 +872,41 @@ export class TurquoiseApp {
     const allBtn=document.createElement('button'); allBtn.className='dl-btn'; allBtn.textContent='↓ all files';
     allBtn.addEventListener('click',()=>downloadAll?.());
     row.appendChild(zipBtn); row.appendChild(allBtn); card.appendChild(row);
+  }
+
+  _finalizeOutgoingFolder(folderId) {
+    const state = this._folderSendState.get(folderId);
+    if (!state) return;
+    this._folderSendState.delete(folderId);
+    state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
+    for (const msgs of this.sessions.values()) {
+      const m=msgs.find(m=>m.folderId===folderId && m.own);
+      if (m) { m.status='done'; m._sentInfo={peerCount:state.peerCount}; }
+    }
+    const card=document.querySelector(`[data-folderid="${folderId}"]`);
+    if (card) {
+      card.querySelector('.prog-track')?.remove();
+      card.querySelector('.folder-count')?.remove();
+      this._setFolderCardNote(card, `sent to ${state.peerCount} peer${state.peerCount===1?'':'s'}`);
+    }
+    this._status(`folder "${state.name}" sent to ${state.peerCount} peer${state.peerCount===1?'':'s'}`,'ok',6000);
+  }
+
+  _failOutgoingFolder(folderId, errMsg, _fp) {
+    const state = this._folderSendState.get(folderId);
+    if (!state) return;
+    this._folderSendState.delete(folderId);
+    state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
+    for (const msgs of this.sessions.values()) {
+      const m=msgs.find(m=>m.folderId===folderId && m.own);
+      if (m) { m.status='error'; m._sentError=errMsg; }
+    }
+    const card=document.querySelector(`[data-folderid="${folderId}"]`);
+    if (card) {
+      card.querySelector('.prog-track')?.remove();
+      card.querySelector('.folder-count')?.remove();
+      this._setFolderCardNote(card, `⚠ ${errMsg}`, 'err');
+    }
   }
 
   // ── Voice Memo ─────────────────────────────────────────────────────────────
@@ -824,7 +947,7 @@ export class TurquoiseApp {
       this.games.set(key, game);
       this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
       // Persist a record so chat history survives reload
-      const label = gameType==='ttt'?'tic tac toe':gameType==='sps'?'stone paper scissors':'chess';
+      const label = gameLabel(gameType);
       const rec={id:crypto.randomUUID(),sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,
         type:'text',own:true,ts:Date.now(),text:`▶ started ${label}`};
       this._pushMsg(fp,rec,()=>this._appendMsg(rec)); saveMessage(rec).catch(()=>{});
@@ -844,7 +967,7 @@ export class TurquoiseApp {
         game = this._makeGame(fp, gameType);
         this.games.set(key, game);
         const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
-        const label = gameType==='ttt'?'tic tac toe':gameType==='sps'?'stone paper scissors':'chess';
+        const label = gameLabel(gameType);
         const rec={id:crypto.randomUUID(),sessionId:fp,from:fp,fromNick:nick,
           type:'text',own:false,ts:Date.now(),text:`▶ ${nick} invited you to ${label}`};
         this._pushMsg(fp,rec,()=>this._appendMsg(rec)); saveMessage(rec).catch(()=>{});
@@ -943,7 +1066,15 @@ export class TurquoiseApp {
 
   _attachRemote1to1(fp) {
     this.net.setRemoteStreamHandler(fp, stream => {
-      if (!stream) return;
+      if (!stream) {
+        if (this.call?.fp===fp) {
+          this.call.remoteStream=null;
+          if (this.call.phase === 'active') this.call.phase = 'connecting';
+          this._renderCallPanel();
+        }
+        this._audioEl.srcObject=null;
+        return;
+      }
       this._audioEl.srcObject=stream; this._audioEl.play().catch(()=>{});
       if (this.call?.fp===fp) {
         this.call.remoteStream=stream; this.call.phase='active';
@@ -1059,7 +1190,14 @@ export class TurquoiseApp {
 
   _attachCircleRemote(fp) {
     this.net.setRemoteStreamHandler(fp, stream => {
-      if (!stream||!this.circleCall) return;
+      if (!this.circleCall) return;
+      if (!stream) {
+        this.circleCall.remoteStreams.delete(fp);
+        const el=this.circleCall.audioEls.get(fp);
+        if (el) el.srcObject=null;
+        this._renderCircleCallPanel();
+        return;
+      }
       this.circleCall.remoteStreams.set(fp,stream);
       let el=this.circleCall.audioEls.get(fp);
       if (!el) { el=Object.assign(document.createElement('audio'),{autoplay:true,playsInline:true,style:'display:none'}); document.body.appendChild(el); this.circleCall.audioEls.set(fp,el); }
@@ -1092,6 +1230,40 @@ export class TurquoiseApp {
 
   // ── Call UI ────────────────────────────────────────────────────────────────
 
+  _appendCallMeta(vids, title, subtitle) {
+    const meta = document.createElement('div');
+    meta.className = 'call-stage-meta';
+    meta.innerHTML = `<div class="call-stage-title">${esc(title)}</div><div class="call-stage-sub">${esc(subtitle)}</div>`;
+    vids.appendChild(meta);
+  }
+
+  _makeCallVideo(stream, muted=true) {
+    const v = document.createElement('video');
+    v.autoplay = true;
+    v.playsInline = true;
+    if (muted) { v.muted = true; v.setAttribute('muted',''); }
+    v.srcObject = stream;
+    v.onloadedmetadata = () => v.play().catch(()=>{});
+    v.play().catch(()=>{});
+    return v;
+  }
+
+  _makeCallPlaceholder(text) {
+    const ph = document.createElement('div');
+    ph.className = 'call-stage-placeholder';
+    ph.textContent = text;
+    return ph;
+  }
+
+  _mountLocalPIP(panel, stream, camOff, hidden=false) {
+    const pip=document.createElement('div');
+    pip.className='call-pip'+(camOff?' cam-off':'')+(hidden?' pip-hidden':'');
+    if (stream && !hidden) pip.appendChild(this._makeCallVideo(stream, true));
+    const lbl=document.createElement('div'); lbl.className='call-pip-label'; lbl.textContent='you'; pip.appendChild(lbl);
+    panel.appendChild(pip);
+    this._pipCleanup=this._makePIPDraggable(pip);
+  }
+
   _renderCallPanel() {
     const panel=$('call-panel'); if(!panel) return;
     const c=this.call;
@@ -1102,27 +1274,24 @@ export class TurquoiseApp {
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
+    const peerName = this.peers.get(c.fp)?.nick||c.fp.slice(0,8);
+    const phaseText = c.phase === 'ringing' ? 'incoming' : c.phase === 'inviting' ? 'calling' : c.phase === 'active' ? 'live' : 'connecting';
+    this._appendCallMeta(vids, `${c.type==='stream'?'video':'walkie'} · ${peerName}`, phaseText);
 
     // Phase status placeholder (ringing / connecting) — same pattern as circle panel
     if (c.phase !== 'active') {
-      const ph = document.createElement('div');
-      ph.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:.72rem;font-family:"Space Mono",monospace;padding:20px';
-      ph.textContent = c.phase === 'ringing' ? 'incoming call…' : c.phase === 'inviting' ? 'calling…' : 'connecting…';
-      vids.appendChild(ph);
+      vids.appendChild(this._makeCallPlaceholder(c.phase === 'ringing' ? 'incoming call…' : c.phase === 'inviting' ? 'calling…' : 'connecting…'));
     }
 
     const remote=document.createElement('div');
     // walkie-tile class triggers audio-only CSS (centered name + mic pulse, no video box)
     remote.className='call-video-tile'+(c.type==='walkie'?' walkie-tile':'');
     remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
-    if (c.remoteStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.srcObject=c.remoteStream; v.muted=false; remote.appendChild(v); v.play().catch(()=>{}); }
-    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=this.peers.get(c.fp)?.nick||c.fp.slice(0,8); remote.appendChild(lbl);
+    if (c.remoteStream&&c.type==='stream') remote.appendChild(this._makeCallVideo(c.remoteStream, true));
+    else if (c.type==='stream') remote.classList.add('call-video-empty');
+    const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=peerName; remote.appendChild(lbl);
     if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
-    // pip-hidden for walkie: empty PIP div is confusing when there is no local video
-    const pip=document.createElement('div'); pip.className='call-pip'+(c.camOff?' cam-off':'')+(c.type==='walkie'?' pip-hidden':'');
-    if (c.localStream&&c.type==='stream') { const v=document.createElement('video'); v.autoplay=true; v.playsInline=true; v.muted=true; v.setAttribute('muted',''); v.srcObject=c.localStream; pip.appendChild(v); v.play().catch(()=>{}); }
-    panel.appendChild(pip);
-    this._pipCleanup=this._makePIPDraggable(pip);
+    this._mountLocalPIP(panel, c.localStream, c.camOff, c.type==='walkie');
     const mu=$('ctrl-mute'); if(mu) { mu.textContent=c.muted?'unmute':'mute'; mu.classList.toggle('active',!!c.muted); }
     const cam=$('ctrl-cam');
     if (cam) {
@@ -1140,15 +1309,15 @@ export class TurquoiseApp {
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
+    const phaseText = cc.phase === 'ringing' ? 'incoming' : cc.phase === 'connecting' ? 'calling' : cc.remoteStreams.size ? `${cc.remoteStreams.size} live` : 'waiting';
+    this._appendCallMeta(vids, `${cc.type==='stream'?'video':'walkie'} · circle`, phaseText);
 
     // Show phase status when not yet active (same as 1:1 call panel)
     if (cc.phase !== 'active' || cc.remoteStreams.size === 0) {
-      const ph = document.createElement('div');
-      ph.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:.72rem;font-family:"Space Mono",monospace;padding:20px;text-align:center';
-      ph.textContent = cc.phase === 'ringing' ? 'incoming circle call…' :
-                       cc.phase === 'connecting' ? 'calling circle…' :
-                       cc.remoteStreams.size === 0 ? 'waiting for peers to join…' : '';
-      if (ph.textContent) vids.appendChild(ph);
+      const text = cc.phase === 'ringing' ? 'incoming circle call…' :
+                   cc.phase === 'connecting' ? 'calling circle…' :
+                   cc.remoteStreams.size === 0 ? 'waiting for peers to join…' : '';
+      if (text) vids.appendChild(this._makeCallPlaceholder(text));
     }
 
     // Render a tile per remote peer (audio walkie shows name-only tile; video shows stream)
@@ -1156,11 +1325,7 @@ export class TurquoiseApp {
       const tile = document.createElement('div');
       tile.className = 'call-video-tile' + (cc.type === 'walkie' ? ' walkie-tile' : '');
       tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
-      if (cc.type === 'stream') {
-        const v = document.createElement('video');
-        v.autoplay=true; v.playsInline=true; v.muted=false; v.srcObject=stream;
-        tile.appendChild(v); v.play().catch(()=>{});
-      }
+      if (cc.type === 'stream') tile.appendChild(this._makeCallVideo(stream, true));
       const lbl = document.createElement('div');
       lbl.className = 'vtile-label';
       lbl.textContent = this.peers.get(fp)?.nick || fp.slice(0,8);
@@ -1168,16 +1333,7 @@ export class TurquoiseApp {
       vids.appendChild(tile);
     });
 
-    // Local PIP (video mode only); hidden for walkie — no local video to show
-    const pip = document.createElement('div');
-    pip.className = 'call-pip' + (cc.camOff?' cam-off':'') + (cc.type==='walkie'?' pip-hidden':'');
-    if (cc.localStream && cc.type === 'stream') {
-      const v = document.createElement('video');
-      v.autoplay=true; v.playsInline=true; v.muted=true; v.setAttribute('muted',''); v.srcObject=cc.localStream;
-      pip.appendChild(v); v.play().catch(()=>{});
-    }
-    panel.appendChild(pip);
-    this._pipCleanup = this._makePIPDraggable(pip);
+    this._mountLocalPIP(panel, cc.localStream, cc.camOff, cc.type==='walkie');
 
     // Sync mute / cam buttons — same as 1:1 panel
     const mu = $('ctrl-mute'); if (mu) { mu.textContent = cc.muted ? 'unmute' : 'mute'; mu.classList.toggle('active', !!cc.muted); }

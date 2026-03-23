@@ -877,6 +877,8 @@ export class AirHockey {
     this.score = {p1:0, p2:0};
     this.maxScore = 7;
     this._gameOver = false;
+    this._goalPending = false;
+    this._goalTimer = null;
   }
 
   handleMsg(msg) {
@@ -897,11 +899,13 @@ export class AirHockey {
           this.ball.x=msg.ball.x; this.ball.y=msg.ball.y;
           this.ball.vx=msg.ball.vx; this.ball.vy=msg.ball.vy;
         }
-        if (msg.score) { this.score = msg.score; }
+        if (msg.score) { this.score = {...msg.score}; }
       }
     } else if (action === 'goal') {
-      this.score = msg.score; this._checkOver();
+      this._goalPending = true;
+      this.score = {...msg.score}; this._checkOver();
     } else if (action === 'reset') {
+      this._goalPending = false;
       this._resetBall();
     } else if (action === 'resign') {
       this.state = 'done'; this._stopLoop(); this._draw();
@@ -942,6 +946,7 @@ export class AirHockey {
   }
 
   _updateBall() {
+    if (this._goalPending || this._gameOver) return;
     const b = this.ball;
     b.x += b.vx; b.y += b.vy;
     // Side wall bounce
@@ -979,10 +984,15 @@ export class AirHockey {
   }
 
   _onGoal() {
-    this.send({gameType:'airh', action:'goal', score:this.score});
+    if (this._goalPending) return;
+    this._goalPending = true;
+    this.ball.vx = 0; this.ball.vy = 0;
+    this.send({gameType:'airh', action:'goal', score:{...this.score}});
     this._checkOver();
     if (!this._gameOver) {
-      setTimeout(() => {
+      clearTimeout(this._goalTimer);
+      this._goalTimer = setTimeout(() => {
+        this._goalPending = false;
         this._resetBall();
         this.send({gameType:'airh', action:'reset'});
       }, 1200);
@@ -991,6 +1001,7 @@ export class AirHockey {
 
   _checkOver() {
     if (this.score.p1 >= this.maxScore || this.score.p2 >= this.maxScore) {
+      clearTimeout(this._goalTimer); this._goalTimer = null;
       this._gameOver = true; this.state = 'done'; this._stopLoop(); this._draw();
     }
   }
@@ -1165,7 +1176,11 @@ export class AirHockey {
     cv.addEventListener('touchmove', e => { if (this.state === 'active') { e.preventDefault(); pos(e); } }, {passive:false});
   }
 
-  destroy() { this._stopLoop(); this._canvas = null; this._ctx = null; this._dom = null; }
+  destroy() {
+    this._stopLoop();
+    clearTimeout(this._goalTimer); this._goalTimer = null;
+    this._canvas = null; this._ctx = null; this._dom = null;
+  }
 }
 
 // Update registry
