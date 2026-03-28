@@ -103,11 +103,17 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   content:'▸';color:var(--dim);font-size:10px;flex-shrink:0;
 }
 
-/* name-hint: shown on first load by JS adding class visible */
+/* name-hint: floats below the identity row — never disrupts name display */
 #name-hint{
-  font-size:8px;color:var(--tq2);letter-spacing:.12em;
+  position:absolute;
+  top:100%;left:0;
+  font-size:8px;color:var(--tq2);letter-spacing:.1em;
   opacity:0;transition:opacity .4s;
   pointer-events:none;white-space:nowrap;
+  background:var(--bg1);
+  padding:2px 6px;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,0 100%);
+  z-index:20;
   animation:hint-pulse 2.4s ease-in-out infinite;
 }
 #name-hint.visible{opacity:1}

@@ -1382,15 +1382,30 @@ export class SnakeDuel {
     } else if (action === 'state') {
       // P2 receives authoritative full state from P1
       if (this.mySlot !== 2) return;
-      if (msg.s1) this._s1 = msg.s1;
-      if (msg.s2) this._s2 = msg.s2;
-      if (msg.apple) this._apple = msg.apple;
-      if (msg.lives) this._lives = msg.lives;
-      if (msg.score) this._score = msg.score;
-      if (msg.phase) this._phase = msg.phase;
-      if (msg.flash) this._deathFlash = 14;
+      // Array.isArray so empty arrays (dead/respawned snake) are applied correctly
+      if (Array.isArray(msg.s1)) this._s1 = msg.s1;
+      if (Array.isArray(msg.s2)) this._s2 = msg.s2;
+      if (msg.apple !== undefined) this._apple = msg.apple;
+      if (msg.lives)  this._lives = msg.lives;
+      if (msg.score)  this._score = msg.score;
+      if (msg.phase)  this._phase = msg.phase;
+      if (msg.flash)  this._deathFlash = 14;
+      // FIX: P2 must transition to done when P1 declares game over.
+      // Without this P2's renderLoop runs forever and done screen never shows.
+      if (msg.phase === 'over') {
+        this.state = 'done';
+        this._stopLoop();
+        this._unbindKeys();
+        this._canvas = null; this._ctx = null;
+        this._draw();
+      }
     } else if (action === 'resign') {
-      this.state = 'done'; this._stopLoop(); this._draw();
+      // FIX: unbind keys so listeners don't leak after game ends
+      this.state = 'done';
+      this._stopLoop();
+      this._unbindKeys();
+      this._canvas = null; this._ctx = null;
+      this._draw();
     }
   }
 
@@ -1447,7 +1462,10 @@ export class SnakeDuel {
 
     if (this._phase === 'dead1' || this._phase === 'dead2') {
       this._respT--;
-      if (this._respT <= 0) this._respawn(this._phase === 'dead1' ? 1 : 2);
+      if (this._respT <= 0) {
+        // _respawnBoth flag handles simultaneous death case
+        this._respawn(this._phase === 'dead1' ? 1 : 2);
+      }
       this._broadcast();
       return;
     }
@@ -1473,19 +1491,30 @@ export class SnakeDuel {
     const dead1 = this._hitWall(head1) || snInList(head1, s1TailExcluded) || snInList(head1, s2TailExcluded);
     const dead2 = this._hitWall(head2) || snInList(head2, s2TailExcluded) || snInList(head2, s1TailExcluded);
 
-    // Handle deaths
+    // Handle deaths — including simultaneous collision
     if (dead1 || dead2) {
       this._deathFlash = 14;
-      if (dead1) {
-        this._lives.p1--;
-        if (this._lives.p1 <= 0) { this._phase='over'; this.state='done'; this._stopLoop(); this._broadcast(); this._draw(); return; }
-        this._phase='dead1'; this._respT=8; // 8 ticks ≈ 1.2s
+      if (dead1) this._lives.p1--;
+      if (dead2) this._lives.p2--;
+
+      // Check game over (either player ran out of lives)
+      const p1Out = this._lives.p1 <= 0;
+      const p2Out = this._lives.p2 <= 0;
+      if (p1Out || p2Out) {
+        this._phase = 'over'; this.state = 'done';
+        this._stopLoop(); this._broadcast(); this._canvas = null; this._ctx = null; this._draw();
+        return;
       }
-      if (dead2) {
-        this._lives.p2--;
-        if (this._lives.p2 <= 0) { this._phase='over'; this.state='done'; this._stopLoop(); this._broadcast(); this._draw(); return; }
-        if (!dead1) { this._phase='dead2'; this._respT=8; }
-        // If both die simultaneously, P2 loses a life too but P1 takes priority
+
+      // Not game over — enter dead phase for each dead snake independently.
+      // Both can be dead simultaneously; we respawn both when timer expires.
+      if (dead1 && dead2) {
+        // Both dead: use a shared dead phase; _respawn checks the flag
+        this._phase = 'dead1'; this._respawnBoth = true; this._respT = 8;
+      } else if (dead1) {
+        this._phase = 'dead1'; this._respawnBoth = false; this._respT = 8;
+      } else {
+        this._phase = 'dead2'; this._respawnBoth = false; this._respT = 8;
       }
       this._broadcast();
       return;
@@ -1519,16 +1548,20 @@ export class SnakeDuel {
 
   _respawn(who) {
     const cx = Math.floor(SN_COLS/2);
-    if (who === 1) {
+    const doP1 = () => {
       const row = Math.floor(SN_ROWS * 0.75);
       this._s1=[{x:cx-1,y:row},{x:cx-2,y:row},{x:cx-3,y:row}];
       this._d1='e'; this._nd1='e'; this._grow1=0;
-    } else {
+    };
+    const doP2 = () => {
       const row = Math.floor(SN_ROWS * 0.25);
       this._s2=[{x:cx+1,y:row},{x:cx+2,y:row},{x:cx+3,y:row}];
       this._d2='w'; this._nd2='w'; this._grow2=0;
-    }
-    this._phase='active';
+    };
+    if (this._respawnBoth) { doP1(); doP2(); this._respawnBoth = false; }
+    else if (who === 1)    { doP1(); }
+    else                   { doP2(); }
+    this._phase = 'active';
   }
 
   _broadcast() {
