@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#040a09">
+<link rel="manifest" href="/manifest.json">
+<title>Turquoise</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:#040a09;color:#c4ede9}
+body{font-family:'Space Mono',monospace;font-size:13px}
+
+/* ── Palette ────────────────────────────────────────────────────────────── */
+:root{
+  --tq:   #40e0d0;  --tq2: #1a9e94;  --tq3: #0a3d39;
+  --ug:   #6bff7b;  --ug2: #2d7a34;
+  --uy:   #ffe14a;  --uy2: #a88a00;
+  --bg0:  #040a09;  --bg1: #071a18;  --bg2: #0d2e2a;
+  --text: #c4ede9;  --dim: #4a8a84;  --mute: #1e5550;
+  --err:  #ff6040;  --warn:#ffe14a;  --ok: #6bff7b;
+}
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--mute);border-radius:2px}
+
+/* ── App Shell ──────────────────────────────────────────────────────────── */
+#app{
+  display:grid;
+  grid-template-columns:220px 1fr 260px;
+  grid-template-rows:44px 1fr;
+  height:100dvh;
+  background:var(--bg0);
+  position:relative;
+}
+
+/* ── Turquoise stone ambient layers ──────────────────────────────────────── */
+/* Layer 1: diagonal striations (mineral veining) */
+#app::before{
+  content:'';
+  position:fixed;inset:0;
+  background:
+    linear-gradient(17deg,transparent 41%,rgba(64,224,208,.025) 41%,rgba(64,224,208,.025) 41.3%,transparent 41.3%),
+    linear-gradient(17deg,transparent 63%,rgba(107,255,123,.018) 63%,rgba(107,255,123,.018) 63.2%,transparent 63.2%),
+    linear-gradient(-11deg,transparent 28%,rgba(64,224,208,.012) 28%,rgba(64,224,208,.012) 28.18%,transparent 28.18%);
+  pointer-events:none;z-index:0;
+}
+
+/* Layer 2: radial depth glow (stone polished face) */
+#app::after{
+  content:'';
+  position:fixed;inset:0;
+  background:
+    radial-gradient(ellipse 60% 40% at 15% 85%, rgba(64,224,208,.055) 0%, transparent 70%),
+    radial-gradient(ellipse 45% 55% at 82% 12%, rgba(26,158,148,.04) 0%, transparent 65%),
+    radial-gradient(ellipse 30% 30% at 50% 50%, rgba(64,224,208,.018) 0%, transparent 100%);
+  pointer-events:none;z-index:0;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+#header{
+  grid-column:1/-1;
+  display:flex;align-items:center;gap:0;
+  background:var(--bg1);
+  clip-path:polygon(0 0,100% 0,100% 100%,0 calc(100% - 6px));
+  padding:0 16px 6px 16px;
+  position:relative;z-index:10;
+  border-bottom:1px solid var(--mute);
+}
+/* subtle shimmer on header */
+#header::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,rgba(64,224,208,.04) 0%,transparent 40%,rgba(64,224,208,.02) 100%);
+  pointer-events:none;
+}
+#header-logo{
+  font-family:'Syne',sans-serif;font-weight:800;font-size:15px;letter-spacing:.25em;
+  color:var(--tq);text-transform:uppercase;
+  clip-path:polygon(0 0,calc(100% - 6px) 0,100% 100%,0 100%);
+  background:rgba(64,224,208,.06);
+  padding:3px 18px 3px 8px;margin-right:24px;
+  flex-shrink:0;
+  position:relative;
+}
+/* crystal accent on logo */
+#header-logo::after{
+  content:'◈';
+  position:absolute;right:-10px;top:50%;transform:translateY(-50%);
+  font-size:7px;color:var(--tq3);opacity:.8;
+}
+#identity-row{
+  display:flex;align-items:center;gap:8px;cursor:pointer;
+  flex:1;min-width:0;
+  position:relative;
+}
+#identity-row::before{
+  content:'▸';color:var(--dim);font-size:10px;flex-shrink:0;
+}
+
+/* name-hint: floats below the identity row — never disrupts name display */
+#name-hint{
+  position:absolute;
+  top:100%;left:0;
+  font-size:8px;color:var(--tq2);letter-spacing:.1em;
+  opacity:0;transition:opacity .4s;
+  pointer-events:none;white-space:nowrap;
+  background:var(--bg1);
+  padding:2px 6px;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,0 100%);
+  z-index:20;
+  animation:hint-pulse 2.4s ease-in-out infinite;
+}
+#name-hint.visible{opacity:1}
+@keyframes hint-pulse{
+  0%,100%{opacity:.5} 50%{opacity:1}
+}
+
+#nick-display{
+  font-family:'Syne',sans-serif;font-weight:700;font-size:13px;
+  color:var(--tq);letter-spacing:.05em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:opacity .15s;
+}
+#nick-display.hidden{display:none}
+#nick-input{
+  display:none;background:var(--bg2);border:1px solid var(--tq2);
+  color:var(--tq);padding:2px 8px;font-family:inherit;font-size:13px;
+  width:140px;outline:none;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 100%,0 100%);
+}
+#nick-input.visible{display:block}
+#full-fp{
+  font-size:9px;color:var(--dim);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:200px;letter-spacing:.06em;
+}
+#hdr-right{
+  display:flex;align-items:center;gap:8px;margin-left:auto;flex-shrink:0;
+}
+#reset-btn{
+  font-family:inherit;font-size:10px;color:var(--dim);background:none;border:none;
+  cursor:pointer;letter-spacing:.08em;opacity:.6;
+  transition:opacity .2s,color .2s;
+}
+#reset-btn:hover{color:var(--err);opacity:1}
+#conn-status{
+  font-size:9px;letter-spacing:.1em;color:var(--dim);
+  padding:2px 8px;
+  clip-path:polygon(6px 0,100% 0,calc(100%-6px) 100%,0 100%);
+  background:rgba(64,224,208,.06);
+  transition:color .3s,background .3s;
+}
+#conn-status.ok  {color:var(--ug);background:rgba(107,255,123,.08)}
+#conn-status.warn{color:var(--uy);background:rgba(255,225,74,.08)}
+#conn-status.err {color:var(--err);background:rgba(255,96,64,.08)}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+#sidebar{
+  grid-row:2;grid-column:1;
+  background:var(--bg1);
+  border-right:1px solid var(--mute);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  position:relative;z-index:5;
+}
+/* stone vein on sidebar right edge */
+#sidebar::after{
+  content:'';position:absolute;top:0;right:0;bottom:0;width:1px;
+  background:linear-gradient(to bottom,transparent 0%,rgba(64,224,208,.15) 30%,rgba(64,224,208,.08) 70%,transparent 100%);
+  pointer-events:none;
+}
+#peers-label{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.2em;
+  color:var(--dim);padding:10px 12px 6px;text-transform:uppercase;
+  border-bottom:1px solid rgba(30,85,80,.5);
+}
+#peers-label span{color:var(--tq);font-size:8px}
+#peers-list{flex:1;overflow-y:auto;padding:4px 0}
+.peer-item{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 10px 8px 14px;cursor:pointer;
+  position:relative;
+  clip-path:polygon(0 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,0 100%);
+  transition:background .15s;
+  margin-bottom:2px;
+}
+.peer-item:hover{background:rgba(64,224,208,.06)}
+.peer-item.active{
+  background:rgba(64,224,208,.1);
+  clip-path:polygon(4px 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,4px 100%);
+}
+.peer-item.active::before{
+  content:'';position:absolute;left:0;top:20%;height:60%;
+  width:3px;background:var(--tq);
+}
+.peer-dot{
+  width:7px;height:7px;border-radius:0;flex-shrink:0;
+  transform:rotate(45deg);
+  background:var(--mute);transition:background .2s;
+}
+.peer-item.online .peer-dot{background:var(--tq)}
+.peer-item.circle .peer-dot{background:var(--ug);transform:rotate(0)}
+.peer-nick{
+  font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;flex:1;
+}
+.peer-item.active .peer-nick{color:var(--tq)}
+.peer-badge{
+  font-size:8px;background:var(--tq);color:var(--bg0);
+  min-width:16px;height:16px;line-height:16px;text-align:center;
+  padding:0 4px;font-weight:700;
+}
+.peer-tier{font-size:8px;color:var(--uy2)}
+.peer-tier.p2p{color:var(--ug2)}
+
+/* Sidebar backdrop (mobile) — tap to close */
+#sidebar-backdrop{
+  display:none;position:fixed;inset:0;z-index:49;
+  background:rgba(0,0,0,.55);
+}
+#sidebar-backdrop.visible{display:block}
+
+/* ── Main Chat ───────────────────────────────────────────────────────────── */
+#main{
+  grid-row:2;grid-column:2;
+  display:flex;flex-direction:column;
+  overflow:hidden;
+  position:relative;z-index:3;
+}
+#chat-header{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 14px;background:var(--bg1);
+  clip-path:polygon(0 0,100% 0,100% calc(100% - 5px),0 100%);
+  border-bottom:1px solid var(--mute);
+  flex-shrink:0;min-height:40px;
+  position:relative;z-index:1;
+}
+
+/* ── Back button — turquoise crystal style ───────────────────────────────── */
+#back-btn{
+  display:none;
+  background:rgba(64,224,208,.07);
+  border:1px solid var(--tq3);
+  color:var(--tq2);
+  cursor:pointer;
+  font-size:10px;
+  padding:4px 9px 4px 7px;
+  font-family:'Syne',sans-serif;
+  letter-spacing:.1em;
+  clip-path:polygon(6px 0,100% 0,100% 100%,0 100%,0 6px);
+  transition:all .15s;
+  flex-shrink:0;
+  white-space:nowrap;
+}
+#back-btn::before{content:'◁ ';font-size:8px;}
+#back-btn:hover{
+  background:rgba(64,224,208,.14);
+  border-color:var(--tq2);
+  color:var(--tq);
+}
+@media(max-width:640px){#back-btn{display:flex;align-items:center}}
+@media(max-width:640px){
+  #header-logo{font-size:11px;padding:3px 10px 3px 6px;margin-right:10px;letter-spacing:.12em}
+  #full-fp{display:none}
+}
+#chat-peer-name{
+  font-family:'Syne',sans-serif;font-weight:700;font-size:14px;color:var(--tq);
+  letter-spacing:.05em;flex:1;
+}
+#chat-peer-fp{font-size:9px;color:var(--dim)}
+#call-btns{display:flex;gap:6px}
+.call-btn{
+  font-family:inherit;font-size:10px;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
+  padding:3px 10px;cursor:pointer;letter-spacing:.06em;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 100%,5px 100%);
+  transition:all .15s;
+}
+.call-btn:hover{border-color:var(--tq);color:var(--tq)}
+.call-btn.active{background:rgba(64,224,208,.1);border-color:var(--tq);color:var(--tq)}
+
+/* ── Chat area ───────────────────────────────────────────────────────────── */
+#chat-area{
+  flex:1;overflow-y:auto;
+  padding:16px 18px 8px;
+  display:flex;flex-direction:column;gap:4px;
+  position:relative;
+  min-height:0;
+}
+#chat-area.drag-over::after{
+  content:'drop to transmit';
+  position:absolute;inset:0;
+  background:rgba(64,224,208,.08);border:2px dashed var(--tq2);
+  display:flex;align-items:center;justify-content:center;
+  font-size:20px;letter-spacing:.2em;color:var(--tq2);
+}
+
+/* ── Message bubbles ─────────────────────────────────────────────────────── */
+.msg{
+  max-width:68%;padding:8px 12px 7px;
+  position:relative;word-break:break-word;line-height:1.45;
+  font-size:12px;transition:transform .1s;cursor:default;
+}
+.msg.recv{
+  align-self:flex-start;
+  background:var(--bg2);color:var(--text);
+}
+.msg.sent{
+  align-self:flex-end;
+  background:rgba(64,224,208,.1);color:var(--tq);
+  border:1px solid rgba(64,224,208,.18);
+}
+/* Irregular stone-cut shapes — more variety for the turquoise stone feel */
+.msg[data-shape="0"]{clip-path:polygon(0 4px,4px 0,100% 0,100% calc(100% - 4px),calc(100% - 4px) 100%,0 100%)}
+.msg[data-shape="1"]{clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px))}
+.msg[data-shape="2"]{clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
+.msg[data-shape="3"]{clip-path:polygon(0 0,100% 3px,calc(100% - 3px) 100%,3px calc(100% - 3px))}
+.msg[data-shape="4"]{clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 3px) 100%,0 100%,0 3px)}
+.msg[data-shape="5"]{clip-path:polygon(0 6px,6px 0,100% 0,100% 100%,0 100%)}
+.msg[data-shape="6"]{clip-path:polygon(0 0,calc(100% - 12px) 0,100% 6px,100% 100%,12px 100%,0 calc(100% - 6px))}
+.msg[data-shape="7"]{clip-path:polygon(3px 0,100% 0,100% calc(100% - 3px),calc(100% - 11px) 100%,0 100%,0 3px)}
+.msg .sender{
+  font-size:9px;color:var(--uy);letter-spacing:.08em;margin-bottom:3px;
+  font-family:'Syne',sans-serif;font-weight:700;
+}
+.msg.sent .sender{color:var(--tq2)}
+.msg .ts{font-size:8px;color:var(--dim);position:absolute;bottom:3px;right:8px;}
+.msg.sys{
+  align-self:center;font-size:9px;color:var(--dim);
+  padding:2px 8px;
+  clip-path:polygon(6px 0,calc(100%-6px) 0,100% 50%,calc(100%-6px) 100%,6px 100%,0 50%);
+  background:rgba(64,224,208,.04);
+}
+.msg.sys.err{color:var(--err);background:rgba(255,96,64,.06)}
+
+/* ── File & folder cards ─────────────────────────────────────────────────── */
+.file-card,.folder-card{
+  max-width:280px;padding:8px 11px;
+  background:var(--bg2);border-left:2px solid var(--tq2);
+  display:flex;flex-direction:column;gap:4px;
+  clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,0 100%);
+}
+.file-card.sent,.folder-card.sent{
+  align-self:flex-end;border-left:none;border-right:2px solid var(--tq);
+  background:rgba(64,224,208,.07);
+  clip-path:polygon(0 7px,7px 0,100% 0,100% 100%,0 100%);
+}
+.file-card .fname,.folder-card .fname{
+  font-size:11px;color:var(--text);font-weight:700;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.file-card .fsize,.folder-card .fsize{font-size:9px;color:var(--dim)}
+.prog-track{height:3px;background:var(--mute);margin-top:2px;overflow:hidden}
+.prog-fill{height:100%;background:var(--tq);width:0;transition:width .3s}
+.file-stats{font-size:9px;color:var(--dim);display:flex;gap:4px;flex-wrap:wrap}
+.file-cancel{
+  font-size:9px;color:var(--err);background:none;border:none;cursor:pointer;
+  align-self:flex-start;opacity:.7;transition:opacity .2s;font-family:inherit;
+}
+.file-cancel:hover{opacity:1}
+.dl-btn{
+  display:inline-block;font-size:9px;color:var(--tq);
+  background:rgba(64,224,208,.08);border:1px solid var(--tq2);
+  padding:2px 8px;text-decoration:none;cursor:pointer;
+  font-family:inherit;letter-spacing:.06em;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 100%,5px 100%);
+  transition:background .15s;margin-top:2px;
+}
+.dl-btn:hover{background:rgba(64,224,208,.16)}
+.file-err{font-size:9px;color:var(--err);margin-top:2px}
+.folder-tree{font-size:10px;color:var(--dim);max-height:120px;overflow-y:auto}
+.folder-tree .ft-dir{color:var(--tq2);margin-top:3px}
+.folder-tree .ft-file{display:flex;align-items:center;gap:4px;padding:1px 0;cursor:default;}
+.folder-tree .ft-dl{
+  font-size:8px;color:var(--tq);background:none;border:none;cursor:pointer;
+  font-family:inherit;opacity:.7;transition:opacity .15s;
+}
+.folder-tree .ft-dl:hover{opacity:1}
+.folder-count{font-size:9px;color:var(--dim)}
+
+/* ── Compose bar ─────────────────────────────────────────────────────────── */
+#compose-area{
+  flex-shrink:0;
+  padding:8px 12px 10px;
+  background:var(--bg1);
+  border-top:1px solid var(--mute);
+  display:flex;gap:8px;align-items:flex-end;
+  position:relative;z-index:5;
+}
+
+/* ── Plus button — crystal ◈ ─────────────────────────────────────────────── */
+#plus-btn{
+  width:32px;height:32px;flex-shrink:0;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--tq2);
+  cursor:pointer;font-size:14px;
+  clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,7px 100%,0 calc(100%-7px));
+  transition:all .15s;display:flex;align-items:center;justify-content:center;
+  font-family:'Syne',sans-serif;letter-spacing:0;
+}
+#plus-btn:hover{border-color:var(--tq);color:var(--tq);background:rgba(64,224,208,.07)}
+#msg-wrap{flex:1;position:relative}
+#msg-input{
+  width:100%;min-height:32px;max-height:128px;resize:none;
+  background:var(--bg2);border:1px solid var(--mute);
+  color:var(--text);font-family:inherit;font-size:12px;
+  padding:7px 10px;outline:none;
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,0 100%);
+  transition:border-color .15s;line-height:1.4;
+}
+#msg-input:focus{border-color:var(--tq2)}
+#msg-input::placeholder{color:var(--mute)}
+#send-btn{
+  width:38px;height:32px;flex-shrink:0;
+  background:rgba(64,224,208,.12);border:1px solid var(--tq2);color:var(--tq);
+  cursor:pointer;font-size:14px;
+  clip-path:polygon(0 0,100% 0,100% 100%,7px 100%,0 calc(100%-7px));
+  transition:all .15s;
+}
+#send-btn:hover{background:rgba(64,224,208,.22);border-color:var(--tq)}
+
+/* ── Plus menu ───────────────────────────────────────────────────────────── */
+#plus-menu{
+  position:fixed;
+  bottom:56px;left:8px;
+  background:var(--bg1);border:1px solid var(--mute);
+  min-width:210px;z-index:200;
+  display:none;
+  box-shadow:0 -4px 24px rgba(0,0,0,.6),0 4px 24px rgba(0,0,0,.4);
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,0 100%);
+}
+#plus-menu.visible{display:block}
+.pm-item{
+  padding:8px 14px;font-size:11px;color:var(--dim);cursor:pointer;
+  letter-spacing:.05em;transition:background .1s,color .1s;
+}
+.pm-item:hover{background:rgba(64,224,208,.07);color:var(--tq)}
+.pm-item.pm-dim{opacity:.35;pointer-events:none}
+.pm-item.pm-danger{color:rgba(255,96,64,.7)}
+.pm-item.pm-danger:hover{color:var(--err);background:rgba(255,96,64,.06)}
+.pm-sep{height:1px;background:var(--mute);margin:3px 0}
+.pm-label{font-size:8px;color:var(--mute);padding:3px 14px 0;letter-spacing:.15em;text-transform:uppercase}
+
+/* ── Status bar ──────────────────────────────────────────────────────────── */
+#status-line{
+  font-size:9px;color:var(--dim);padding:3px 12px;
+  border-top:1px solid var(--mute);flex-shrink:0;
+  background:var(--bg1);letter-spacing:.05em;
+  transition:color .3s;min-height:20px;
+  position:relative;z-index:1;
+}
+#status-line.ok  {color:var(--ug)}
+#status-line.warn{color:var(--uy)}
+#status-line.err {color:var(--err)}
+
+/* ── Net Log panel ───────────────────────────────────────────────────────── */
+#netlog-panel{
+  grid-row:2;grid-column:3;
+  display:flex;flex-direction:column;
+  background:var(--bg0);border-left:1px solid var(--mute);
+  position:relative;overflow:hidden;
+  z-index:4;
+}
+#netlog-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:7px 10px 7px 14px;
+  border-bottom:1px solid var(--mute);flex-shrink:0;
+  clip-path:polygon(0 0,100% 0,100% 100%,0 calc(100% - 5px));
+  background:var(--bg1);
+}
+#netlog-title{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.2em;
+  color:var(--dim);text-transform:uppercase;
+}
+#netlog-actions{display:flex;gap:6px;align-items:center}
+#netlog-export{
+  font-family:inherit;font-size:8px;letter-spacing:.1em;
+  background:rgba(64,224,208,.05);border:1px solid var(--mute);
+  color:var(--dim);padding:2px 8px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
+  transition:all .15s;
+}
+#netlog-export:hover{border-color:var(--tq);color:var(--tq)}
+#netlog-clear{
+  font-family:inherit;font-size:8px;background:none;
+  border:none;color:var(--mute);cursor:pointer;padding:2px;transition:color .15s;
+}
+#netlog-clear:hover{color:var(--err)}
+#net-log{
+  flex:1;overflow-y:auto;
+  padding:8px 6px;
+  font-size:9.5px;line-height:1.5;
+  font-family:'Space Mono',monospace;
+  letter-spacing:.02em;
+}
+.tl-entry{display:block;padding:1px 4px;word-break:break-all}
+.tl-entry[data-level="DEBUG"]{color:var(--dim)}
+.tl-entry[data-level="INFO"] {color:rgba(64,224,208,.7)}
+.tl-entry[data-level="WARN"] {color:var(--uy)}
+.tl-entry[data-level="ERROR"]{color:var(--err)}
+
+/* ── Active tool panel ───────────────────────────────────────────────────── */
+#tool-panel{
+  display:none;flex-direction:column;padding:10px;
+  background:var(--bg2);border-bottom:1px solid var(--mute);
+}
+#tool-panel.visible{display:flex}
+
+/* ── Call panel ──────────────────────────────────────────────────────────── */
+#call-panel{
+  display:none;position:fixed;inset:0;z-index:100;
+  background:rgba(4,10,9,.96);flex-direction:column;
+  align-items:center;justify-content:center;
+  backdrop-filter:blur(6px);
+}
+#call-panel.visible{display:flex}
+/* subtle stone vein behind video */
+#call-panel::before{
+  content:'';position:absolute;inset:0;
+  background:
+    linear-gradient(23deg,transparent 35%,rgba(64,224,208,.018) 35%,rgba(64,224,208,.018) 35.2%,transparent 35.2%),
+    radial-gradient(ellipse 70% 50% at 50% 100%,rgba(64,224,208,.04) 0%,transparent 70%);
+  pointer-events:none;
+}
+
+/* Video area */
+#call-videos{
+  display:flex;gap:12px;flex-wrap:wrap;justify-content:center;
+  width:100%;
+  padding:56px 20px 16px;   /* reduced top from 68px — controls are slim */
+  flex:1;align-content:center;
+  position:relative;z-index:1;
+}
+
+/* ── Call stage meta — compact floating badge (not a full-width bar) ──────── */
+/* On laptop this was dominating the whole panel; now a slim corner badge */
+.call-stage-meta{
+  position:absolute;
+  top:10px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:10px;
+  padding:5px 14px;
+  border:1px solid rgba(64,224,208,.15);
+  background:linear-gradient(135deg,rgba(7,26,24,.92),rgba(4,10,9,.8));
+  box-shadow:0 4px 20px rgba(0,0,0,.35);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  z-index:2;
+  white-space:nowrap;
+  max-width:calc(100% - 240px);  /* leave room for right-side controls */
+}
+.call-stage-title{
+  font-family:'Syne',sans-serif;font-size:10px;letter-spacing:.14em;
+  color:var(--tq);text-transform:uppercase;
+}
+.call-stage-sub{
+  font-size:8px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase;
+}
+
+/* dot separator */
+.call-stage-meta::before{
+  content:'◈';font-size:7px;color:var(--tq3);
+}
+
+/* Placeholder while connecting */
+.call-stage-placeholder{
+  flex:1 1 100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;text-align:center;
+  min-height:160px;padding:20px;color:var(--dim);
+  font-size:.7rem;font-family:'Space Mono',monospace;
+  gap:12px;
+}
+.call-stage-placeholder::before{
+  content:'◉';font-size:2rem;color:var(--tq3);
+  animation:connecting-pulse 2s ease-in-out infinite;
+}
+@keyframes connecting-pulse{
+  0%,100%{opacity:.3;transform:scale(1)}
+  50%{opacity:.9;transform:scale(1.08)}
+}
+
+.call-video-tile{
+  flex:1;min-width:200px;max-width:480px;min-height:200px;
+  background:linear-gradient(180deg,rgba(10,22,20,.98),rgba(5,11,10,.92));
+  border:1px solid rgba(64,224,208,.14);
+  box-shadow:0 18px 40px rgba(0,0,0,.35),inset 0 1px 0 rgba(64,224,208,.06);
+  position:relative;overflow:hidden;
+  clip-path:polygon(0 0,calc(100%-14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100%-14px));
+}
+.call-video-tile.call-video-empty::before{
+  content:'no signal yet';
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--dim);font-size:9px;letter-spacing:.2em;text-transform:uppercase;
+}
+.call-video-tile video{
+  width:100%;height:100%;object-fit:cover;display:block;min-height:200px;
+}
+.call-video-tile .vtile-label{
+  position:absolute;bottom:6px;left:10px;font-size:9px;
+  color:var(--tq);letter-spacing:.1em;
+  background:rgba(4,10,9,.65);padding:2px 6px;
+  clip-path:polygon(0 0,100% 0,100% 100%,4px 100%,0 calc(100%-4px));
+}
+
+/* ── Walkie (audio-only) tile ── */
+.call-video-tile.walkie-tile{
+  min-height:130px;max-width:200px;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;
+}
+.call-video-tile.walkie-tile .vtile-label{
+  position:static;background:none;font-size:11px;
+  color:var(--text);letter-spacing:.05em;padding:0;
+  clip-path:none;
+}
+/* Signal pulse for audio tiles */
+.walkie-tile::before{
+  content:'◈';font-size:1.8rem;line-height:1;color:var(--tq2);
+  animation:walkie-pulse 1.6s ease-in-out infinite;
+}
+@keyframes walkie-pulse{
+  0%,100%{opacity:.4;transform:scale(1)}
+  50%{opacity:1;transform:scale(1.1)}
+}
+
+/* ── PIP (local video) ── */
+.call-pip{
+  position:fixed;width:120px;height:80px;z-index:102;
+  bottom:20px;left:16px;cursor:grab;
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  border:1px solid var(--tq3);
+  box-shadow:0 4px 16px rgba(0,0,0,.6);
+}
+.call-pip.pip-hidden{display:none}
+.call-pip video{width:100%;height:100%;object-fit:cover;display:block}
+.call-pip-label{
+  position:absolute;left:8px;bottom:6px;
+  font-size:8px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--tq);background:rgba(4,10,9,.66);padding:2px 5px;
+}
+.call-pip.cam-off::after{
+  content:'CAM OFF';position:absolute;inset:0;
+  background:var(--bg0);display:flex;align-items:center;justify-content:center;
+  font-size:8px;letter-spacing:.2em;color:var(--mute);
+}
+
+/* ── Call controls — fixed top-right strip ── */
+#call-controls{
+  position:fixed;top:10px;right:12px;z-index:103;
+  display:flex;gap:5px;align-items:center;
+  background:rgba(4,10,9,.8);
+  border:1px solid var(--mute);
+  padding:5px 7px;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  backdrop-filter:blur(8px);
+}
+.ctrl-btn{
+  font-family:inherit;font-size:9px;letter-spacing:.06em;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
+  padding:5px 10px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
+  transition:all .15s;white-space:nowrap;
+}
+.ctrl-btn:hover{border-color:var(--tq);color:var(--tq)}
+.ctrl-btn.active{background:rgba(64,224,208,.1);border-color:var(--tq);color:var(--tq)}
+/* End call */
+.ctrl-btn.danger{
+  border-color:var(--err);color:var(--err);
+  background:rgba(255,96,64,.1);
+  font-weight:700;padding:5px 14px;
+}
+.ctrl-btn.danger:hover{background:rgba(255,96,64,.22);border-color:var(--err)}
+
+/* Camera switch button */
+#ctrl-cam-switch{
+  font-family:inherit;font-size:11px;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
+  padding:4px 7px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
+  transition:all .15s;
+  display:none; /* shown by JS when stream call is active */
+}
+#ctrl-cam-switch:hover{border-color:var(--tq2);color:var(--tq2)}
+
+/* RTT stat */
+#call-stats{
+  position:fixed;bottom:16px;right:16px;z-index:101;
+  font-size:8px;color:var(--dim);letter-spacing:.06em;
+  background:rgba(4,10,9,.5);padding:2px 6px;
+  pointer-events:none;
+}
+
+/* ── Incoming call overlay ───────────────────────────────────────────────── */
+#call-incoming{
+  display:none;position:fixed;
+  top:50px;right:16px;z-index:200;
+  background:var(--bg1);border:1px solid var(--tq2);
+  padding:14px 16px;min-width:220px;
+  clip-path:polygon(0 0,calc(100%-12px) 0,100% 12px,100% 100%,0 100%);
+  box-shadow:0 8px 40px rgba(0,0,0,.7);
+  /* subtle pulse border to draw attention */
+  animation:incoming-ring 2s ease-in-out infinite;
+}
+@keyframes incoming-ring{
+  0%,100%{box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 0 rgba(64,224,208,0)}
+  50%{box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 6px rgba(64,224,208,.08)}
+}
+#call-incoming.visible{display:block}
+.ci-title{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.18em;
+  color:var(--tq2);margin-bottom:8px;text-transform:uppercase;
+}
+.ci-caller{font-size:12px;color:var(--text);margin-bottom:10px}
+.ci-btns{display:flex;gap:8px}
+.ci-btn{
+  flex:1;font-family:inherit;font-size:10px;letter-spacing:.08em;
+  background:transparent;border:1px solid var(--mute);color:var(--dim);
+  padding:5px;cursor:pointer;transition:all .15s;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+}
+/* "tune in" — accept */
+.ci-btn.accept{border-color:var(--ug2);color:var(--ug)}
+.ci-btn.accept:hover{background:rgba(107,255,123,.1)}
+/* "pass" — decline */
+.ci-btn.decline{border-color:rgba(255,96,64,.4);color:var(--err)}
+.ci-btn.decline:hover{background:rgba(255,96,64,.1)}
+
+/* ── Memo panel ──────────────────────────────────────────────────────────── */
+#memo-panel{
+  display:none;position:fixed;
+  bottom:60px;left:50%;transform:translateX(-50%);
+  z-index:150;min-width:260px;
+  background:var(--bg1);border:1px solid var(--mute);
+  clip-path:polygon(0 0,calc(100%-14px) 0,100% 14px,100% 100%,0 100%);
+  padding:14px;box-shadow:0 8px 40px rgba(0,0,0,.7);
+}
+#memo-panel.visible{display:block}
+
+/* ── tqapps ──────────────────────────────────────────────────────────────── */
+.tqapp-ttt{font-size:11px;user-select:none}
+.tqapp-hdr{display:flex;justify-content:space-between;margin-bottom:8px;font-size:9px;letter-spacing:.1em;color:var(--dim)}
+.tqapp-sym{color:var(--tq)}
+.ta-board{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;max-width:180px}
+.ta-cell{
+  height:52px;background:var(--bg1);border:1px solid var(--mute);
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.1rem;cursor:default;
+  clip-path:polygon(0 0,calc(100%-6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100%-6px));
+  transition:background .1s;
+}
+.ta-cell.click{cursor:pointer}
+.ta-cell.click:hover{background:var(--bg2)}
+.ta-cell.win{border-color:var(--tq);background:rgba(64,224,208,.08)}
+.ta-status{font-size:10px;color:var(--dim);margin-top:8px}
+.ta-myturn{color:var(--ug)}
+.ta-win{color:var(--ug)} .ta-loss{color:var(--err)} .ta-draw{color:var(--uy)}
+.ta-btns{display:flex;gap:6px;margin-top:6px}
+.ta-btn{
+  font-family:inherit;font-size:9px;letter-spacing:.08em;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
+  padding:3px 9px;cursor:pointer;transition:all .15s;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
+}
+.ta-btn:hover{border-color:var(--tq);color:var(--tq)}
+.ta-btn.accept:hover{border-color:var(--ug);color:var(--ug)}
+.ta-btn.danger:hover{border-color:var(--err);color:var(--err)}
+.ta-invite{margin-top:6px}
+.ta-inv-text{font-size:10px;color:var(--uy);letter-spacing:.08em;margin-bottom:6px}
+.tqapp-memo{font-size:11px}
+.vm-time{font-size:13px;color:var(--err);font-family:'Syne',sans-serif;font-weight:700}
+.vm-bars{display:flex;gap:2px;align-items:flex-end;height:24px;margin:8px 0}
+.vm-bars span{flex:1;background:var(--tq);opacity:.7;animation:vmbar 0.8s ease-in-out infinite alternate;}
+.vm-bars span:nth-child(2){animation-delay:.1s;animation-duration:.7s}
+.vm-bars span:nth-child(3){animation-delay:.2s;animation-duration:.9s}
+.vm-bars span:nth-child(4){animation-delay:.05s;animation-duration:.6s}
+.vm-bars span:nth-child(5){animation-delay:.15s;animation-duration:1s}
+.vm-bars span:nth-child(6){animation-delay:.25s;animation-duration:.75s}
+.vm-bars span:nth-child(7){animation-delay:.35s;animation-duration:.85s}
+@keyframes vmbar{from{height:4px}to{height:22px}}
+.vm-hint{font-size:9px;color:var(--dim);letter-spacing:.06em;margin-bottom:8px}
+.vm-controls{display:flex;gap:8px}
+.vm-err{font-size:10px;color:var(--err);padding:4px 0}
+
+/* ── Air Hockey ──────────────────────────────────────────────────────────── */
+.tqapp-airh{font-size:11px;user-select:none}
+.ah-field{position:relative;margin:6px 0;line-height:0}
+.ah-field canvas{display:block;cursor:none;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  border:1px solid var(--mute);}
+
+/* ── Chess ───────────────────────────────────────────────────────────────── */
+/* FIXED: Black pieces are now visible — use aquamarine teal, clearly distinct from white */
+.tqapp-chess{font-size:11px;user-select:none;min-width:260px}
+.ch-wrap{display:flex;align-items:flex-start;gap:3px}
+.ch-ranks{display:flex;flex-direction:column;justify-content:space-around;height:240px;font-size:8px;color:var(--dim);letter-spacing:.05em;padding:1px 0}
+.ch-ranks span,.ch-files span{display:flex;align-items:center;justify-content:center}
+.ch-files{display:flex;justify-content:space-around;width:240px;font-size:8px;color:var(--dim);letter-spacing:.05em;margin-left:14px}
+.ch-board{
+  display:grid;grid-template-columns:repeat(8,30px);
+  grid-template-rows:repeat(8,30px);
+  border:1px solid var(--mute);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+}
+.ch-sq{
+  width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;position:relative;transition:background .1s;
+}
+/* Slightly richer board colours — still turquoise tones */
+.ch-light{background:#0e3530}
+.ch-dark{background:#061714}
+.ch-sq:hover{background:rgba(64,224,208,.15)}
+.ch-sel{background:rgba(64,224,208,.28)!important;outline:2px solid var(--tq);outline-offset:-2px}
+.ch-hint{background:rgba(64,224,208,.12)!important}
+.ch-hint .ch-dot{
+  width:8px;height:8px;border-radius:50%;
+  background:rgba(64,224,208,.45);pointer-events:none;
+}
+.ch-check{background:rgba(255,96,64,.22)!important}
+.ch-piece{font-size:1.2rem;line-height:1;pointer-events:none}
+/* White pieces: bright cream — unchanged */
+.ch-w{color:#eef7f4;text-shadow:0 1px 3px rgba(0,0,0,.9),0 0 6px rgba(0,0,0,.5)}
+/* Black pieces: FIXED — bright turquoise so clearly visible on dark board */
+.ch-b{
+  color:#4dffd4;
+  text-shadow:
+    0 0 4px rgba(64,224,208,.7),
+    0 1px 3px rgba(0,0,0,.95),
+    0 0 10px rgba(64,224,208,.25);
+}
+
+/* ── Strand (Snake Duel) ─────────────────────────────────────────────────── */
+.tqapp-snake{font-size:11px;user-select:none}
+.sn-field{position:relative;margin:4px 0;line-height:0}
+.sn-field canvas{
+  display:block;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  border:1px solid var(--mute);
+  background:#040a09;
+}
+
+/* ── Stone Paper Scissors ────────────────────────────────────────────────── */
+.tqapp-sps{font-size:11px;user-select:none}
+.sps-choices{display:flex;gap:8px;margin-top:8px;justify-content:center}
+.sps-choice{
+  font-size:1.8rem;cursor:pointer;padding:6px 10px;
+  background:var(--bg1);border:1px solid var(--mute);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  transition:background .1s,border-color .1s;
+}
+.sps-choice:hover{background:var(--bg2);border-color:var(--tq)}
+.sps-reveal{display:flex;align-items:center;justify-content:center;gap:16px;margin:10px 0}
+.sps-side{display:flex;flex-direction:column;align-items:center;gap:4px}
+.sps-big{font-size:2.2rem;line-height:1}
+.sps-label{font-size:9px;color:var(--dim);letter-spacing:.1em}
+.sps-vs{font-size:9px;color:var(--mute);letter-spacing:.15em}
+.sps-rounds{font-size:9px;color:var(--mute);margin-top:6px;text-align:center;letter-spacing:.05em}
+
+/* ── Tool embed ──────────────────────────────────────────────────────────── */
+.tool-embed{
+  max-width:440px;padding:10px;
+  background:var(--bg2);border-left:2px solid var(--tq3);
+  align-self:stretch;
+}
+.tool-embed.sent{border-left:none;border-right:2px solid var(--tq)}
+
+/* ── Decorative triangles ────────────────────────────────────────────────── */
+#tri-1{
+  position:fixed;top:44px;left:220px;width:0;height:0;
+  border-bottom:28px solid rgba(64,224,208,.03);
+  border-right:60px solid transparent;
+  pointer-events:none;z-index:1;
+}
+#tri-2{
+  position:fixed;bottom:0;right:260px;width:0;height:0;
+  border-top:40px solid rgba(107,255,123,.02);
+  border-left:90px solid transparent;
+  pointer-events:none;z-index:1;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media(max-width:900px){
+  #app{grid-template-columns:220px 1fr 0}
+  #netlog-panel{display:none}
+  #tri-2{display:none}
+}
+@media(max-width:640px){
+  #app{grid-template-columns:0 1fr;grid-template-rows:44px 1fr}
+  #sidebar{display:none}
+  #sidebar.show{
+    display:flex;position:fixed;
+    top:0;left:0;bottom:0;
+    width:220px;z-index:50;
+    grid-row:unset;grid-column:unset;
+  }
+  .call-stage-meta{
+    max-width:calc(100% - 24px);
+    flex-direction:column;align-items:flex-start;gap:3px;
+    top:8px;left:12px;transform:none;
+  }
+  .call-video-tile{min-width:160px}
+  .call-pip{right:50%;transform:translateX(50%);bottom:70px}
+}
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes fadein{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.msg,.file-card,.folder-card,.tool-embed{animation:fadein .18s ease-out}
+
+#peers-list::-webkit-scrollbar{width:2px}
+
+/* ── Sidebar footer ──────────────────────────────────────────────────────── */
+#sidebar-footer{
+  flex-shrink:0;border-top:1px solid var(--mute);padding:8px 10px;
+}
+#sidebar-log-btn{
+  width:100%;font-family:inherit;font-size:9px;letter-spacing:.1em;
+  background:rgba(64,224,208,.04);border:1px solid var(--mute);
+  color:var(--dim);padding:5px 0;cursor:pointer;text-transform:uppercase;
+  clip-path:polygon(0 0,calc(100%-6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100%-6px));
+  transition:all .15s;
+}
+#sidebar-log-btn:hover{border-color:var(--tq2);color:var(--tq)}
+
+/* ── Suggestion / quick-phrase bar ──────────────────────────────────────── */
+#suggest-bar{
+  flex-shrink:0;
+  border-top:1px solid rgba(30,85,80,.4);
+  background:var(--bg1);
+  padding:4px 10px 3px;
+  display:flex;flex-direction:column;gap:3px;
+}
+.sg-phrases,.sg-emojis{
+  display:flex;gap:5px;overflow-x:auto;
+  scrollbar-width:none;
+}
+.sg-phrases::-webkit-scrollbar,.sg-emojis::-webkit-scrollbar{display:none}
+.sg-chip{
+  flex-shrink:0;font-size:10px;color:var(--dim);
+  background:var(--bg2);border:1px solid var(--mute);
+  padding:2px 8px;cursor:pointer;white-space:nowrap;
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+  transition:color .12s,border-color .12s;letter-spacing:.04em;
+}
+.sg-chip:hover{color:var(--tq);border-color:var(--tq2)}
+/* Emoji chips — same turquoise aesthetic but larger and with both geom + regular emoji */
+.sg-emoji{
+  flex-shrink:0;font-size:14px;cursor:pointer;padding:1px 4px;
+  color:var(--tq2);transition:transform .12s,color .12s;line-height:1.4;
+  user-select:none;
+}
+.sg-emoji.regular{
+  color:unset;    /* full color for real emoji */
+  filter:saturate(.85) brightness(.9);
+  transition:transform .12s,filter .12s;
+}
+.sg-emoji:hover,.sg-emoji.regular:hover{transform:scale(1.18);color:var(--tq)}
+.sg-emoji.regular:hover{filter:saturate(1.1) brightness(1)}
+
+
+/* ── Circle members badge (shown in chat header when in circle view) ──────── */
+#circle-members{
+  display:none;
+  flex-direction:column;
+  align-items:flex-end;
+  gap:2px;
+  flex-shrink:0;
+}
+#circle-members.visible{display:flex}
+.cm-count{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.12em;
+  color:var(--tq2);text-transform:uppercase;
+}
+.cm-nodes{
+  display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:160px;
+}
+.cm-node{
+  font-size:8px;color:var(--dim);letter-spacing:.04em;
+  background:rgba(64,224,208,.06);border:1px solid var(--mute);
+  padding:1px 5px;
+  clip-path:polygon(0 0,calc(100%-3px) 0,100% 3px,100% 100%,3px 100%,0 calc(100%-3px));
+  white-space:nowrap;max-width:70px;overflow:hidden;text-overflow:ellipsis;
+}
+.cm-node.online{color:var(--tq);border-color:var(--tq3)}
+
+/* ── Active transfer / game warning strip ────────────────────────────────── */
+#transfer-warn{
+  display:none;
+  font-size:9px;letter-spacing:.06em;
+  color:var(--uy);background:rgba(255,225,74,.06);
+  border-top:1px solid rgba(255,225,74,.18);
+  padding:3px 12px;
+  flex-shrink:0;
+  text-align:center;
+}
+#transfer-warn.visible{display:block}
+
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header id="header">
+    <div id="header-logo">Turquoise</div>
+    <div id="identity-row" title="tap to set your call sign">
+      <span id="nick-display">···</span>
+      <input id="nick-input" maxlength="32" placeholder="set your call sign" autocomplete="off">
+      <span id="name-hint" class="visible">← set call sign</span>
+      <span id="full-fp"></span>
+    </div>
+    <div id="hdr-right">
+      <span id="conn-status">offline</span>
+      <button id="reset-btn" title="reset identity">⟳ reset</button>
+    </div>
+  </header>
+
+  <!-- Decorative triangles -->
+  <div id="tri-1"></div>
+  <div id="tri-2"></div>
+
+  <!-- Sidebar backdrop (mobile tap-to-close) -->
+  <div id="sidebar-backdrop"></div>
+
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div id="peers-label">Nodes <span id="peer-count"></span></div>
+    <div id="peers-list"></div>
+    <div id="sidebar-footer">
+      <button id="sidebar-log-btn" title="download diagnostic log">↓ transmission log</button>
+    </div>
+  </nav>
+
+  <!-- Main chat -->
+  <main id="main">
+    <div id="chat-header">
+      <!-- Back button: turquoise crystal style -->
+      <button id="back-btn" title="back to nodes">nodes</button>
+      <div>
+        <div id="chat-peer-name">—</div>
+        <div id="chat-peer-fp"></div>
+      </div>
+      <!-- Circle members badge: shown by app.js when in circle view -->
+      <div id="circle-members" style="display:none"></div>
+    </div>
+
+    <div id="tool-panel"></div>
+
+    <div id="chat-area"></div>
+
+    <!-- Suggestion bar -->
+    <div id="suggest-bar">
+      <div class="sg-phrases"></div>
+      <div class="sg-emojis"></div>
+    </div>
+
+    <!-- Active-transfer warning -->
+    <div id="transfer-warn">◈ transfer in progress — keep screen on</div>
+
+    <!-- Status bar -->
+    <div id="status-line">initialising…</div>
+
+    <div id="compose-area">
+      <!-- Crystal ◈ instead of plain + -->
+      <button id="plus-btn" title="attach · share · play">◈</button>
+      <div id="msg-wrap">
+        <textarea id="msg-input" rows="1" placeholder="transmit…"></textarea>
+      </div>
+      <button id="send-btn">➤</button>
+    </div>
+
+    <div id="plus-menu"></div>
+  </main>
+
+  <!-- Net log panel (desktop only) -->
+  <aside id="netlog-panel">
+    <div id="netlog-header">
+      <span id="netlog-title">◈ transmission log</span>
+      <div id="netlog-actions">
+        <button id="netlog-export">↓ export</button>
+        <button id="netlog-clear" title="clear display">✕</button>
+      </div>
+    </div>
+    <div id="net-log"></div>
+  </aside>
+
+</div>
+
+<!-- Hidden inputs -->
+<input type="file" id="__file-input" multiple style="display:none">
+<input type="file" id="__import-input" accept=".json" style="display:none">
+
+<!-- Call panels removed — calls disabled pending fix.
+     Stubs kept so app.js references don't throw. -->
+<div id="call-incoming" style="display:none!important">
+  <div class="ci-caller" id="ci-caller-name"></div>
+  <button id="ci-accept" style="display:none"></button>
+  <button id="ci-decline" style="display:none"></button>
+</div>
+<div id="call-panel" style="display:none!important">
+  <div id="call-videos"></div>
+  <div id="call-stats"></div>
+  <div id="call-controls" style="display:none">
+    <button id="ctrl-mute" style="display:none"></button>
+    <button id="ctrl-cam"  style="display:none"></button>
+    <button id="ctrl-cam-switch" style="display:none"></button>
+    <button id="ctrl-end"  style="display:none"></button>
+  </div>
+</div>
+
+<!-- Voice memo overlay -->
+<div id="memo-panel"></div>
+
+<!-- Inject name-hint hide logic: once nick is set, remove hint -->
+<script type="module" src="/main.js"></script>
+<script>
+  // Hide the name hint once user saves a name (non-default)
+  // This runs after app.js mounts and updates nick-display
+  const _observer = new MutationObserver(() => {
+    const nd = document.getElementById('nick-display');
+    const hint = document.getElementById('name-hint');
+    if (!nd || !hint) return;
+    const v = nd.textContent.trim();
+    // '···' is the loading placeholder; a short hex is the auto-id
+    const isDefault = v === '···' || /^[a-f0-9]{8}$/.test(v);
+    hint.classList.toggle('visible', isDefault);
+  });
+  const nd = document.getElementById('nick-display');
+  if (nd) _observer.observe(nd, { childList:true, characterData:true, subtree:true });
+</script>
+</body>
+</html>
