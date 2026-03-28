@@ -825,6 +825,16 @@ body{font-family:'Space Mono',monospace;font-size:13px}
     0 0 10px rgba(64,224,208,.25);
 }
 
+/* ── Strand (Snake Duel) ─────────────────────────────────────────────────── */
+.tqapp-snake{font-size:11px;user-select:none}
+.sn-field{position:relative;margin:4px 0;line-height:0}
+.sn-field canvas{
+  display:block;
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
+  border:1px solid var(--mute);
+  background:#040a09;
+}
+
 /* ── Stone Paper Scissors ────────────────────────────────────────────────── */
 .tqapp-sps{font-size:11px;user-select:none}
 .sps-choices{display:flex;gap:8px;margin-top:8px;justify-content:center}

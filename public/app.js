@@ -28,14 +28,14 @@ import { resetIdentity, importIdentityData } from './identity.js';
 import { TQLog } from './tqlog.js';
 import { FileTransfer }   from './files.js';
 import { FolderTransfer } from './folder.js';
-import { TicTacToe, StonePaperScissors, Chess, AirHockey, VoiceMemo } from './tqapps.js';
+import { TicTacToe, StonePaperScissors, Chess, AirHockey, SnakeDuel, VoiceMemo } from './tqapps.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const fmt  = b => !b ? '0 B' : b < 1024 ? b+' B' : b < 1_048_576 ? (b/1024).toFixed(1)+' KB' : b < 1_073_741_824 ? (b/1_048_576).toFixed(1)+' MB' : (b/1_073_741_824).toFixed(2)+' GB';
 const fmtSpd = s => !s ? '—' : s < 1024 ? s.toFixed(0)+' B/s' : s < 1_048_576 ? (s/1024).toFixed(1)+' KB/s' : (s/1_048_576).toFixed(2)+' MB/s';
 const fmtEta = s => !s||s<=0||!isFinite(s) ? '—' : s<60 ? Math.ceil(s)+'s' : Math.floor(s/60)+'m'+Math.ceil(s%60)+'s';
-const gameLabel = type => type==='ttt' ? 'tic tac toe' : type==='sps' ? 'stone paper scissors' : type==='airh' ? 'air hockey' : 'chess';
+const gameLabel = type => type==='ttt' ? 'tic tac toe' : type==='sps' ? 'stone paper scissors' : type==='airh' ? 'air hockey' : type==='snake' ? 'strand' : 'chess';
 
 const CIRCLE = 'circle';
 const TTL    = 60_000;
@@ -286,6 +286,7 @@ export class TurquoiseApp {
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✦  stone paper scissors</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-chess">♟  chess</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-airh">◉  air hockey</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-snake">⟐  strand</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -298,6 +299,7 @@ export class TurquoiseApp {
     $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('node offline',true); });
     $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('node offline',true); });
     $('pmi-airh')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'airh'); else this._sys('node offline',true); });
+    $('pmi-snake')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'snake'); else this._sys('node offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); this._suppressVisibleReconnect(); $('__import-input')?.click(); });
   }
@@ -928,11 +930,12 @@ export class TurquoiseApp {
     if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
     if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
     if (gameType === 'airh')  return new AirHockey(fp, this.id.fingerprint, send, close);
+    if (gameType === 'snake') return new SnakeDuel(fp, this.id.fingerprint, send, close);
     return new TicTacToe(fp, this.id.fingerprint, send, close);
   }
 
   _startGame(fp, gameType) {
-    if (!['ttt','sps','chess','airh'].includes(gameType)) return;
+    if (!['ttt','sps','chess','airh','snake'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       const key = fp + ':' + gameType;
       const game = this._makeGame(fp, gameType);
