@@ -1,21 +1,25 @@
 /**
- * app.js — Turquoise v7.1
+ * app.js — Turquoise v7.2
  *
- * Fixes over v7:
- *   - net.peers internal Map access replaced with net.isReady(fp) everywhere (×5)
- *   - loadAllMessages static import (no dynamic import hack)
- *   - _renderCallPanel / _renderCircleCallPanel: remove old PIP before appending new one
- *   - _makePIPDraggable: returns cleanup fn; cleanup called when call ends
- *   - _attachRemote1to1 / _attachCircleRemote: use net.setRemoteStreamHandler()
- *     instead of overwriting ps.pc.ontrack
- *   - _onOfferReneg / _onCircleOfferReneg: pass sdp to answerWithStream (new sig)
- *   - Dead _appendToolEmbed and type==='tool' branch removed
- *   - clearMessages import removed (not used)
- *   - Folder history reload: _finalizeFolderCard only called when download fns
- *     exist (live transfer); history cards shown as read-only with no broken btns
- *   - _sendFolder deduplication: delegates to FolderTransfer.sendFolder()
- *   - Status bar moved out of netlog panel into #main so it's visible on mobile
- *   - Back button closes sidebar overlay + taps backdrop
+ * Changes over v7.1:
+ *   - All call/UI labels use Turquoise-specific naming:
+ *     walkie → signal, video → eyes·on, accept → tune·in, decline → pass
+ *   - Circle call "waiting for peer" fixed: track _connecting set (peers who
+ *     accepted but whose stream hasn't arrived yet); render named placeholder
+ *     tiles for them so the panel is never deceptively empty.
+ *   - Camera front/back flip: _switchCamera() with facingMode toggle.
+ *     ctrl-cam-switch button shown only during stream (video) calls.
+ *   - _appendCallMeta() now appends to the call panel (not #call-videos) so
+ *     position:absolute badge layout works correctly.
+ *   - _renderCallPanel/_renderCircleCallPanel: phase status text uses new names.
+ *   - _buildSuggestions(): emoji row now mixes turquoise geometric symbols with
+ *     regular colour emoji for richer input options.
+ *   - _buildPlus(): renamed menu items with turquoise vocabulary.
+ *   - _startCall / _startCircleCall: status text uses new names.
+ *   - _bindUI: wires ctrl-cam-switch button.
+ *   - _removeCirclePeer: only calls _endCircleCall when ALL remote streams are
+ *     gone AND no peers are still connecting — prevents premature call teardown
+ *     when one peer drops before their stream arrives.
  */
 
 import { saveMessage, loadMessages, loadAllMessages, clearAllData,
@@ -91,17 +95,16 @@ export class TurquoiseApp {
     this._folderSendByFile = new Map();
     this._memo      = null;
     this._statsTimer= null;
-    this._pipCleanup= null;   // cleanup fn for PIP drag listeners
+    this._pipCleanup= null;
     this.games      = new Map();
+
+    // Camera facing mode for video calls (front/back flip)
+    this._facingMode = 'user';   // 'user' = front, 'environment' = back
 
     this._audioEl = Object.assign(document.createElement('audio'), {autoplay:true, playsInline:true, style:'display:none'});
     document.body.appendChild(this._audioEl);
 
     // circleFileIds: Map<fileId, remainingPeerCount>
-    // Each file-end/abort decrements the counter; delete only when it reaches 0.
-    // Using a plain Set caused premature deletion on the FIRST file-end (one per
-    // recipient), so subsequent recipients received no circle:true flag and the
-    // file card was routed to their individual chat instead of the circle session.
     this._circleFileIds = new Map();
     this.ft = new FileTransfer(
       (fp,m) => {
@@ -141,10 +144,6 @@ export class TurquoiseApp {
     try {
       for (const p of await loadPeers()) {
         this.peers.set(p.fingerprint, {nick:p.nickname||p.fingerprint.slice(0,8), connected:false});
-        // Pre-register in network's _known so _reconnectKnown() re-establishes
-        // connections immediately after reload without waiting for the server to
-        // broadcast their presence. Without this, _known is empty after reload
-        // and both sides stall waiting for each other to announce first.
         this.net.addKnownPeer(p.fingerprint, p.nickname||p.fingerprint.slice(0,8));
       }
     } catch {}
@@ -157,7 +156,7 @@ export class TurquoiseApp {
 
     this._buildSuggestions();
     if (this.id.isNewUser) {
-      this._status('tap your name to set it','info');
+      this._status('tap your call sign to set it','info');
       setTimeout(() => this._startNickEdit(), 500);
     } else {
       this._status('connecting…','info');
@@ -186,7 +185,7 @@ export class TurquoiseApp {
         nd.textContent = saved; ni.value = saved;
         nd.classList.remove('hidden'); ni.classList.remove('visible');
         this.net.getConnectedPeers().forEach(fp => this.net.sendCtrl(fp,{type:'nick-update',nick:saved}));
-        this._status('name: '+saved,'ok',3000);
+        this._status('call sign: '+saved,'ok',3000);
       };
       ni.addEventListener('keydown', e => { if(e.key==='Enter'||e.key==='Escape'){e.preventDefault();save();} });
       ni.addEventListener('blur', save);
@@ -216,7 +215,6 @@ export class TurquoiseApp {
     }
 
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
-    // Sidebar log download — visible on mobile where the netlog panel is hidden
     $('sidebar-log-btn')?.addEventListener('click', () => TQLog.get().exportToFile(this.id.fingerprint));
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
@@ -231,6 +229,7 @@ export class TurquoiseApp {
     });
     $('ctrl-mute')?.addEventListener('click', () => this._toggleMute());
     $('ctrl-cam')?.addEventListener('click',  () => this._toggleCam());
+    $('ctrl-cam-switch')?.addEventListener('click', () => this._switchCamera());
     $('ctrl-end')?.addEventListener('click',  () => { if(this.circleCall) this._endCircleCall(); else this._endCallLocal(true); });
     $('ci-accept')?.addEventListener('click',  () => {
       const d=$('call-incoming'), fp=d?.dataset.callFp;
@@ -258,8 +257,6 @@ export class TurquoiseApp {
     const was = m.classList.contains('visible');
     this._closePlus();
     if (!was) {
-      // Position above the plus button using fixed coords so the menu works
-      // regardless of parent overflow context (#main is overflow:hidden).
       const r = btn.getBoundingClientRect();
       m.style.left   = r.left + 'px';
       m.style.bottom = (window.innerHeight - r.top + 4) + 'px';
@@ -277,45 +274,52 @@ export class TurquoiseApp {
     const online   = !isCircle && this.net.isReady(fp||'');
     const anyOnline= this.net.getConnectedPeers().length > 0;
     const canSend  = isCircle ? anyOnline : online;
-    // Games need a single known opponent, not a broadcast group
     const canGame  = online && !isCircle;
 
     menu.innerHTML = `
-      <div class="pm-item" id="pmi-file">📎  file</div>
-      <div class="pm-item" id="pmi-folder">📁  folder</div>
-      <div class="pm-item" id="pmi-memo">🎤  voice memo</div>
+      <div class="pm-item" id="pmi-file">◈  transmit file</div>
+      <div class="pm-item" id="pmi-folder">◫  transmit folder</div>
+      <div class="pm-item" id="pmi-memo">◎  voice fragment</div>
       <div class="pm-sep"></div>
-      <div class="pm-label">◈ games</div>
+      <div class="pm-label">◈ play together</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
-      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✂︎  stone paper scissors</div>
+      <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✦  stone paper scissors</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-chess">♟  chess</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-airh">◉  air hockey</div>
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
 
-    const guard = fn => () => { this._closePlus(); if (!canSend) { this._sys('no peers available',true); return; } fn(); };
+    const guard = fn => () => { this._closePlus(); if (!canSend) { this._sys('no nodes available',true); return; } fn(); };
     $('pmi-file')?.addEventListener('click',   guard(() => { this._suppressVisibleReconnect(); $('__file-input')?.click(); }));
     $('pmi-folder')?.addEventListener('click', guard(() => this._sendFolder()));
     $('pmi-memo')?.addEventListener('click',   guard(() => this._startVoiceMemo()));
-    $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('peer offline',true); });
-    $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('peer offline',true); });
-    $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('peer offline',true); });
-    $('pmi-airh')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'airh'); else this._sys('peer offline',true); });
+    $('pmi-ttt')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'ttt'); else this._sys('node offline',true); });
+    $('pmi-sps')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'sps'); else this._sys('node offline',true); });
+    $('pmi-chess')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'chess'); else this._sys('node offline',true); });
+    $('pmi-airh')?.addEventListener('click', () => { this._closePlus(); if(canGame) this._startGame(fp,'airh'); else this._sys('node offline',true); });
     $('pmi-export')?.addEventListener('click', () => { this._closePlus(); this._exportState(); });
     $('pmi-import')?.addEventListener('click', () => { this._closePlus(); this._suppressVisibleReconnect(); $('__import-input')?.click(); });
   }
 
   // ── Suggestion bar ────────────────────────────────────────────────────────
+
   _buildSuggestions() {
     const bar = $('suggest-bar'); if (!bar) return;
     const PHRASES = [
       'hey','on my way','be right back','ok','got it',
-      'can you hear me?','send the file','try again','sounds good','Play a game?',
+      'can you hear me?','send the file','try again','sounds good','play a game?',
     ];
-    const EMOJI = ['◈','◉','▸','△','▷','⬡','✦','✧','⟐','⊞','◌','◎','⋄','◆','❖'];
+
+    // Mixed: turquoise geometric + regular colour emoji
+    // Geometric symbols use .sg-emoji (turquoise tinted)
+    // Regular emoji use .sg-emoji.regular (full color)
+    const GEO   = ['◈','◉','▸','△','▷','⬡','✦','✧','⟐','⊞','◌','◎','⋄','◆','❖'];
+    const REAL  = ['😂','❤️','🔥','👍','🙏','✅','💯','🤝','👀','🫡','⚡','🌊','🎯','💎','🌀'];
+
     const pRow = bar.querySelector('.sg-phrases');
     const eRow = bar.querySelector('.sg-emojis');
+
     if (pRow && !pRow.children.length) {
       PHRASES.forEach(t => {
         const el=document.createElement('span'); el.className='sg-chip'; el.textContent=t;
@@ -324,8 +328,17 @@ export class TurquoiseApp {
       });
     }
     if (eRow && !eRow.children.length) {
-      EMOJI.forEach(e => {
-        const el=document.createElement('span'); el.className='sg-emoji'; el.textContent=e;
+      // Interleave geometric and real emoji for visual richness
+      const merged = [];
+      const len = Math.max(GEO.length, REAL.length);
+      for (let i=0; i<len; i++) {
+        if (i < GEO.length)  merged.push({e:GEO[i],  real:false});
+        if (i < REAL.length) merged.push({e:REAL[i], real:true});
+      }
+      merged.forEach(({e, real}) => {
+        const el=document.createElement('span');
+        el.className = real ? 'sg-emoji regular' : 'sg-emoji';
+        el.textContent=e;
         el.addEventListener('click',()=>{ const i=$('msg-input'); if(i){i.value=(i.value||'')+e;i.focus();i.dispatchEvent(new Event('input'));} });
         eRow.appendChild(el);
       });
@@ -366,7 +379,6 @@ export class TurquoiseApp {
     if (!this.sessions.has(fp)) {
       loadMessages(fp).then(msgs => { this.sessions.set(fp,msgs); this._renderPeers(); if(this.active===fp) this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
     } else this._renderPeers();
-    // Refresh header for the connected peer AND for circle (peer count changes)
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' joined','ok',3000);
   }
@@ -376,13 +388,9 @@ export class TurquoiseApp {
     if (p) p.connected=false;
     if (this.call?.fp===fp) this._endCallLocal(false);
     if (this.circleCall) this._removeCirclePeer(fp);
-    // Destroy every game associated with this peer (keys are fp:gameType)
     for (const [key, game] of this.games) {
       if (key.startsWith(fp + ':')) { game?.destroy?.(); this.games.delete(key); }
     }
-    // Cancel all in-flight file sends to this peer immediately.
-    // Without this, FileTransfer waits for its 30s stall timer before reporting
-    // failure, leaving the progress bar frozen with no feedback.
     for (const [fileId, info] of this._fileOwners) {
       if (info.fps.includes(fp)) {
         this.ft.cancelSend(fileId, fp);
@@ -391,7 +399,6 @@ export class TurquoiseApp {
         if (!info.fps.length) this._fileOwners.delete(fileId);
       }
     }
-    // Cancel any in-progress receive from this peer (get fileId from recv state)
     const recvState = this.ft._recv?.get(fp);
     if (recvState?.fileId) this.ft.cancelRecv(fp, recvState.fileId);
     this._renderPeers();
@@ -435,15 +442,15 @@ export class TurquoiseApp {
     if (fpe) {
       if (isCircle) {
         const n = this.net.getConnectedPeers().length;
-        fpe.textContent = n === 0 ? 'no peers online' : n === 1 ? '1 peer online' : `${n} peers online`;
+        fpe.textContent = n === 0 ? 'no nodes online' : n === 1 ? '1 node online' : `${n} nodes online`;
       } else {
         const tier = this.net.connTier(fp);
         fpe.textContent = tier === 'p2p' ? 'p2p · direct' : tier === 'ws-relay' ? 'relay' : fp ? fp.slice(0,16)+'…' : '';
       }
     }
     const bw=$('btn-walkie'), bv=$('btn-stream');
-    if(bw) bw.textContent = isCircle ? '☎ walkie circle' : '☎ walkie';
-    if(bv) bv.textContent = isCircle ? '⬡ video circle'  : '⬡ video';
+    if(bw) bw.textContent = isCircle ? '◈ signal·circle' : '◈ signal';
+    if(bv) bv.textContent = isCircle ? '◉ eyes·circle'   : '◉ eyes·on';
   }
 
   async _openSession(fp) {
@@ -500,7 +507,7 @@ export class TurquoiseApp {
       btn.addEventListener('click',()=>this._cancelFile(msg)); el.appendChild(btn);
     } else if (msg.status==='done') {
       const f=this._fileUrls.get(msg.fileId); if(f) this._attachDownload(el,f);
-      else if (msg.own) this._setFileCardNote(el, 'sent');
+      else if (msg.own) this._setFileCardNote(el, 'transmitted');
     } else if (msg.status==='error' && msg._sentError) {
       this._setFileCardNote(el, `⚠ ${msg._sentError}`, 'err');
     }
@@ -526,17 +533,15 @@ export class TurquoiseApp {
     el.dataset.folderid=msg.folderId;
     const inProg=msg.status==='sending'||msg.status==='receiving';
     el.innerHTML=`
-      <div class="fname">📁 ${esc(msg.name||'folder')}</div>
+      <div class="fname">◫ ${esc(msg.name||'folder')}</div>
       <div class="fsize">${fmt(msg.totalSize||0)} · ${msg.fileCount||0} files</div>
       ${!msg.own?`<div style="font-size:9px;color:var(--dim)">from ${esc(msg.fromNick||'?')}</div>`:''}
       ${inProg?`<div class="folder-count">0 / ${msg.fileCount||0} files</div><div class="prog-track"><div class="prog-fill"></div></div>`:''}`;
-    // Only wire download buttons when live transfer data is present.
-    // History reloads have no download fns — show "files no longer available" instead.
     if (msg.status==='done' && msg._downloadFns) {
       this._finalizeFolderCard(el, msg._downloadFns);
     } else if (msg.status==='done' && msg.own && msg._sentInfo) {
       const peers = msg._sentInfo.peerCount || 1;
-      this._setFolderCardNote(el, `sent to ${peers} peer${peers===1?'':'s'}`);
+      this._setFolderCardNote(el, `transmitted to ${peers} node${peers===1?'':'s'}`);
     } else if (msg.status==='error' && msg._sentError) {
       this._setFolderCardNote(el, `⚠ ${msg._sentError}`, 'err');
     } else if (msg.status==='done') {
@@ -604,20 +609,17 @@ export class TurquoiseApp {
     if (type==='call-accept')  { msg.circle?this._onCircleCallAccepted(fp):this._onCallAccepted(fp); return; }
     if (type==='call-decline') { msg.circle?this._onCircleCallDeclined(fp):this._onCallDeclined(fp); return; }
     if (type==='offer-reneg')  { msg.circle?this._onCircleOfferReneg(fp,msg):this._onOfferReneg(fp,msg); return; }
-    if (type==='answer-reneg') { /* SDP answer handled by webrtc.js _onAnswer via net — no app action needed */ return; }
+    if (type==='answer-reneg') { return; }
     if (type==='call-end')     {
       if(this.circleCall) this._removeCirclePeer(fp);
       if(this.call?.fp===fp) {
-        this._endCallLocal(false); this._status('call ended','info',3000);
+        this._endCallLocal(false); this._status('signal ended','info',3000);
       } else {
-        // Panel may still be visible (e.g. race between disconnect and call-end)
         this._audioEl.srcObject=null;
         this._renderCallPanel();
       }
       this._hideCallIncoming(); return;
     }
-    // Coordinator notifies existing circle members when a new peer joins.
-    // We offer our stream to that new peer to complete the full mesh.
     if (type==='circle-peer-joined'&&msg.circle) {
       const newFp=msg.newPeer;
       if (newFp && this.circleCall?.localStream && !this.circleCall.remoteStreams.has(newFp)) {
@@ -627,7 +629,6 @@ export class TurquoiseApp {
       return;
     }
     if (type==='circle-peer-left'&&msg.circle) {
-      // A coordinator told us someone else left the circle call
       if (msg.leftPeer && this.circleCall) this._removeCirclePeer(msg.leftPeer);
       return;
     }
@@ -666,13 +667,13 @@ export class TurquoiseApp {
     const id=crypto.randomUUID(), ts=Date.now();
     if (this.active===CIRCLE) {
       const fps=this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp));
-      if (!fps.length) { this._sys('no peers in circle',true); return; }
+      if (!fps.length) { this._sys('no nodes in circle',true); return; }
       fps.forEach(fp=>this.net.sendCtrl(fp,{type:'chat',circle:true,id,nick:this.id.nickname,text,ts}));
       const msg={id,sessionId:CIRCLE,from:this.id.fingerprint,fromNick:this.id.nickname,text,ts,type:'text',own:true};
       this._pushMsg(CIRCLE,msg,()=>this._appendMsg(msg)); saveMessage(msg).catch(()=>{});
     } else {
       const fp=this.active;
-      if (!this.net.isReady(fp)) { this._sys('peer offline — message not sent',true); return; }
+      if (!this.net.isReady(fp)) { this._sys('node offline — message not sent',true); return; }
       if (!this.net.sendCtrl(fp,{type:'chat',id,nick:this.id.nickname,text,ts})) { this._sys('send failed',true); return; }
       const msg={id,sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,text,ts,type:'text',own:true};
       this._pushMsg(fp,msg,()=>this._appendMsg(msg)); saveMessage(msg).catch(()=>{});
@@ -685,9 +686,6 @@ export class TurquoiseApp {
   _queueFile(file) {
     if (!file||!this.active) return;
     const sid=this.active, isCircle=sid===CIRCLE;
-    // Keep file ctrl/meta/end and binary chunks on the same live transport.
-    // Starting in the ctrl-open/data-closed gap can mix WS-relayed chunks with
-    // ctrl-channel end markers, which races and breaks assembly.
     const _peerOk = fp => this.net.isBinaryReady(fp);
     const connected = isCircle
       ? this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp))
@@ -695,8 +693,8 @@ export class TurquoiseApp {
     const fps = connected.filter(_peerOk);
     if (!fps.length) {
       const waiting = connected.length > 0;
-      this._log.warn('app','_queueFile', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no peers in circle':'peer offline'}`, { active:sid, circle:isCircle, connected:connected.length });
-      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
+      this._log.warn('app','_queueFile', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no nodes in circle':'node offline'}`, { active:sid, circle:isCircle, connected:connected.length });
+      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no nodes in circle':'node offline'), true);
       return;
     }
     this._log.info('app','_queueFile', `sending ${file.name}`, { size:file.size, peers:fps.length, circle:isCircle });
@@ -704,10 +702,9 @@ export class TurquoiseApp {
     const fmsg={id:fileId+'_send',sessionId:sid,from:this.id.fingerprint,fromNick:this.id.nickname,type:'file',fileId,name:file.name,size:file.size,mimeType:file.type||'application/octet-stream',ts:Date.now(),own:true,status:'sending'};
     this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
     this._fileOwners.set(fileId,{fps:[...fps], pending:new Set(fps), totalPeers:fps.length});
-    // Register fileId as circle-origin so ft._ctrl wrapper injects circle:true
     if (isCircle) this._circleFileIds.set(fileId, fps.length);
     fps.forEach(fp=>this.ft.send(file,fp,fileId));
-    this._status('sending '+file.name+'…','info');
+    this._status('transmitting '+file.name+'…','info');
   }
 
   _cancelFile(msg) {
@@ -740,7 +737,7 @@ export class TurquoiseApp {
         card.querySelector('.prog-track')?.remove();
         card.querySelector('.file-stats')?.remove();
         card.querySelector('.file-cancel')?.remove();
-        this._setFileCardNote(card, `sent${info?.totalPeers>1?` to ${info.totalPeers} peers`:''}`);
+        this._setFileCardNote(card, `transmitted${info?.totalPeers>1?` to ${info.totalPeers} nodes`:''}`);
       });
       return;
     }
@@ -787,7 +784,7 @@ export class TurquoiseApp {
       card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove(); card.querySelector('.file-cancel')?.remove();
       this._setFileCardNote(card, `⚠ ${errMsg}`, 'err');
     });
-    if (errMsg!=='Cancelled') this._status('file error: '+errMsg,'err',5000);
+    if (errMsg!=='Cancelled') this._status('transfer error: '+errMsg,'err',5000);
   }
 
   // ── Folder ─────────────────────────────────────────────────────────────────
@@ -803,8 +800,8 @@ export class TurquoiseApp {
     const fps = connected.filter(_peerOk);
     if (!fps.length) {
       const waiting = connected.length > 0;
-      this._log.warn('app','_sendFolder', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no peers in circle':'peer offline'}`, { active:sid, circle:isCircle, connected:connected.length });
-      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no peers in circle':'peer offline'), true);
+      this._log.warn('app','_sendFolder', waiting ? 'blocked: file channel opening' : `blocked: ${isCircle?'no nodes in circle':'node offline'}`, { active:sid, circle:isCircle, connected:connected.length });
+      this._sys(waiting ? 'file channel opening — try again in a moment' : (isCircle?'no nodes in circle':'node offline'), true);
       return;
     }
 
@@ -831,7 +828,7 @@ export class TurquoiseApp {
       this.net.sendCtrl(fp,{type:'folder-manifest',folderId,name:folderName,totalSize,files:fileList,circle:isCircle||undefined});
       entries.forEach((e,i)=>this.ft.send(e.file,fp,fileList[i].fileId));
     });
-    this._status(`sending folder "${folderName}" (${fileList.length} files)…`,'info');
+    this._status(`transmitting "${folderName}" (${fileList.length} files)…`,'info');
   }
 
   _onFolderProg(folderId, done, total) {
@@ -887,9 +884,9 @@ export class TurquoiseApp {
     if (card) {
       card.querySelector('.prog-track')?.remove();
       card.querySelector('.folder-count')?.remove();
-      this._setFolderCardNote(card, `sent to ${state.peerCount} peer${state.peerCount===1?'':'s'}`);
+      this._setFolderCardNote(card, `transmitted to ${state.peerCount} node${state.peerCount===1?'':'s'}`);
     }
-    this._status(`folder "${state.name}" sent to ${state.peerCount} peer${state.peerCount===1?'':'s'}`,'ok',6000);
+    this._status(`folder "${state.name}" transmitted to ${state.peerCount} node${state.peerCount===1?'':'s'}`,'ok',6000);
   }
 
   _failOutgoingFolder(folderId, errMsg, _fp) {
@@ -916,7 +913,7 @@ export class TurquoiseApp {
     if (this._memo) { this._memo.cancel(); this._memo=null; }
     panel.classList.add('visible');
     const memo=new VoiceMemo(
-      file => { panel.classList.remove('visible'); panel.innerHTML=''; this._memo=null; this._queueFile(file); this._status('voice memo sent','ok',3000); },
+      file => { panel.classList.remove('visible'); panel.innerHTML=''; this._memo=null; this._queueFile(file); this._status('voice fragment transmitted','ok',3000); },
       ()   => { panel.classList.remove('visible'); panel.innerHTML=''; this._memo=null; }
     );
     this._memo=memo; memo.start(panel);
@@ -938,15 +935,10 @@ export class TurquoiseApp {
     if (!['ttt','sps','chess','airh'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       const key = fp + ':' + gameType;
-      // Always create a fresh game so a new invite = new session
       const game = this._makeGame(fp, gameType);
-      // Inviter is always white; set immediately so the board renders correctly
-      // while waiting for the accept. The accept handler also sets it but this
-      // ensures the waiting state shows the right orientation and "you: white".
       if (gameType === 'chess') game.myColor = 'w';
       this.games.set(key, game);
       this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
-      // Persist a record so chat history survives reload
       const label = gameLabel(gameType);
       const rec={id:crypto.randomUUID(),sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,
         type:'text',own:true,ts:Date.now(),text:`▶ started ${label}`};
@@ -982,52 +974,62 @@ export class TurquoiseApp {
   // ── 1:1 Calls ──────────────────────────────────────────────────────────────
 
   async _startCall(fp, callType) {
-    if (!this.net.isReady(fp)) { this._sys('peer offline',true); return; }
-    if (this.call) { this._sys('already in a call',true); return; }
+    if (!this.net.isReady(fp)) { this._sys('node offline',true); return; }
+    if (this.call) { this._sys('already in a signal',true); return; }
     const video=callType==='stream';
-    let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this._handleMediaError(e,fp); return; }
+    let s;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: video ? {facingMode: this._facingMode} : false
+      });
+    } catch(e) { this._handleMediaError(e,fp); return; }
     this.call={fp,type:callType,phase:'inviting',localStream:s,remoteStream:null,muted:false,camOff:false,inviteTimer:setTimeout(()=>this._onCallTimeout(fp),45_000)};
     this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname});
-    this._status(callType+' — calling '+(this.peers.get(fp)?.nick||fp.slice(0,8))+'…','info');
+    const label = callType==='stream' ? 'eyes·on' : 'signal';
+    this._status(`${label} — calling ${this.peers.get(fp)?.nick||fp.slice(0,8)}…`,'info');
     this._renderCallPanel();
   }
 
   _onCallInvite(fp, msg) {
     if (this.call&&this.call.fp!==fp) { this.net.sendCtrl(fp,{type:'call-decline'}); return; }
     this.call={fp,type:msg.callType==='stream'?'stream':'walkie',phase:'ringing',localStream:null,remoteStream:null,muted:false,camOff:false};
-    this._showCallIncoming(fp,msg.callType||'walkie',msg.nick,false);
+    const label = msg.callType==='stream' ? 'eyes·on' : 'signal';
+    this._showCallIncoming(fp,label,msg.nick,false);
   }
 
   _onCallAccepted(fp) {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='inviting') return;
     clearTimeout(this.call.inviteTimer); this.call.phase='connecting';
-    // Register the remote stream handler BEFORE sending the offer so the track
-    // event cannot fire between offerWithStream and the .then() callback.
-    // Previously registered in .then() — if the remote answered very fast the
-    // track event fired while onRemoteStream was still null and audio was lost.
     this._attachRemote1to1(fp);
     this.net.offerWithStream(fp, this.call.localStream)
-      .catch(e=>{ this._status('call failed: '+e.message,'err',5000); this._endCallLocal(true); });
+      .catch(e=>{ this._status('signal failed: '+e.message,'err',5000); this._endCallLocal(true); });
   }
 
   _onCallDeclined(fp) {
     if (!this.call||this.call.fp!==fp) return;
     clearTimeout(this.call.inviteTimer);
     this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null; this._renderCallPanel();
-    this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' declined','warn',5000);
+    this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' passed','warn',5000);
   }
 
   _onCallTimeout(fp) {
     if (!this.call||this.call.fp!==fp) return;
     this.call.localStream?.getTracks().forEach(t=>t.stop()); this.call=null; this._renderCallPanel();
-    this._status('no answer — timed out','warn',5000);
+    this._status('no answer — signal timed out','warn',5000);
   }
 
   async _acceptCall(fp) {
     if (!this.call||this.call.fp!==fp||this.call.phase!=='ringing') return;
     this._hideCallIncoming();
     const video=this.call.type==='stream';
-    let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
+    let s;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: video ? {facingMode: this._facingMode} : false
+      });
+    }
     catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this.call=null; this._handleMediaError(e,fp); return; }
     this.call.localStream=s; this.call.phase='connecting';
     this.net.sendCtrl(fp,{type:'call-accept'});
@@ -1040,28 +1042,23 @@ export class TurquoiseApp {
     this.net.sendCtrl(fp,{type:'call-decline'}); this._renderCallPanel();
   }
 
-  // Called when we receive an offer-reneg (we are the answering side of the call).
-  // msg.sdp is the offer SDP — must be passed to answerWithStream.
   _onOfferReneg(fp, msg) {
     if (!this.call || this.call.fp !== fp) return;
     if (!this.call.localStream) {
-      // getUserMedia may still be in flight (acceptCall is async).
-      // Retry once per 200ms for up to 5s rather than silently dropping.
       if (!this.call._offerRenegPending) this.call._offerRenegPending = msg;
       const retry = () => {
         if (!this.call || this.call.fp !== fp) return;
         if (this.call.localStream) { this._onOfferReneg(fp, this.call._offerRenegPending||msg); return; }
         if ((this.call._offerRenegRetries = (this.call._offerRenegRetries||0)+1) < 25)
           setTimeout(retry, 200);
-        else this._status('media not ready — call failed','err',5000);
+        else this._status('media not ready — signal failed','err',5000);
       };
       setTimeout(retry, 200);
       return;
     }
-    // Register handler first so track event can't race ahead
     this._attachRemote1to1(fp);
     this.net.answerWithStream(fp, msg.sdp, this.call.localStream)
-      .catch(e=>{ this._status('call answer failed: '+e.message,'err',5000); this._endCallLocal(true); });
+      .catch(e=>{ this._status('signal answer failed: '+e.message,'err',5000); this._endCallLocal(true); });
   }
 
   _attachRemote1to1(fp) {
@@ -1080,7 +1077,8 @@ export class TurquoiseApp {
         this.call.remoteStream=stream; this.call.phase='active';
         this._renderCallPanel();
         this._startStatsPolling(fp);
-        this._status(this.call.type+' on · '+(this.peers.get(fp)?.nick||fp.slice(0,8)),'ok');
+        const label = this.call.type==='stream' ? 'eyes·on' : 'signal';
+        this._status(`${label} live · ${this.peers.get(fp)?.nick||fp.slice(0,8)}`,'ok');
       }
     });
   }
@@ -1092,7 +1090,6 @@ export class TurquoiseApp {
     this.call.localStream?.getTracks().forEach(t=>t.stop());
     this.call=null; this._stopStatsPolling();
     if (sendEnd) {
-      // Notify remote so their panel closes immediately
       this.net.sendCtrl(fp, {type:'call-end'});
       this.net.stopMedia(fp);
     }
@@ -1102,32 +1099,53 @@ export class TurquoiseApp {
   // ── Circle calls ───────────────────────────────────────────────────────────
 
   async _startCircleCall(callType) {
-    if (this.call) { this._sys('end 1:1 call first',true); return; }
+    if (this.call) { this._sys('end 1:1 signal first',true); return; }
     if (this.circleCall?.phase==='active') { this._endCircleCall(); return; }
     const fps=this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp));
-    if (!fps.length) { this._sys('no peers in circle',true); return; }
+    if (!fps.length) { this._sys('no nodes in circle',true); return; }
     const video=callType==='stream';
-    let s; try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); } catch(e){ this._handleMediaError(e,null); return; }
-    this.circleCall={type:callType,phase:'connecting',localStream:s,remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false,_inviters:new Set()};
+    let s;
+    try {
+      s = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: video ? {facingMode: this._facingMode} : false
+      });
+    } catch(e) { this._handleMediaError(e,null); return; }
+
+    // _connecting: peers we've invited but haven't got streams from yet
+    this.circleCall={
+      type:callType, phase:'connecting', localStream:s,
+      remoteStreams:new Map(), audioEls:new Map(),
+      muted:false, camOff:false,
+      _inviters:new Set(),
+      _connecting:new Set(fps),  // ← NEW: track who we're waiting on
+    };
     fps.forEach(fp=>{ this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname,circle:true}); this._attachCircleRemote(fp); });
+    const label = callType==='stream' ? 'eyes·circle' : 'signal·circle';
+    this._status(`${label} — calling ${fps.length} node${fps.length===1?'':'s'}…`,'info');
     this._renderCircleCallPanel();
   }
 
   _onCircleCallInvite(fp, msg) {
     if (this.call) { this.net.sendCtrl(fp,{type:'call-decline',circle:true}); return; }
     const callType=msg.callType==='stream'?'stream':'walkie';
-    // If already in an active circle call, auto-accept new participants.
     if (this.circleCall?.phase==='active'&&this.circleCall.localStream) {
       this.net.sendCtrl(fp,{type:'call-accept',circle:true});
+      this.circleCall._connecting?.add(fp);
       this._attachCircleRemote(fp); this._renderCircleCallPanel(); return;
     }
     if (!this.circleCall) {
-      this.circleCall={type:callType,phase:'ringing',localStream:null,
-        remoteStreams:new Map(),audioEls:new Map(),muted:false,camOff:false,
-        _inviters:new Set()};  // track ALL inviters so accept goes to all
+      this.circleCall={
+        type:callType, phase:'ringing', localStream:null,
+        remoteStreams:new Map(), audioEls:new Map(),
+        muted:false, camOff:false,
+        _inviters:new Set(),
+        _connecting:new Set(),
+      };
     }
     this.circleCall._inviters.add(fp);
-    this._showCallIncoming(fp,callType,msg.nick,true);
+    const label = callType==='stream' ? 'eyes·on' : 'signal';
+    this._showCallIncoming(fp,label,msg.nick,true);
   }
 
   async _acceptCircleCall(fp) {
@@ -1137,17 +1155,19 @@ export class TurquoiseApp {
     let s;
     if (this.circleCall.localStream) { s=this.circleCall.localStream; }
     else {
-      try { s=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
+      try {
+        s = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: video ? {facingMode: this._facingMode} : false
+        });
+      }
       catch(e) { this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,null); return; }
       this.circleCall.localStream=s;
     }
     this.circleCall.phase='active';
-
-    // Send call-accept to EVERY peer who invited us (they may all be waiting).
-    // Previously only sent to fp (the last inviter shown in the UI), which meant
-    // other inviters never called offerWithStream and their audio/video was missing.
     const inviters = this.circleCall._inviters?.size ? this.circleCall._inviters : new Set([fp]);
     inviters.forEach(p => {
+      this.circleCall._connecting?.add(p);
       this.net.sendCtrl(p,{type:'call-accept',circle:true});
       this._attachCircleRemote(p);
     });
@@ -1159,7 +1179,7 @@ export class TurquoiseApp {
   _onCircleCallAccepted(fp) {
     if (!this.circleCall?.localStream) return;
     this.circleCall.phase='active';
-    // Register handler before offering so track event cannot race ahead
+    this.circleCall._connecting?.add(fp);
     this._attachCircleRemote(fp);
     this.net.offerWithStream(fp, this.circleCall.localStream).catch(()=>{});
     this.circleCall.remoteStreams.forEach((_stream, existingFp) => {
@@ -1169,7 +1189,7 @@ export class TurquoiseApp {
     this._renderCircleCallPanel();
   }
 
-  _onCircleCallDeclined(fp) { this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' declined circle call','warn',3000); }
+  _onCircleCallDeclined(fp) { this._status((this.peers.get(fp)?.nick||fp.slice(0,8))+' passed circle signal','warn',3000); }
 
   _onCircleOfferReneg(fp, msg) {
     if (!this.circleCall || !msg.sdp) return;
@@ -1183,6 +1203,7 @@ export class TurquoiseApp {
       setTimeout(retry, 200);
       return;
     }
+    this.circleCall._connecting?.add(fp);
     this._attachCircleRemote(fp);
     this.net.answerWithStream(fp, msg.sdp, this.circleCall.localStream).catch(()=>{});
     this.circleCall.phase='active'; this._renderCircleCallPanel();
@@ -1198,9 +1219,14 @@ export class TurquoiseApp {
         this._renderCircleCallPanel();
         return;
       }
+      // Stream arrived — peer is no longer just connecting
+      this.circleCall._connecting?.delete(fp);
       this.circleCall.remoteStreams.set(fp,stream);
       let el=this.circleCall.audioEls.get(fp);
-      if (!el) { el=Object.assign(document.createElement('audio'),{autoplay:true,playsInline:true,style:'display:none'}); document.body.appendChild(el); this.circleCall.audioEls.set(fp,el); }
+      if (!el) {
+        el=Object.assign(document.createElement('audio'),{autoplay:true,playsInline:true,style:'display:none'});
+        document.body.appendChild(el); this.circleCall.audioEls.set(fp,el);
+      }
       el.srcObject=stream; el.play().catch(()=>{});
       this.circleCall.phase='active'; this._renderCircleCallPanel();
     });
@@ -1209,13 +1235,16 @@ export class TurquoiseApp {
   _removeCirclePeer(fp) {
     if (!this.circleCall) return;
     this.circleCall.remoteStreams.delete(fp);
+    this.circleCall._connecting?.delete(fp);
     const el=this.circleCall.audioEls.get(fp);
     if (el) { el.srcObject=null; try{el.remove();}catch{} this.circleCall.audioEls.delete(fp); }
-    // Notify remaining circle members that this peer left, so their UI updates too
     this.circleCall.remoteStreams.forEach((_s, otherFp) => {
       this.net.sendCtrl(otherFp, {type:'circle-peer-left', leftPeer:fp, circle:true});
     });
-    if (this.circleCall.remoteStreams.size===0) this._endCircleCall();
+    // Only teardown when truly no one is connected or still connecting
+    const noStreams = this.circleCall.remoteStreams.size === 0;
+    const noConnecting = (this.circleCall._connecting?.size || 0) === 0;
+    if (noStreams && noConnecting) this._endCircleCall();
     else this._renderCircleCallPanel();
   }
 
@@ -1225,22 +1254,21 @@ export class TurquoiseApp {
     this.circleCall.audioEls.forEach(el=>{ try{el.srcObject=null;el.remove();}catch{} });
     this.net.getConnectedPeers().forEach(fp=>{ this.net.sendCtrl(fp,{type:'call-end'}); this.net.stopMedia(fp); });
     this.circleCall=null; this._renderCircleCallPanel();
-    this._status('circle call ended','info',3000);
+    this._status('circle signal ended','info',3000);
   }
 
   // ── Call UI ────────────────────────────────────────────────────────────────
 
-  _appendCallMeta(vids, title, subtitle) {
+  _appendCallMeta(panel, title, subtitle) {
     const meta = document.createElement('div');
     meta.className = 'call-stage-meta';
     meta.innerHTML = `<div class="call-stage-title">${esc(title)}</div><div class="call-stage-sub">${esc(subtitle)}</div>`;
-    vids.appendChild(meta);
+    panel.appendChild(meta);
   }
 
   _makeCallVideo(stream, muted=true) {
     const v = document.createElement('video');
-    v.autoplay = true;
-    v.playsInline = true;
+    v.autoplay = true; v.playsInline = true;
     if (muted) { v.muted = true; v.setAttribute('muted',''); }
     v.srcObject = stream;
     v.onloadedmetadata = () => v.play().catch(()=>{});
@@ -1267,24 +1295,26 @@ export class TurquoiseApp {
   _renderCallPanel() {
     const panel=$('call-panel'); if(!panel) return;
     const c=this.call;
-    // Clean up previous PIP and its listeners before re-rendering
     this._pipCleanup?.(); this._pipCleanup=null;
     panel.querySelectorAll('.call-pip').forEach(el=>el.remove());
-    if (!c) { panel.classList.remove('visible'); this._stopStatsPolling(); return; }
+    panel.querySelectorAll('.call-stage-meta').forEach(el=>el.remove());
+    if (!c) { panel.classList.remove('visible'); this._stopStatsPolling(); this._syncCamSwitchBtn(); return; }
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
-    const peerName = this.peers.get(c.fp)?.nick||c.fp.slice(0,8);
-    const phaseText = c.phase === 'ringing' ? 'incoming' : c.phase === 'inviting' ? 'calling' : c.phase === 'active' ? 'live' : 'connecting';
-    this._appendCallMeta(vids, `${c.type==='stream'?'video':'walkie'} · ${peerName}`, phaseText);
 
-    // Phase status placeholder (ringing / connecting) — same pattern as circle panel
+    const peerName = this.peers.get(c.fp)?.nick||c.fp.slice(0,8);
+    const typeLabel = c.type==='stream' ? 'eyes·on' : 'signal';
+    const phaseText = c.phase==='ringing' ? 'incoming' : c.phase==='inviting' ? 'calling' : c.phase==='active' ? 'live' : 'connecting';
+    // Badge appended to panel so position:absolute works (not inside flex vids)
+    this._appendCallMeta(panel, `${typeLabel} · ${peerName}`, phaseText);
+
     if (c.phase !== 'active') {
-      vids.appendChild(this._makeCallPlaceholder(c.phase === 'ringing' ? 'incoming call…' : c.phase === 'inviting' ? 'calling…' : 'connecting…'));
+      const txt = c.phase==='ringing' ? `incoming ${typeLabel}…` : c.phase==='inviting' ? `calling ${peerName}…` : `connecting…`;
+      vids.appendChild(this._makeCallPlaceholder(txt));
     }
 
     const remote=document.createElement('div');
-    // walkie-tile class triggers audio-only CSS (centered name + mic pulse, no video box)
     remote.className='call-video-tile'+(c.type==='walkie'?' walkie-tile':'');
     remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
     if (c.remoteStream&&c.type==='stream') remote.appendChild(this._makeCallVideo(c.remoteStream, true));
@@ -1292,60 +1322,104 @@ export class TurquoiseApp {
     const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=peerName; remote.appendChild(lbl);
     if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
     this._mountLocalPIP(panel, c.localStream, c.camOff, c.type==='walkie');
+
     const mu=$('ctrl-mute'); if(mu) { mu.textContent=c.muted?'unmute':'mute'; mu.classList.toggle('active',!!c.muted); }
     const cam=$('ctrl-cam');
-    if (cam) {
-      cam.style.display = c.type==='walkie' ? 'none' : '';
-      cam.textContent = c.camOff?'cam on':'cam off';
-    }
+    if (cam) { cam.style.display = c.type==='walkie' ? 'none' : ''; cam.textContent = c.camOff?'cam on':'cam off'; }
+    this._syncCamSwitchBtn();
   }
 
   _renderCircleCallPanel() {
     const panel=$('call-panel'); if(!panel) return;
     this._pipCleanup?.(); this._pipCleanup=null;
     panel.querySelectorAll('.call-pip').forEach(el=>el.remove());
+    panel.querySelectorAll('.call-stage-meta').forEach(el=>el.remove());
     const cc=this.circleCall;
-    if (!cc) { panel.classList.remove('visible'); return; }
+    if (!cc) { panel.classList.remove('visible'); this._syncCamSwitchBtn(); return; }
     panel.classList.add('visible');
     const vids=$('call-videos'); if(!vids) return;
     vids.innerHTML='';
-    const phaseText = cc.phase === 'ringing' ? 'incoming' : cc.phase === 'connecting' ? 'calling' : cc.remoteStreams.size ? `${cc.remoteStreams.size} live` : 'waiting';
-    this._appendCallMeta(vids, `${cc.type==='stream'?'video':'walkie'} · circle`, phaseText);
 
-    // Show phase status when not yet active (same as 1:1 call panel)
-    if (cc.phase !== 'active' || cc.remoteStreams.size === 0) {
-      const text = cc.phase === 'ringing' ? 'incoming circle call…' :
-                   cc.phase === 'connecting' ? 'calling circle…' :
-                   cc.remoteStreams.size === 0 ? 'waiting for peers to join…' : '';
+    const typeLabel = cc.type==='stream' ? 'eyes·circle' : 'signal·circle';
+    const liveCount = cc.remoteStreams.size;
+    const connectingCount = cc._connecting?.size || 0;
+    let phaseText;
+    if (cc.phase==='ringing') phaseText='incoming';
+    else if (cc.phase==='connecting') phaseText='calling';
+    else if (liveCount>0) phaseText=`${liveCount} live${connectingCount>0?' +'+connectingCount:''}`;
+    else if (connectingCount>0) phaseText=`${connectingCount} joining…`;
+    else phaseText='open';
+
+    this._appendCallMeta(panel, typeLabel, phaseText);
+
+    if (cc.phase !== 'active' || (liveCount === 0 && connectingCount === 0)) {
+      const text = cc.phase==='ringing' ? `incoming ${typeLabel}…` :
+                   cc.phase==='connecting' ? `calling circle…` : '';
       if (text) vids.appendChild(this._makeCallPlaceholder(text));
     }
 
-    // Render a tile per remote peer (audio walkie shows name-only tile; video shows stream)
+    // Connecting-but-no-stream tiles — show named placeholders so UI isn't empty
+    if (cc._connecting) {
+      cc._connecting.forEach(fp => {
+        if (cc.remoteStreams.has(fp)) return;
+        const tile = document.createElement('div');
+        tile.className = 'call-video-tile' + (cc.type==='walkie' ? ' walkie-tile' : '');
+        tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2);opacity:.7';
+        const lbl = document.createElement('div'); lbl.className = 'vtile-label';
+        lbl.textContent = (this.peers.get(fp)?.nick || fp.slice(0,8)) + ' ·joining';
+        tile.appendChild(lbl); vids.appendChild(tile);
+      });
+    }
+
     cc.remoteStreams.forEach((stream, fp) => {
       const tile = document.createElement('div');
-      tile.className = 'call-video-tile' + (cc.type === 'walkie' ? ' walkie-tile' : '');
+      tile.className = 'call-video-tile' + (cc.type==='walkie' ? ' walkie-tile' : '');
       tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
-      if (cc.type === 'stream') tile.appendChild(this._makeCallVideo(stream, true));
-      const lbl = document.createElement('div');
-      lbl.className = 'vtile-label';
+      if (cc.type==='stream') tile.appendChild(this._makeCallVideo(stream, true));
+      const lbl = document.createElement('div'); lbl.className='vtile-label';
       lbl.textContent = this.peers.get(fp)?.nick || fp.slice(0,8);
-      tile.appendChild(lbl);
-      vids.appendChild(tile);
+      tile.appendChild(lbl); vids.appendChild(tile);
     });
 
     this._mountLocalPIP(panel, cc.localStream, cc.camOff, cc.type==='walkie');
+    const mu=$('ctrl-mute'); if(mu) { mu.textContent=cc.muted?'unmute':'mute'; mu.classList.toggle('active',!!cc.muted); }
+    const cam=$('ctrl-cam');
+    if (cam) { cam.style.display=cc.type==='walkie'?'none':''; cam.textContent=cc.camOff?'cam on':'cam off'; }
+    this._syncCamSwitchBtn();
+  }
 
-    // Sync mute / cam buttons — same as 1:1 panel
-    const mu = $('ctrl-mute'); if (mu) { mu.textContent = cc.muted ? 'unmute' : 'mute'; mu.classList.toggle('active', !!cc.muted); }
-    const cam = $('ctrl-cam');
-    if (cam) {
-      // Hide cam button entirely for walkie (audio-only) calls
-      cam.style.display = cc.type === 'walkie' ? 'none' : '';
-      cam.textContent = cc.camOff ? 'cam on' : 'cam off';
+  _syncCamSwitchBtn() {
+    const btn=$('ctrl-cam-switch'); if(!btn) return;
+    const c=this.call||this.circleCall;
+    btn.style.display = c?.type==='stream' ? '' : 'none';
+  }
+
+  async _switchCamera() {
+    const c=this.call||this.circleCall;
+    if (!c?.localStream||c.type!=='stream') return;
+    const newFacing = this._facingMode==='user' ? 'environment' : 'user';
+    const btn=$('ctrl-cam-switch');
+    const origText=btn?.textContent;
+    if (btn) { btn.textContent='…'; btn.disabled=true; }
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:newFacing}});
+      const [newTrack] = newStream.getVideoTracks();
+      if (!newTrack) return;
+      this._facingMode=newFacing;
+      const fps = this.call ? [this.call.fp] : [...(this.circleCall?.remoteStreams.keys()||[])];
+      for (const fp of fps) { try { await this.net.replaceVideoTrack?.(fp,newTrack); } catch {} }
+      c.localStream.getVideoTracks().forEach(t=>{t.stop();c.localStream.removeTrack(t);});
+      c.localStream.addTrack(newTrack);
+      if (this.call) this._renderCallPanel(); else this._renderCircleCallPanel();
+      this._log.info('app','_switchCamera',`switched to ${newFacing}`);
+    } catch(e) {
+      this._log.warn('app','_switchCamera','failed: '+e.message);
+      this._status('camera flip failed','err',3000);
+    } finally {
+      if (btn) { btn.textContent=origText; btn.disabled=false; }
     }
   }
 
-  /** Returns a cleanup function that removes all added listeners. */
   _makePIPDraggable(el) {
     let ox=0,oy=0,mx=0,my=0,dragging=false;
     const start=e=>{ dragging=true; const s=e.touches?e.touches[0]:e; mx=s.clientX; my=s.clientY; ox=el.offsetLeft; oy=el.offsetTop; };
@@ -1363,7 +1437,8 @@ export class TurquoiseApp {
 
   _showCallIncoming(fp, callType, nick, circle) {
     const el=$('call-incoming'); if(!el) return;
-    const caller=$('ci-caller-name'); if(caller) caller.textContent=(nick||fp.slice(0,8))+' · '+callType+(circle?' (circle)':'');
+    const caller=$('ci-caller-name');
+    if(caller) caller.textContent=(nick||fp.slice(0,8))+' · '+callType+(circle?' (circle)':'');
     el.dataset.callFp=fp; el.dataset.circle=circle?'1':'';
     el.classList.add('visible');
   }
@@ -1372,13 +1447,13 @@ export class TurquoiseApp {
   _toggleMute() {
     const c=this.call||this.circleCall; if(!c) return;
     c.muted=!c.muted; (c.localStream||null)?.getAudioTracks().forEach(t=>{t.enabled=!c.muted;});
-    const btn=$('ctrl-mute'); if(btn) { btn.textContent=c.muted?'unmute':'mute'; btn.classList.toggle('active',c.muted); }
+    const btn=$('ctrl-mute'); if(btn){btn.textContent=c.muted?'unmute':'mute';btn.classList.toggle('active',c.muted);}
   }
 
   _toggleCam() {
     const c=this.call||this.circleCall; if(!c) return;
     c.camOff=!c.camOff; (c.localStream||null)?.getVideoTracks().forEach(t=>{t.enabled=!c.camOff;});
-    const btn=$('ctrl-cam'); if(btn) { btn.textContent=c.camOff?'cam on':'cam off'; btn.classList.toggle('active',c.camOff); }
+    const btn=$('ctrl-cam'); if(btn){btn.textContent=c.camOff?'cam on':'cam off';btn.classList.toggle('active',c.camOff);}
   }
 
   _startStatsPolling(fp) {

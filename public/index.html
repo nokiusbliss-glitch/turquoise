@@ -40,13 +40,26 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   position:relative;
 }
 
-/* ── Diagonal decorative lines ──────────────────────────────────────────── */
+/* ── Turquoise stone ambient layers ──────────────────────────────────────── */
+/* Layer 1: diagonal striations (mineral veining) */
 #app::before{
   content:'';
   position:fixed;inset:0;
   background:
     linear-gradient(17deg,transparent 41%,rgba(64,224,208,.025) 41%,rgba(64,224,208,.025) 41.3%,transparent 41.3%),
-    linear-gradient(17deg,transparent 63%,rgba(107,255,123,.018) 63%,rgba(107,255,123,.018) 63.2%,transparent 63.2%);
+    linear-gradient(17deg,transparent 63%,rgba(107,255,123,.018) 63%,rgba(107,255,123,.018) 63.2%,transparent 63.2%),
+    linear-gradient(-11deg,transparent 28%,rgba(64,224,208,.012) 28%,rgba(64,224,208,.012) 28.18%,transparent 28.18%);
+  pointer-events:none;z-index:0;
+}
+
+/* Layer 2: radial depth glow (stone polished face) */
+#app::after{
+  content:'';
+  position:fixed;inset:0;
+  background:
+    radial-gradient(ellipse 60% 40% at 15% 85%, rgba(64,224,208,.055) 0%, transparent 70%),
+    radial-gradient(ellipse 45% 55% at 82% 12%, rgba(26,158,148,.04) 0%, transparent 65%),
+    radial-gradient(ellipse 30% 30% at 50% 50%, rgba(64,224,208,.018) 0%, transparent 100%);
   pointer-events:none;z-index:0;
 }
 
@@ -60,6 +73,12 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   position:relative;z-index:10;
   border-bottom:1px solid var(--mute);
 }
+/* subtle shimmer on header */
+#header::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,rgba(64,224,208,.04) 0%,transparent 40%,rgba(64,224,208,.02) 100%);
+  pointer-events:none;
+}
 #header-logo{
   font-family:'Syne',sans-serif;font-weight:800;font-size:15px;letter-spacing:.25em;
   color:var(--tq);text-transform:uppercase;
@@ -67,6 +86,13 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   background:rgba(64,224,208,.06);
   padding:3px 18px 3px 8px;margin-right:24px;
   flex-shrink:0;
+  position:relative;
+}
+/* crystal accent on logo */
+#header-logo::after{
+  content:'◈';
+  position:absolute;right:-10px;top:50%;transform:translateY(-50%);
+  font-size:7px;color:var(--tq3);opacity:.8;
 }
 #identity-row{
   display:flex;align-items:center;gap:8px;cursor:pointer;
@@ -76,6 +102,19 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 #identity-row::before{
   content:'▸';color:var(--dim);font-size:10px;flex-shrink:0;
 }
+
+/* name-hint: shown on first load by JS adding class visible */
+#name-hint{
+  font-size:8px;color:var(--tq2);letter-spacing:.12em;
+  opacity:0;transition:opacity .4s;
+  pointer-events:none;white-space:nowrap;
+  animation:hint-pulse 2.4s ease-in-out infinite;
+}
+#name-hint.visible{opacity:1}
+@keyframes hint-pulse{
+  0%,100%{opacity:.5} 50%{opacity:1}
+}
+
 #nick-display{
   font-family:'Syne',sans-serif;font-weight:700;font-size:13px;
   color:var(--tq);letter-spacing:.05em;
@@ -122,6 +161,12 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   display:flex;flex-direction:column;
   overflow:hidden;
   position:relative;z-index:5;
+}
+/* stone vein on sidebar right edge */
+#sidebar::after{
+  content:'';position:absolute;top:0;right:0;bottom:0;width:1px;
+  background:linear-gradient(to bottom,transparent 0%,rgba(64,224,208,.15) 30%,rgba(64,224,208,.08) 70%,transparent 100%);
+  pointer-events:none;
 }
 #peers-label{
   font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.2em;
@@ -187,18 +232,34 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   clip-path:polygon(0 0,100% 0,100% calc(100% - 5px),0 100%);
   border-bottom:1px solid var(--mute);
   flex-shrink:0;min-height:40px;
-  /* Needs its own stacking context so clip-path doesn't eat peer dots */
   position:relative;z-index:1;
 }
+
+/* ── Back button — turquoise crystal style ───────────────────────────────── */
 #back-btn{
-  display:none;background:none;border:none;color:var(--tq);
-  cursor:pointer;font-size:16px;padding:0 6px;
+  display:none;
+  background:rgba(64,224,208,.07);
+  border:1px solid var(--tq3);
+  color:var(--tq2);
+  cursor:pointer;
+  font-size:10px;
+  padding:4px 9px 4px 7px;
+  font-family:'Syne',sans-serif;
+  letter-spacing:.1em;
+  clip-path:polygon(6px 0,100% 0,100% 100%,0 100%,0 6px);
+  transition:all .15s;
+  flex-shrink:0;
+  white-space:nowrap;
 }
-@media(max-width:640px){#back-btn{display:block}}
+#back-btn::before{content:'◁ ';font-size:8px;}
+#back-btn:hover{
+  background:rgba(64,224,208,.14);
+  border-color:var(--tq2);
+  color:var(--tq);
+}
+@media(max-width:640px){#back-btn{display:flex;align-items:center}}
 @media(max-width:640px){
-  /* Prevent logo from squeezing the username row to zero width */
   #header-logo{font-size:11px;padding:3px 10px 3px 6px;margin-right:10px;letter-spacing:.12em}
-  /* Fingerprint is technical noise on small screens — hide it */
   #full-fp{display:none}
 }
 #chat-peer-name{
@@ -217,17 +278,16 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .call-btn:hover{border-color:var(--tq);color:var(--tq)}
 .call-btn.active{background:rgba(64,224,208,.1);border-color:var(--tq);color:var(--tq)}
 
-/* ── Chat area — explicitly clips scroll, not the menu ───────────────────── */
+/* ── Chat area ───────────────────────────────────────────────────────────── */
 #chat-area{
   flex:1;overflow-y:auto;
   padding:16px 18px 8px;
   display:flex;flex-direction:column;gap:4px;
   position:relative;
-  /* clip-path here would hide the plus menu — use min-height:0 for flex overflow */
   min-height:0;
 }
 #chat-area.drag-over::after{
-  content:'drop to send';
+  content:'drop to transmit';
   position:absolute;inset:0;
   background:rgba(64,224,208,.08);border:2px dashed var(--tq2);
   display:flex;align-items:center;justify-content:center;
@@ -249,14 +309,15 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   background:rgba(64,224,208,.1);color:var(--tq);
   border:1px solid rgba(64,224,208,.18);
 }
+/* Irregular stone-cut shapes — more variety for the turquoise stone feel */
 .msg[data-shape="0"]{clip-path:polygon(0 4px,4px 0,100% 0,100% calc(100% - 4px),calc(100% - 4px) 100%,0 100%)}
 .msg[data-shape="1"]{clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px))}
 .msg[data-shape="2"]{clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px)}
-.msg[data-shape="3"]{clip-path:polygon(0 0,100% 4px,calc(100% - 4px) 100%,4px calc(100% - 4px))}
-.msg[data-shape="4"]{clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 4px) 100%,0 100%,0 4px)}
+.msg[data-shape="3"]{clip-path:polygon(0 0,100% 3px,calc(100% - 3px) 100%,3px calc(100% - 3px))}
+.msg[data-shape="4"]{clip-path:polygon(7px 0,100% 0,100% calc(100% - 7px),calc(100% - 3px) 100%,0 100%,0 3px)}
 .msg[data-shape="5"]{clip-path:polygon(0 6px,6px 0,100% 0,100% 100%,0 100%)}
 .msg[data-shape="6"]{clip-path:polygon(0 0,calc(100% - 12px) 0,100% 6px,100% 100%,12px 100%,0 calc(100% - 6px))}
-.msg[data-shape="7"]{clip-path:polygon(4px 0,100% 0,100% calc(100% - 4px),calc(100% - 12px) 100%,0 100%,0 4px)}
+.msg[data-shape="7"]{clip-path:polygon(3px 0,100% 0,100% calc(100% - 3px),calc(100% - 11px) 100%,0 100%,0 3px)}
 .msg .sender{
   font-size:9px;color:var(--uy);letter-spacing:.08em;margin-bottom:3px;
   font-family:'Syne',sans-serif;font-weight:700;
@@ -276,10 +337,12 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   max-width:280px;padding:8px 11px;
   background:var(--bg2);border-left:2px solid var(--tq2);
   display:flex;flex-direction:column;gap:4px;
+  clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,0 100%);
 }
 .file-card.sent,.folder-card.sent{
   align-self:flex-end;border-left:none;border-right:2px solid var(--tq);
   background:rgba(64,224,208,.07);
+  clip-path:polygon(0 7px,7px 0,100% 0,100% 100%,0 100%);
 }
 .file-card .fname,.folder-card .fname{
   font-size:11px;color:var(--text);font-weight:700;
@@ -321,15 +384,17 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   background:var(--bg1);
   border-top:1px solid var(--mute);
   display:flex;gap:8px;align-items:flex-end;
-  /* clip-path REMOVED — was clipping the plus-menu popup */
   position:relative;z-index:5;
 }
+
+/* ── Plus button — crystal ◈ ─────────────────────────────────────────────── */
 #plus-btn{
   width:32px;height:32px;flex-shrink:0;
-  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
-  cursor:pointer;font-size:16px;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--tq2);
+  cursor:pointer;font-size:14px;
   clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,7px 100%,0 calc(100%-7px));
   transition:all .15s;display:flex;align-items:center;justify-content:center;
+  font-family:'Syne',sans-serif;letter-spacing:0;
 }
 #plus-btn:hover{border-color:var(--tq);color:var(--tq);background:rgba(64,224,208,.07)}
 #msg-wrap{flex:1;position:relative}
@@ -353,15 +418,14 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 #send-btn:hover{background:rgba(64,224,208,.22);border-color:var(--tq)}
 
 /* ── Plus menu ───────────────────────────────────────────────────────────── */
-/* position:fixed escapes ALL overflow and clip-path contexts. JS sets
-   left/bottom dynamically from the plus button's getBoundingClientRect(). */
 #plus-menu{
   position:fixed;
-  bottom:56px;left:8px;  /* defaults — overridden by JS on open */
+  bottom:56px;left:8px;
   background:var(--bg1);border:1px solid var(--mute);
-  min-width:200px;z-index:200;
+  min-width:210px;z-index:200;
   display:none;
   box-shadow:0 -4px 24px rgba(0,0,0,.6),0 4px 24px rgba(0,0,0,.4);
+  clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,0 100%);
 }
 #plus-menu.visible{display:block}
 .pm-item{
@@ -375,8 +439,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .pm-sep{height:1px;background:var(--mute);margin:3px 0}
 .pm-label{font-size:8px;color:var(--mute);padding:3px 14px 0;letter-spacing:.15em;text-transform:uppercase}
 
-/* ── Status bar — in #main so visible on all screen sizes ───────────────── */
-/* Previously inside #netlog-panel which is hidden at ≤900px. */
+/* ── Status bar ──────────────────────────────────────────────────────────── */
 #status-line{
   font-size:9px;color:var(--dim);padding:3px 12px;
   border-top:1px solid var(--mute);flex-shrink:0;
@@ -444,61 +507,96 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 /* ── Call panel ──────────────────────────────────────────────────────────── */
 #call-panel{
   display:none;position:fixed;inset:0;z-index:100;
-  background:rgba(4,10,9,.94);flex-direction:column;
+  background:rgba(4,10,9,.96);flex-direction:column;
   align-items:center;justify-content:center;
-  backdrop-filter:blur(4px);
+  backdrop-filter:blur(6px);
 }
 #call-panel.visible{display:flex}
+/* subtle stone vein behind video */
+#call-panel::before{
+  content:'';position:absolute;inset:0;
+  background:
+    linear-gradient(23deg,transparent 35%,rgba(64,224,208,.018) 35%,rgba(64,224,208,.018) 35.2%,transparent 35.2%),
+    radial-gradient(ellipse 70% 50% at 50% 100%,rgba(64,224,208,.04) 0%,transparent 70%);
+  pointer-events:none;
+}
 
-/* Video area fills the panel; controls float above it */
+/* Video area */
 #call-videos{
   display:flex;gap:12px;flex-wrap:wrap;justify-content:center;
   width:100%;
-  /* top padding makes room for the fixed controls bar */
-  padding:68px 16px 16px;
+  padding:56px 20px 16px;   /* reduced top from 68px — controls are slim */
   flex:1;align-content:center;
+  position:relative;z-index:1;
 }
+
+/* ── Call stage meta — compact floating badge (not a full-width bar) ──────── */
+/* On laptop this was dominating the whole panel; now a slim corner badge */
 .call-stage-meta{
-  width:min(720px,calc(100% - 32px));
-  display:flex;justify-content:space-between;align-items:center;gap:10px;
-  padding:10px 12px;margin:0 auto 4px;
-  border:1px solid rgba(64,224,208,.18);
-  background:linear-gradient(135deg,rgba(10,22,20,.95),rgba(8,16,15,.72));
-  box-shadow:0 10px 32px rgba(0,0,0,.28);
-  clip-path:polygon(0 0,calc(100%-12px) 0,100% 12px,100% 100%,12px 100%,0 calc(100%-12px));
+  position:absolute;
+  top:10px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:10px;
+  padding:5px 14px;
+  border:1px solid rgba(64,224,208,.15);
+  background:linear-gradient(135deg,rgba(7,26,24,.92),rgba(4,10,9,.8));
+  box-shadow:0 4px 20px rgba(0,0,0,.35);
+  clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
+  z-index:2;
+  white-space:nowrap;
+  max-width:calc(100% - 240px);  /* leave room for right-side controls */
 }
 .call-stage-title{
-  font-family:'Syne',sans-serif;font-size:11px;letter-spacing:.16em;color:var(--tq);text-transform:uppercase;
+  font-family:'Syne',sans-serif;font-size:10px;letter-spacing:.14em;
+  color:var(--tq);text-transform:uppercase;
 }
 .call-stage-sub{
-  font-size:9px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;
+  font-size:8px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase;
 }
+
+/* dot separator */
+.call-stage-meta::before{
+  content:'◈';font-size:7px;color:var(--tq3);
+}
+
+/* Placeholder while connecting */
 .call-stage-placeholder{
-  flex:1 1 100%;display:flex;align-items:center;justify-content:center;text-align:center;
-  min-height:120px;padding:20px;color:var(--dim);font-size:.72rem;font-family:"Space Mono",monospace;
+  flex:1 1 100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;text-align:center;
+  min-height:160px;padding:20px;color:var(--dim);
+  font-size:.7rem;font-family:'Space Mono',monospace;
+  gap:12px;
 }
+.call-stage-placeholder::before{
+  content:'◉';font-size:2rem;color:var(--tq3);
+  animation:connecting-pulse 2s ease-in-out infinite;
+}
+@keyframes connecting-pulse{
+  0%,100%{opacity:.3;transform:scale(1)}
+  50%{opacity:.9;transform:scale(1.08)}
+}
+
 .call-video-tile{
   flex:1;min-width:200px;max-width:480px;min-height:200px;
   background:linear-gradient(180deg,rgba(10,22,20,.98),rgba(5,11,10,.92));
   border:1px solid rgba(64,224,208,.14);
-  box-shadow:0 18px 40px rgba(0,0,0,.32);
+  box-shadow:0 18px 40px rgba(0,0,0,.35),inset 0 1px 0 rgba(64,224,208,.06);
   position:relative;overflow:hidden;
   clip-path:polygon(0 0,calc(100%-14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100%-14px));
 }
 .call-video-tile.call-video-empty::before{
-  content:'waiting for video';
+  content:'no signal yet';
   position:absolute;inset:0;
   display:flex;align-items:center;justify-content:center;
-  color:var(--dim);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--dim);font-size:9px;letter-spacing:.2em;text-transform:uppercase;
 }
 .call-video-tile video{
   width:100%;height:100%;object-fit:cover;display:block;min-height:200px;
 }
-/* Video call: peer name at bottom-left */
 .call-video-tile .vtile-label{
   position:absolute;bottom:6px;left:10px;font-size:9px;
   color:var(--tq);letter-spacing:.1em;
-  background:rgba(4,10,9,.6);padding:2px 6px;
+  background:rgba(4,10,9,.65);padding:2px 6px;
+  clip-path:polygon(0 0,100% 0,100% 100%,4px 100%,0 calc(100%-4px));
 }
 
 /* ── Walkie (audio-only) tile ── */
@@ -510,21 +608,21 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .call-video-tile.walkie-tile .vtile-label{
   position:static;background:none;font-size:11px;
   color:var(--text);letter-spacing:.05em;padding:0;
+  clip-path:none;
 }
-/* Pulsing mic ring for audio-only tiles */
+/* Signal pulse for audio tiles */
 .walkie-tile::before{
-  content:'\1F3A4';font-size:1.6rem;line-height:1;
+  content:'◈';font-size:1.8rem;line-height:1;color:var(--tq2);
   animation:walkie-pulse 1.6s ease-in-out infinite;
 }
 @keyframes walkie-pulse{
-  0%,100%{opacity:.5;transform:scale(1)}
-  50%{opacity:1;transform:scale(1.12)}
+  0%,100%{opacity:.4;transform:scale(1)}
+  50%{opacity:1;transform:scale(1.1)}
 }
 
-/* ── PIP (local video — video calls only) ── */
+/* ── PIP (local video) ── */
 .call-pip{
   position:fixed;width:120px;height:80px;z-index:102;
-  /* bottom-left keeps it away from the top-right controls */
   bottom:20px;left:16px;cursor:grab;
   clip-path:polygon(0 0,calc(100%-8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100%-8px));
   border:1px solid var(--tq3);
@@ -544,34 +642,44 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 }
 
 /* ── Call controls — fixed top-right strip ── */
-/* Float above the video so they never push the layout */
 #call-controls{
-  position:fixed;top:12px;right:12px;z-index:103;
-  display:flex;gap:6px;align-items:center;
-  background:rgba(4,10,9,.75);
+  position:fixed;top:10px;right:12px;z-index:103;
+  display:flex;gap:5px;align-items:center;
+  background:rgba(4,10,9,.8);
   border:1px solid var(--mute);
-  padding:6px 8px;
+  padding:5px 7px;
   clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
-  backdrop-filter:blur(6px);
+  backdrop-filter:blur(8px);
 }
 .ctrl-btn{
-  font-family:inherit;font-size:10px;letter-spacing:.06em;
+  font-family:inherit;font-size:9px;letter-spacing:.06em;
   background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
-  padding:6px 12px;cursor:pointer;
-  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+  padding:5px 10px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
   transition:all .15s;white-space:nowrap;
 }
 .ctrl-btn:hover{border-color:var(--tq);color:var(--tq)}
 .ctrl-btn.active{background:rgba(64,224,208,.1);border-color:var(--tq);color:var(--tq)}
-/* End call: red, prominent, slightly larger */
+/* End call */
 .ctrl-btn.danger{
   border-color:var(--err);color:var(--err);
-  background:rgba(255,96,64,.12);
-  font-weight:700;padding:6px 16px;
+  background:rgba(255,96,64,.1);
+  font-weight:700;padding:5px 14px;
 }
-.ctrl-btn.danger:hover{background:rgba(255,96,64,.25);border-color:var(--err)}
+.ctrl-btn.danger:hover{background:rgba(255,96,64,.22);border-color:var(--err)}
 
-/* RTT stat — small overlay bottom-right of video area */
+/* Camera switch button */
+#ctrl-cam-switch{
+  font-family:inherit;font-size:11px;
+  background:var(--bg2);border:1px solid var(--mute);color:var(--dim);
+  padding:4px 7px;cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-4px) 0,100% 4px,100% 100%,4px 100%,0 calc(100%-4px));
+  transition:all .15s;
+  display:none; /* shown by JS when stream call is active */
+}
+#ctrl-cam-switch:hover{border-color:var(--tq2);color:var(--tq2)}
+
+/* RTT stat */
 #call-stats{
   position:fixed;bottom:16px;right:16px;z-index:101;
   font-size:8px;color:var(--dim);letter-spacing:.06em;
@@ -587,9 +695,18 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   padding:14px 16px;min-width:220px;
   clip-path:polygon(0 0,calc(100%-12px) 0,100% 12px,100% 100%,0 100%);
   box-shadow:0 8px 40px rgba(0,0,0,.7);
+  /* subtle pulse border to draw attention */
+  animation:incoming-ring 2s ease-in-out infinite;
+}
+@keyframes incoming-ring{
+  0%,100%{box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 0 rgba(64,224,208,0)}
+  50%{box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 6px rgba(64,224,208,.08)}
 }
 #call-incoming.visible{display:block}
-.ci-title{font-family:'Syne',sans-serif;font-size:10px;letter-spacing:.15em;color:var(--tq);margin-bottom:8px}
+.ci-title{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.18em;
+  color:var(--tq2);margin-bottom:8px;text-transform:uppercase;
+}
 .ci-caller{font-size:12px;color:var(--text);margin-bottom:10px}
 .ci-btns{display:flex;gap:8px}
 .ci-btn{
@@ -598,8 +715,10 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   padding:5px;cursor:pointer;transition:all .15s;
   clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
 }
+/* "tune in" — accept */
 .ci-btn.accept{border-color:var(--ug2);color:var(--ug)}
 .ci-btn.accept:hover{background:rgba(107,255,123,.1)}
+/* "pass" — decline */
 .ci-btn.decline{border-color:rgba(255,96,64,.4);color:var(--err)}
 .ci-btn.decline:hover{background:rgba(255,96,64,.1)}
 
@@ -667,6 +786,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   border:1px solid var(--mute);}
 
 /* ── Chess ───────────────────────────────────────────────────────────────── */
+/* FIXED: Black pieces are now visible — use aquamarine teal, clearly distinct from white */
 .tqapp-chess{font-size:11px;user-select:none;min-width:260px}
 .ch-wrap{display:flex;align-items:flex-start;gap:3px}
 .ch-ranks{display:flex;flex-direction:column;justify-content:space-around;height:240px;font-size:8px;color:var(--dim);letter-spacing:.05em;padding:1px 0}
@@ -682,19 +802,28 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   width:30px;height:30px;display:flex;align-items:center;justify-content:center;
   cursor:pointer;position:relative;transition:background .1s;
 }
-.ch-light{background:#0d2e2a}
-.ch-dark{background:#071a18}
-.ch-sq:hover{background:rgba(64,224,208,.12)}
-.ch-sel{background:rgba(64,224,208,.25)!important;outline:2px solid var(--tq);outline-offset:-2px}
-.ch-hint{background:rgba(64,224,208,.1)!important}
+/* Slightly richer board colours — still turquoise tones */
+.ch-light{background:#0e3530}
+.ch-dark{background:#061714}
+.ch-sq:hover{background:rgba(64,224,208,.15)}
+.ch-sel{background:rgba(64,224,208,.28)!important;outline:2px solid var(--tq);outline-offset:-2px}
+.ch-hint{background:rgba(64,224,208,.12)!important}
 .ch-hint .ch-dot{
   width:8px;height:8px;border-radius:50%;
-  background:rgba(64,224,208,.4);pointer-events:none;
+  background:rgba(64,224,208,.45);pointer-events:none;
 }
-.ch-check{background:rgba(255,96,64,.2)!important}
+.ch-check{background:rgba(255,96,64,.22)!important}
 .ch-piece{font-size:1.2rem;line-height:1;pointer-events:none}
-.ch-w{color:#e8f4f0;text-shadow:0 1px 2px rgba(0,0,0,.8)}
-.ch-b{color:#0a3d39;text-shadow:0 0 3px rgba(64,224,208,.4),0 1px 3px rgba(0,0,0,.9)}
+/* White pieces: bright cream — unchanged */
+.ch-w{color:#eef7f4;text-shadow:0 1px 3px rgba(0,0,0,.9),0 0 6px rgba(0,0,0,.5)}
+/* Black pieces: FIXED — bright turquoise so clearly visible on dark board */
+.ch-b{
+  color:#4dffd4;
+  text-shadow:
+    0 0 4px rgba(64,224,208,.7),
+    0 1px 3px rgba(0,0,0,.95),
+    0 0 10px rgba(64,224,208,.25);
+}
 
 /* ── Stone Paper Scissors ────────────────────────────────────────────────── */
 .tqapp-sps{font-size:11px;user-select:none}
@@ -713,7 +842,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .sps-vs{font-size:9px;color:var(--mute);letter-spacing:.15em}
 .sps-rounds{font-size:9px;color:var(--mute);margin-top:6px;text-align:center;letter-spacing:.05em}
 
-/* ── Tool embed (TicTacToe / Whiteboard in chat) ─────────────────────────── */
+/* ── Tool embed ──────────────────────────────────────────────────────────── */
 .tool-embed{
   max-width:440px;padding:10px;
   background:var(--bg2);border-left:2px solid var(--tq3);
@@ -751,20 +880,21 @@ body{font-family:'Space Mono',monospace;font-size:13px}
     grid-row:unset;grid-column:unset;
   }
   .call-stage-meta{
-    width:calc(100% - 24px);flex-direction:column;align-items:flex-start;gap:4px;
+    max-width:calc(100% - 24px);
+    flex-direction:column;align-items:flex-start;gap:3px;
+    top:8px;left:12px;transform:none;
   }
   .call-video-tile{min-width:160px}
-  /* On mobile the call-pip should be near bottom-center, not right edge */
   .call-pip{right:50%;transform:translateX(50%);bottom:70px}
 }
 
 /* ── Animations ──────────────────────────────────────────────────────────── */
-@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadein{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 .msg,.file-card,.folder-card,.tool-embed{animation:fadein .18s ease-out}
 
 #peers-list::-webkit-scrollbar{width:2px}
 
-/* ── Sidebar footer (log download — mobile-visible) ─────────────────────── */
+/* ── Sidebar footer ──────────────────────────────────────────────────────── */
 #sidebar-footer{
   flex-shrink:0;border-top:1px solid var(--mute);padding:8px 10px;
 }
@@ -798,11 +928,19 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   transition:color .12s,border-color .12s;letter-spacing:.04em;
 }
 .sg-chip:hover{color:var(--tq);border-color:var(--tq2)}
+/* Emoji chips — same turquoise aesthetic but larger and with both geom + regular emoji */
 .sg-emoji{
-  flex-shrink:0;font-size:13px;cursor:pointer;padding:1px 4px;
-  color:var(--tq2);transition:color .12s;line-height:1.4;
+  flex-shrink:0;font-size:14px;cursor:pointer;padding:1px 4px;
+  color:var(--tq2);transition:transform .12s,color .12s;line-height:1.4;
+  user-select:none;
 }
-.sg-emoji:hover{color:var(--tq)}
+.sg-emoji.regular{
+  color:unset;    /* full color for real emoji */
+  filter:saturate(.85) brightness(.9);
+  transition:transform .12s,filter .12s;
+}
+.sg-emoji:hover,.sg-emoji.regular:hover{transform:scale(1.18);color:var(--tq)}
+.sg-emoji.regular:hover{filter:saturate(1.1) brightness(1)}
 
 </style>
 </head>
@@ -812,9 +950,10 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   <!-- Header -->
   <header id="header">
     <div id="header-logo">Turquoise</div>
-    <div id="identity-row">
+    <div id="identity-row" title="tap to set your call sign">
       <span id="nick-display">···</span>
-      <input id="nick-input" maxlength="32" placeholder="enter name" autocomplete="off">
+      <input id="nick-input" maxlength="32" placeholder="set your call sign" autocomplete="off">
+      <span id="name-hint" class="visible">← set call sign</span>
       <span id="full-fp"></span>
     </div>
     <div id="hdr-right">
@@ -832,24 +971,26 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 
   <!-- Sidebar -->
   <nav id="sidebar">
-    <div id="peers-label">Peers <span id="peer-count"></span></div>
+    <div id="peers-label">Nodes <span id="peer-count"></span></div>
     <div id="peers-list"></div>
     <div id="sidebar-footer">
-      <button id="sidebar-log-btn" title="download diagnostic log">↓ logs</button>
+      <button id="sidebar-log-btn" title="download diagnostic log">↓ transmission log</button>
     </div>
   </nav>
 
   <!-- Main chat -->
   <main id="main">
     <div id="chat-header">
-      <button id="back-btn">‹</button>
+      <!-- Back button: turquoise crystal style -->
+      <button id="back-btn" title="back to nodes">nodes</button>
       <div>
         <div id="chat-peer-name">—</div>
         <div id="chat-peer-fp"></div>
       </div>
       <div id="call-btns">
-        <button class="call-btn" id="btn-walkie">☎ walkie</button>
-        <button class="call-btn" id="btn-stream">⬡ video</button>
+        <!-- Initial text is overridden by _renderHeader() in app.js -->
+        <button class="call-btn" id="btn-walkie">◈ signal</button>
+        <button class="call-btn" id="btn-stream">◉ eyes·on</button>
       </div>
     </div>
 
@@ -863,23 +1004,22 @@ body{font-family:'Space Mono',monospace;font-size:13px}
       <div class="sg-emojis"></div>
     </div>
 
-    <!-- Status bar — inside #main so it's always visible, even on mobile -->
+    <!-- Status bar -->
     <div id="status-line">initialising…</div>
 
     <div id="compose-area">
-      <button id="plus-btn">+</button>
+      <!-- Crystal ◈ instead of plain + -->
+      <button id="plus-btn" title="attach · share · play">◈</button>
       <div id="msg-wrap">
         <textarea id="msg-input" rows="1" placeholder="transmit…"></textarea>
       </div>
       <button id="send-btn">➤</button>
     </div>
 
-    <!-- Plus menu is a direct child of #main (NOT inside #compose-area)
-         so compose-area boundaries / clip-path cannot clip it. -->
     <div id="plus-menu"></div>
   </main>
 
-  <!-- Net log panel (desktop only, hidden ≤900px) -->
+  <!-- Net log panel (desktop only) -->
   <aside id="netlog-panel">
     <div id="netlog-header">
       <span id="netlog-title">◈ transmission log</span>
@@ -897,30 +1037,49 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 <input type="file" id="__file-input" multiple style="display:none">
 <input type="file" id="__import-input" accept=".json" style="display:none">
 
-<!-- Incoming call -->
+<!-- Incoming call/signal overlay -->
 <div id="call-incoming">
-  <div class="ci-title">▶ INCOMING</div>
+  <div class="ci-title">◈ incoming</div>
   <div class="ci-caller" id="ci-caller-name">Unknown</div>
   <div class="ci-btns">
-    <button class="ci-btn accept" id="ci-accept">accept</button>
-    <button class="ci-btn decline" id="ci-decline">decline</button>
+    <button class="ci-btn accept" id="ci-accept">tune·in</button>
+    <button class="ci-btn decline" id="ci-decline">pass</button>
   </div>
 </div>
 
-<!-- Call panel -->
+<!-- Call / eyes·on panel -->
 <div id="call-panel">
   <div id="call-videos"></div>
   <div id="call-stats"></div>
   <div id="call-controls">
     <button class="ctrl-btn" id="ctrl-mute">mute</button>
+    <!-- cam off/on: text overridden by JS -->
     <button class="ctrl-btn" id="ctrl-cam">cam off</button>
-    <button class="ctrl-btn danger" id="ctrl-end">end call</button>
+    <!-- camera front/back switch: shown only on stream calls, logic in app.js -->
+    <button id="ctrl-cam-switch" title="flip camera">⟳ flip</button>
+    <button class="ctrl-btn danger" id="ctrl-end">disconnect</button>
   </div>
 </div>
 
 <!-- Voice memo overlay -->
 <div id="memo-panel"></div>
 
+<!-- Inject name-hint hide logic: once nick is set, remove hint -->
 <script type="module" src="/main.js"></script>
+<script>
+  // Hide the name hint once user saves a name (non-default)
+  // This runs after app.js mounts and updates nick-display
+  const _observer = new MutationObserver(() => {
+    const nd = document.getElementById('nick-display');
+    const hint = document.getElementById('name-hint');
+    if (!nd || !hint) return;
+    const v = nd.textContent.trim();
+    // '···' is the loading placeholder; a short hex is the auto-id
+    const isDefault = v === '···' || /^[a-f0-9]{8}$/.test(v);
+    hint.classList.toggle('visible', isDefault);
+  });
+  const nd = document.getElementById('nick-display');
+  if (nd) _observer.observe(nd, { childList:true, characterData:true, subtree:true });
+</script>
 </body>
 </html>
