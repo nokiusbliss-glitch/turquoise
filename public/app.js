@@ -130,6 +130,35 @@ export class TurquoiseApp {
     this.folder.onProgress    = (fid,d,t) => this._onFolderProg(fid,d,t);
     this.folder.onFolderReady = info => this._onFolderReady(info);
     this.folder.onError       = (_,m) => this._status(m,'err',5000);
+
+    // Expose active-state flags for main.js auto-reload guard
+    window.__tqApp = this;
+  }
+
+  // ── Transfer / game warning ────────────────────────────────────────────────
+  // Returns true when it's unsafe to reload (active transfer or active game).
+  hasActiveTransfer() {
+    return this._fileOwners.size > 0 || this.ft._recv?.size > 0
+        || this._folderSendState.size > 0;
+  }
+  hasActiveGame() {
+    return this.games.size > 0;
+  }
+  _updateTransferWarn() {
+    const el = $('transfer-warn'); if (!el) return;
+    const hasT = this.hasActiveTransfer();
+    const hasG = this.hasActiveGame();
+    if (hasT && hasG) {
+      el.textContent = '◈ transfer + game in progress — keep screen on'; el.classList.add('visible');
+    } else if (hasT) {
+      el.textContent = '◈ transfer in progress — keep screen on'; el.classList.add('visible');
+    } else if (hasG) {
+      el.textContent = '◈ game in progress — closing screen pauses it'; el.classList.add('visible');
+    } else {
+      el.classList.remove('visible');
+    }
+    // Also set window flag for main.js to read synchronously
+    window.__tqUnsafeToReload = hasT || hasG;
   }
 
   // ── Mount ──────────────────────────────────────────────────────────────────
@@ -219,26 +248,7 @@ export class TurquoiseApp {
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
 
-    $('btn-walkie')?.addEventListener('click', () => {
-      if (this.active && this.active!==CIRCLE) this._startCall(this.active,'walkie');
-      else this._startCircleCall('walkie');
-    });
-    $('btn-stream')?.addEventListener('click', () => {
-      if (this.active && this.active!==CIRCLE) this._startCall(this.active,'stream');
-      else this._startCircleCall('stream');
-    });
-    $('ctrl-mute')?.addEventListener('click', () => this._toggleMute());
-    $('ctrl-cam')?.addEventListener('click',  () => this._toggleCam());
-    $('ctrl-cam-switch')?.addEventListener('click', () => this._switchCamera());
-    $('ctrl-end')?.addEventListener('click',  () => { if(this.circleCall) this._endCircleCall(); else this._endCallLocal(true); });
-    $('ci-accept')?.addEventListener('click',  () => {
-      const d=$('call-incoming'), fp=d?.dataset.callFp;
-      if (fp) { if(d?.dataset.circle==='1') this._acceptCircleCall(fp); else this._acceptCall(fp); }
-    });
-    $('ci-decline')?.addEventListener('click', () => {
-      const d=$('call-incoming'), fp=d?.dataset.callFp;
-      if (fp) { if(d?.dataset.circle==='1') this._declineCircleCall(fp); else this._declineCall(fp); }
-    });
+    // Call buttons removed from UI — calls disabled pending fix
   }
 
   _startNickEdit() {
@@ -281,12 +291,14 @@ export class TurquoiseApp {
       <div class="pm-item" id="pmi-folder">◫  transmit folder</div>
       <div class="pm-item" id="pmi-memo">◎  voice fragment</div>
       <div class="pm-sep"></div>
+      ${!isCircle ? `
       <div class="pm-label">◈ play together</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-ttt">⊞  tic tac toe</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-sps">✦  stone paper scissors</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-chess">♟  chess</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-airh">◉  air hockey</div>
       <div class="pm-item${canGame?'':' pm-dim'}" id="pmi-snake">⟐  strand</div>
+      ` : ''}
       <div class="pm-sep"></div>
       <div class="pm-item pm-danger" id="pmi-export">⬇  export state</div>
       <div class="pm-item" id="pmi-import">⬆  import state</div>`;
@@ -408,6 +420,23 @@ export class TurquoiseApp {
     this._status(name+' disconnected','warn',5000);
   }
 
+  // ── Circle members display ─────────────────────────────────────────────────
+  // Shows a compact list of connected nodes in the circle chat header.
+  _renderCircleMembers(isCircle) {
+    const el = $('circle-members'); if (!el) return;
+    if (!isCircle) { el.classList.remove('visible'); return; }
+    const connected = this.net.getConnectedPeers();
+    if (!connected.length) { el.classList.remove('visible'); return; }
+    el.classList.add('visible');
+    const count = connected.length;
+    el.innerHTML = `
+      <div class="cm-count">${count} node${count===1?'':'s'} online</div>
+      <div class="cm-nodes">${connected.map(fp => {
+        const nick = this.peers.get(fp)?.nick || fp.slice(0,6);
+        return `<span class="cm-node online">${esc(nick)}</span>`;
+      }).join('')}</div>`;
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   _renderPeers() {
@@ -433,6 +462,8 @@ export class TurquoiseApp {
     }
     list.innerHTML=''; list.appendChild(frag);
     const cnt=$('peer-count'); if(cnt) cnt.textContent=`(${this.peers.size})`;
+    // Refresh circle members display if circle is the active session
+    if (this.active===CIRCLE) this._renderCircleMembers(true);
   }
 
   _renderHeader() {
@@ -450,9 +481,8 @@ export class TurquoiseApp {
         fpe.textContent = tier === 'p2p' ? 'p2p · direct' : tier === 'ws-relay' ? 'relay' : fp ? fp.slice(0,16)+'…' : '';
       }
     }
-    const bw=$('btn-walkie'), bv=$('btn-stream');
-    if(bw) bw.textContent = isCircle ? '◈ signal·circle' : '◈ signal';
-    if(bv) bv.textContent = isCircle ? '◉ eyes·circle'   : '◉ eyes·on';
+    // Call buttons removed — update circle members display instead
+    this._renderCircleMembers(isCircle);
   }
 
   async _openSession(fp) {
@@ -707,6 +737,7 @@ export class TurquoiseApp {
     if (isCircle) this._circleFileIds.set(fileId, fps.length);
     fps.forEach(fp=>this.ft.send(file,fp,fileId));
     this._status('transmitting '+file.name+'…','info');
+    this._updateTransferWarn();
   }
 
   _cancelFile(msg) {
@@ -735,6 +766,7 @@ export class TurquoiseApp {
       }
       this._fileOwners.delete(fileId);
       ownMsgs.forEach(m => { m.status='done'; });
+      this._updateTransferWarn();
       document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
         card.querySelector('.prog-track')?.remove();
         card.querySelector('.file-stats')?.remove();
@@ -782,6 +814,7 @@ export class TurquoiseApp {
       }
     }
     this._fileOwners.delete(fileId);
+    this._updateTransferWarn();
     document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
       card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove(); card.querySelector('.file-cancel')?.remove();
       this._setFileCardNote(card, `⚠ ${errMsg}`, 'err');
@@ -926,7 +959,7 @@ export class TurquoiseApp {
   _makeGame(fp, gameType) {
     const key  = fp + ':' + gameType;
     const send = m => this.net.sendCtrl(fp, {type:'game',...m});
-    const close = () => { this.games.delete(key); };
+    const close = () => { this.games.delete(key); this._updateTransferWarn(); };
     if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
     if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
     if (gameType === 'airh')  return new AirHockey(fp, this.id.fingerprint, send, close);
@@ -941,6 +974,7 @@ export class TurquoiseApp {
       const game = this._makeGame(fp, gameType);
       if (gameType === 'chess') game.myColor = 'w';
       this.games.set(key, game);
+      this._updateTransferWarn();
       this.net.sendCtrl(fp, {type:'game', gameType, action:'invite'});
       const label = gameLabel(gameType);
       const rec={id:crypto.randomUUID(),sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,

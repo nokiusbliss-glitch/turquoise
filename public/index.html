@@ -958,6 +958,44 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .sg-emoji:hover,.sg-emoji.regular:hover{transform:scale(1.18);color:var(--tq)}
 .sg-emoji.regular:hover{filter:saturate(1.1) brightness(1)}
 
+
+/* ── Circle members badge (shown in chat header when in circle view) ──────── */
+#circle-members{
+  display:none;
+  flex-direction:column;
+  align-items:flex-end;
+  gap:2px;
+  flex-shrink:0;
+}
+#circle-members.visible{display:flex}
+.cm-count{
+  font-family:'Syne',sans-serif;font-size:9px;letter-spacing:.12em;
+  color:var(--tq2);text-transform:uppercase;
+}
+.cm-nodes{
+  display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:160px;
+}
+.cm-node{
+  font-size:8px;color:var(--dim);letter-spacing:.04em;
+  background:rgba(64,224,208,.06);border:1px solid var(--mute);
+  padding:1px 5px;
+  clip-path:polygon(0 0,calc(100%-3px) 0,100% 3px,100% 100%,3px 100%,0 calc(100%-3px));
+  white-space:nowrap;max-width:70px;overflow:hidden;text-overflow:ellipsis;
+}
+.cm-node.online{color:var(--tq);border-color:var(--tq3)}
+
+/* ── Active transfer / game warning strip ────────────────────────────────── */
+#transfer-warn{
+  display:none;
+  font-size:9px;letter-spacing:.06em;
+  color:var(--uy);background:rgba(255,225,74,.06);
+  border-top:1px solid rgba(255,225,74,.18);
+  padding:3px 12px;
+  flex-shrink:0;
+  text-align:center;
+}
+#transfer-warn.visible{display:block}
+
 </style>
 </head>
 <body>
@@ -1003,11 +1041,8 @@ body{font-family:'Space Mono',monospace;font-size:13px}
         <div id="chat-peer-name">—</div>
         <div id="chat-peer-fp"></div>
       </div>
-      <div id="call-btns">
-        <!-- Initial text is overridden by _renderHeader() in app.js -->
-        <button class="call-btn" id="btn-walkie">◈ signal</button>
-        <button class="call-btn" id="btn-stream">◉ eyes·on</button>
-      </div>
+      <!-- Circle members badge: shown by app.js when in circle view -->
+      <div id="circle-members" style="display:none"></div>
     </div>
 
     <div id="tool-panel"></div>
@@ -1019,6 +1054,9 @@ body{font-family:'Space Mono',monospace;font-size:13px}
       <div class="sg-phrases"></div>
       <div class="sg-emojis"></div>
     </div>
+
+    <!-- Active-transfer warning -->
+    <div id="transfer-warn">◈ transfer in progress — keep screen on</div>
 
     <!-- Status bar -->
     <div id="status-line">initialising…</div>
@@ -1053,27 +1091,21 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 <input type="file" id="__file-input" multiple style="display:none">
 <input type="file" id="__import-input" accept=".json" style="display:none">
 
-<!-- Incoming call/signal overlay -->
-<div id="call-incoming">
-  <div class="ci-title">◈ incoming</div>
-  <div class="ci-caller" id="ci-caller-name">Unknown</div>
-  <div class="ci-btns">
-    <button class="ci-btn accept" id="ci-accept">tune·in</button>
-    <button class="ci-btn decline" id="ci-decline">pass</button>
-  </div>
+<!-- Call panels removed — calls disabled pending fix.
+     Stubs kept so app.js references don't throw. -->
+<div id="call-incoming" style="display:none!important">
+  <div class="ci-caller" id="ci-caller-name"></div>
+  <button id="ci-accept" style="display:none"></button>
+  <button id="ci-decline" style="display:none"></button>
 </div>
-
-<!-- Call / eyes·on panel -->
-<div id="call-panel">
+<div id="call-panel" style="display:none!important">
   <div id="call-videos"></div>
   <div id="call-stats"></div>
-  <div id="call-controls">
-    <button class="ctrl-btn" id="ctrl-mute">mute</button>
-    <!-- cam off/on: text overridden by JS -->
-    <button class="ctrl-btn" id="ctrl-cam">cam off</button>
-    <!-- camera front/back switch: shown only on stream calls, logic in app.js -->
-    <button id="ctrl-cam-switch" title="flip camera">⟳ flip</button>
-    <button class="ctrl-btn danger" id="ctrl-end">disconnect</button>
+  <div id="call-controls" style="display:none">
+    <button id="ctrl-mute" style="display:none"></button>
+    <button id="ctrl-cam"  style="display:none"></button>
+    <button id="ctrl-cam-switch" style="display:none"></button>
+    <button id="ctrl-end"  style="display:none"></button>
   </div>
 </div>
 
