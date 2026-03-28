@@ -1,5 +1,5 @@
 /**
- * main.js — Turquoise v7.3
+ * main.js — Turquoise v7
  * Boot: API checks → SW → identity → network → app → connect → lifecycle
  *
  * New: TQLog.liveViewer handled by app.js. main.js only sets up the log
@@ -94,54 +94,19 @@ async function boot() {
   });
   window.addEventListener('offline', () => log.warn('main','offline','browser offline'));
 
-  // ── Smart reconnect on screen wake ──────────────────────────────────────
-  // When the screen comes back on (visibility restored), Turquoise auto-reloads
-  // so it reconnects cleanly and restores all chat history from IndexedDB.
-  //
-  // Safety guard: if a file transfer or game is in progress, we skip the reload
-  // and do a lightweight socket reconnect instead. The user sees the warning
-  // strip (set by app.js) that tells them to keep the screen on.
-  //
-  // File-picker suppression: app.js sets __tqSuppressVisibleReconnectUntil
-  // while a native file picker is open (which also fires a visibility event).
-  let _hiddenAt = 0;
-
+  // On device wake / tab restore: usually force a hard reconnect.
+  // Mobile file/folder pickers can also trigger hidden/visible, so app.js can
+  // suppress exactly one return-to-page reconnect while a picker is open.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      _hiddenAt = Date.now();
-      return;
-    }
-
-    // Picker suppression — don't reload while file/folder picker is open
+    if (document.hidden) return;
     const suppressUntil = Number(window.__tqSuppressVisibleReconnectUntil || 0);
     if (suppressUntil > Date.now()) {
       window.__tqSuppressVisibleReconnectUntil = 0;
-      log.info('main','visible','reconnect suppressed (picker)');
+      log.info('main','visible','page visible — reconnect suppressed');
       return;
     }
-
-    // If screen was only hidden briefly (<4s) skip reload — likely a quick
-    // notification shade pull or accidental lock, not a real sleep cycle.
-    const awayMs = Date.now() - _hiddenAt;
-    if (awayMs < 4000) {
-      log.info('main','visible','brief hide — soft reconnect only');
-      network.forceReconnect();
-      return;
-    }
-
-    // Check whether it's safe to reload.
-    // window.__tqUnsafeToReload is set by app.js when a transfer or game is live.
-    if (window.__tqUnsafeToReload) {
-      log.info('main','visible','unsafe to reload — soft reconnect (transfer/game active)');
-      network.forceReconnect();
-      return;
-    }
-
-    // Safe to reload — do it. All chat history is in IndexedDB and persists
-    // through the reload. Connections re-establish immediately after boot.
-    // This is the cleanest way to heal a stale WebRTC / WebSocket state.
-    log.info('main','visible','screen resumed — reloading for clean reconnect', {awayMs});
-    location.reload();
+    log.info('main','visible','page visible — forcing reconnect');
+    network.forceReconnect();
   });
 }
 
