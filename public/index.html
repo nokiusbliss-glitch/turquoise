@@ -98,6 +98,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   display:flex;align-items:center;gap:8px;cursor:pointer;
   flex:1;min-width:0;
   position:relative;
+  overflow:hidden;
 }
 #identity-row::before{
   content:'▸';color:var(--dim);font-size:10px;flex-shrink:0;
@@ -126,12 +127,13 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   color:var(--tq);letter-spacing:.05em;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   transition:opacity .15s;
+  min-width:0;flex:1 1 auto;display:block;
 }
 #nick-display.hidden{display:none}
 #nick-input{
   display:none;background:var(--bg2);border:1px solid var(--tq2);
   color:var(--tq);padding:2px 8px;font-family:inherit;font-size:13px;
-  width:140px;outline:none;
+  width:140px;max-width:100%;min-width:0;outline:none;
   clip-path:polygon(0 0,calc(100%-5px) 0,100% 100%,0 100%);
 }
 #nick-input.visible{display:block}
@@ -332,7 +334,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 .sender-code{
   font-family:'Space Mono',monospace;
   font-size:7px;color:var(--dim);letter-spacing:.06em;
-  margin-left:4px;opacity:.7;font-weight:400;
+  margin-right:4px;opacity:.7;font-weight:400;
 }
 .msg.sent .sender{color:var(--tq2)}
 .msg .ts{font-size:8px;color:var(--dim);position:absolute;bottom:3px;right:8px;}
@@ -839,6 +841,7 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 
 /* ── Circle peer cards (selectable node list rendered in circle chat) ──── */
 #circle-peer-list{
+  display:none;
   flex-shrink:0;
   border-bottom:1px solid rgba(30,85,80,.4);
   background:var(--bg1);
@@ -944,6 +947,29 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   }
   .call-video-tile{min-width:160px}
   .call-pip{right:50%;transform:translateX(50%);bottom:70px}
+  #identity-row{padding-right:2px}
+  #nick-display.hidden{display:block;opacity:0}
+  #nick-input.visible{
+    position:absolute;left:14px;right:0;top:50%;
+    transform:translateY(-50%);
+    width:auto;z-index:2;
+  }
+  #name-hint{
+    left:14px;
+    max-width:calc(100% - 14px);
+    overflow:hidden;text-overflow:ellipsis;
+  }
+  #conn-status{
+    max-width:88px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  #reset-btn{
+    width:20px;height:20px;padding:0;font-size:0;opacity:.7;
+  }
+  #reset-btn::before{
+    content:'⟳';
+    font-size:10px;line-height:20px;
+  }
 }
 
 /* ── Animations ──────────────────────────────────────────────────────────── */
@@ -1089,13 +1115,13 @@ body{font-family:'Space Mono',monospace;font-size:13px}
         <button class="call-btn" id="btn-stream">◉ eyes·on</button>
       </div>
       <!-- Circle members badge: shown in circle view -->
-      <div id="circle-members" style="display:none"></div>
+      <div id="circle-members"></div>
     </div>
 
     <div id="tool-panel"></div>
 
     <!-- Circle: selectable peer list, shown above chat when in circle view -->
-    <div id="circle-peer-list" style="display:none"></div>
+    <div id="circle-peer-list"></div>
 
     <div id="chat-area"></div>
 
@@ -1141,21 +1167,22 @@ body{font-family:'Space Mono',monospace;font-size:13px}
 <input type="file" id="__file-input" multiple style="display:none">
 <input type="file" id="__import-input" accept=".json" style="display:none">
 
-<!-- Call panels removed — calls disabled pending fix.
-     Stubs kept so app.js references don't throw. -->
-<div id="call-incoming" style="display:none">
+<div id="call-incoming">
+  <div class="ci-title">incoming signal</div>
   <div class="ci-caller" id="ci-caller-name"></div>
-  <button id="ci-accept" style="display:none"></button>
-  <button id="ci-decline" style="display:none"></button>
+  <div class="ci-btns">
+    <button class="ci-btn accept" id="ci-accept">tune·in</button>
+    <button class="ci-btn decline" id="ci-decline">pass</button>
+  </div>
 </div>
-<div id="call-panel" style="display:none">
+<div id="call-panel">
   <div id="call-videos"></div>
   <div id="call-stats"></div>
-  <div id="call-controls" style="display:none">
-    <button id="ctrl-mute" style="display:none"></button>
-    <button id="ctrl-cam"  style="display:none"></button>
-    <button id="ctrl-cam-switch" style="display:none"></button>
-    <button id="ctrl-end"  style="display:none"></button>
+  <div id="call-controls">
+    <button class="ctrl-btn" id="ctrl-mute">mute</button>
+    <button class="ctrl-btn" id="ctrl-cam">cam off</button>
+    <button class="ctrl-btn" id="ctrl-cam-switch" title="flip camera">flip</button>
+    <button class="ctrl-btn danger" id="ctrl-end">end</button>
   </div>
 </div>
 

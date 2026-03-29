@@ -1364,6 +1364,7 @@ export class SnakeDuel {
     this._phase  = 'active';  // 'active' | 'dead1' | 'dead2' | 'over'
     this._respT  = 0;         // respawn timer
     this._deathFlash = 0;     // frames of death flash
+    this._startedGame = false;
   }
 
   // ── Message handling ────────────────────────────────────────────────────────
@@ -1371,8 +1372,11 @@ export class SnakeDuel {
   handleMsg(msg) {
     const {action} = msg;
     if (action === 'invite') {
+      if (this._startedGame || this.state === 'active' || this.state === 'done') return;
       this._invited = true; this.mySlot = 2; this.state = 'waiting'; this._draw();
     } else if (action === 'accept') {
+      if (this._startedGame || this.state === 'active' || this.state === 'done') return;
+      this._startedGame = true;
       this.mySlot = 1; this.state = 'active'; this._initGame(); this._startLoop(); this._draw();
     } else if (action === 'dir') {
       // P1 receives P2's direction request
@@ -1393,23 +1397,16 @@ export class SnakeDuel {
       // FIX: P2 must transition to done when P1 declares game over.
       // Without this P2's renderLoop runs forever and done screen never shows.
       if (msg.phase === 'over') {
-        this.state = 'done';
-        this._stopLoop();
-        this._unbindKeys();
-        this._canvas = null; this._ctx = null;
-        this._draw();
+        this._finishGame();
       }
     } else if (action === 'resign') {
-      // FIX: unbind keys so listeners don't leak after game ends
-      this.state = 'done';
-      this._stopLoop();
-      this._unbindKeys();
-      this._canvas = null; this._ctx = null;
-      this._draw();
+      this._finishGame();
     }
   }
 
   _accept() {
+    if (this._startedGame || this.state === 'active' || this.state === 'done') return;
+    this._startedGame = true;
     this.mySlot = 2; this.state = 'active';
     this.send({gameType:'snake', action:'accept'});
     this._startLoop(); this._draw();
@@ -1501,8 +1498,7 @@ export class SnakeDuel {
       const p1Out = this._lives.p1 <= 0;
       const p2Out = this._lives.p2 <= 0;
       if (p1Out || p2Out) {
-        this._phase = 'over'; this.state = 'done';
-        this._stopLoop(); this._broadcast(); this._canvas = null; this._ctx = null; this._draw();
+        this._phase = 'over'; this._broadcast(); this._finishGame();
         return;
       }
 
@@ -1595,6 +1591,7 @@ export class SnakeDuel {
   }
 
   _queueDir(d) {
+    if (this.state !== 'active') return;
     const myDir = this.mySlot===1 ? this._d1 : this._d2;
     if (d === SN_OPP[myDir]) return; // can't reverse
     if (this.mySlot === 1) {
@@ -1808,6 +1805,15 @@ export class SnakeDuel {
       const d = Math.abs(dx)>Math.abs(dy) ? (dx>0?'e':'w') : (dy>0?'s':'n');
       this._queueDir(d);
     },{passive:false});
+  }
+
+  _finishGame() {
+    this.state = 'done';
+    this._stopLoop();
+    this._unbindKeys();
+    this._canvas = null;
+    this._ctx = null;
+    this._draw();
   }
 
   destroy() {

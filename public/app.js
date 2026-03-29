@@ -97,6 +97,7 @@ export class TurquoiseApp {
     this._statsTimer= null;
     this._pipCleanup= null;
     this.games      = new Map();
+    this.circleCallingEnabled = false;
 
     // Camera facing mode for video calls (front/back flip)
     this._facingMode = 'user';   // 'user' = front, 'environment' = back
@@ -149,11 +150,11 @@ export class TurquoiseApp {
     const hasT = this.hasActiveTransfer();
     const hasG = this.hasActiveGame();
     if (hasT && hasG) {
-      el.textContent = '◈ transfer + game in progress — keep screen on'; el.classList.add('visible');
+      el.textContent = '◈ live transfer + game running — keep screen on; if the screen sleeps, Turquoise reconnects when you return'; el.classList.add('visible');
     } else if (hasT) {
-      el.textContent = '◈ transfer in progress — keep screen on'; el.classList.add('visible');
+      el.textContent = '◈ live transfer running — keep screen on; if the screen sleeps, the live connection can drop'; el.classList.add('visible');
     } else if (hasG) {
-      el.textContent = '◈ game in progress — closing screen pauses it'; el.classList.add('visible');
+      el.textContent = '◈ live game running — keep screen on; if the screen sleeps, the live connection can drop'; el.classList.add('visible');
     } else {
       el.classList.remove('visible');
     }
@@ -191,30 +192,8 @@ export class TurquoiseApp {
       this._status('connecting…','info');
     }
 
-    // ── Auto-reload on screen wake ──────────────────────────────────────────
-    // When the user returns to the page after the screen was off, the WebRTC
-    // connections and WebSocket are almost certainly dead (OS killed sockets).
-    // If nothing critical is in-flight we reload the page — all chat history
-    // persists in IndexedDB/localStorage, so no data is lost.
-    // If a transfer or game is active we just reconnect in-place and show
-    // the warning banner so the user understands what happened.
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) return;
-      // Picker / import suppression window
-      const suppressUntil = Number(window.__tqSuppressVisibleReconnectUntil || 0);
-      if (suppressUntil > Date.now()) return;
+    this._updateTransferWarn();
 
-      const unsafe = window.__tqUnsafeToReload;   // set by _updateTransferWarn()
-      if (!unsafe) {
-        // Clean state: reload for a guaranteed fresh connection.
-        // Small delay lets the device fully wake before hitting network.
-        setTimeout(() => location.reload(), 600);
-      } else {
-        // Something valuable in-flight: reconnect without reload and tell user.
-        this._status('reconnecting… (transfer/game in progress)','warn');
-        this.net.forceReconnect?.();
-      }
-    });
   }
 
   // ── Log panel ──────────────────────────────────────────────────────────────
@@ -285,11 +264,15 @@ export class TurquoiseApp {
     $('ctrl-end')?.addEventListener('click',  () => this._endCallLocal(true));
     $('ci-accept')?.addEventListener('click',  () => {
       const d=$('call-incoming'), fp=d?.dataset.callFp;
-      if (fp) this._acceptCall(fp);
+      if (!fp) return;
+      if (d?.dataset.circle === '1') this._acceptCircleCall(fp);
+      else this._acceptCall(fp);
     });
     $('ci-decline')?.addEventListener('click', () => {
       const d=$('call-incoming'), fp=d?.dataset.callFp;
-      if (fp) this._declineCall(fp);
+      if (!fp) return;
+      if (d?.dataset.circle === '1') this._declineCircleCall(fp);
+      else this._declineCall(fp);
     });
   }
 
@@ -457,6 +440,7 @@ export class TurquoiseApp {
     }
     const recvState = this.ft._recv?.get(fp);
     if (recvState?.fileId) this.ft.cancelRecv(fp, recvState.fileId);
+    this._updateTransferWarn();
     this._renderPeers();
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' disconnected','warn',5000);
@@ -496,7 +480,7 @@ export class TurquoiseApp {
     const nodes = connected.map(fp => {
       const p    = this.peers.get(fp)||{};
       const nick = p.nick || fp.slice(0,8);
-      const sid  = fp.slice(0,6);
+      const sid  = fp.slice(0,8);
       return `<div class="cp-node" data-fp="${fp}" title="tap to open 1:1 chat with ${esc(nick)}">
         <span class="cp-node-dot"></span>
         <span class="cp-node-nick">${esc(nick)}</span>
@@ -604,9 +588,9 @@ export class TurquoiseApp {
     if (!msg.own && !isSys) {
       // Show name + short fingerprint code so nick changes don't cause confusion
       const senderFp   = msg.from || '';
-      const shortCode  = senderFp.slice(0,6);
-      const codePart   = shortCode ? ` <span class="sender-code">(${shortCode})</span>` : '';
-      el.innerHTML = `<div class="sender">${esc(msg.fromNick||'?')}${codePart}</div>`;
+      const shortCode  = senderFp.slice(0,8);
+      const codePart   = shortCode ? `<span class="sender-code">(${shortCode})</span> ` : '';
+      el.innerHTML = `<div class="sender">${codePart}${esc(msg.fromNick||'?')}</div>`;
     }
     const t = document.createElement('span'); t.textContent=msg.text; el.appendChild(t);
     if (!isSys) {
@@ -1088,6 +1072,7 @@ export class TurquoiseApp {
       this._openSession(fp).then(() => {
         game = this._makeGame(fp, gameType);
         this.games.set(key, game);
+        this._updateTransferWarn();
         const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
         const label = gameLabel(gameType);
         const rec={id:crypto.randomUUID(),sessionId:fp,from:fp,fromNick:nick,
@@ -1098,7 +1083,10 @@ export class TurquoiseApp {
         ca.appendChild(embed); ca.scrollTop = ca.scrollHeight;
         game.render(embed); game.handleMsg(msg);
       });
-    } else { game?.handleMsg(msg); }
+    } else {
+      game?.handleMsg(msg);
+      this._updateTransferWarn();
+    }
   }
 
   // ── 1:1 Calls ──────────────────────────────────────────────────────────────
@@ -1229,6 +1217,10 @@ export class TurquoiseApp {
   // ── Circle calls ───────────────────────────────────────────────────────────
 
   async _startCircleCall(callType) {
+    if (!this.circleCallingEnabled) {
+      this._status('circle calling is unavailable right now — open a node for 1:1 signal','warn',5000);
+      return;
+    }
     if (this.call) { this._sys('end 1:1 signal first',true); return; }
     if (this.circleCall?.phase==='active') { this._endCircleCall(); return; }
     const fps=this.net.getConnectedPeers().filter(fp=>!this.circleBlocked.has(fp));
@@ -1257,6 +1249,12 @@ export class TurquoiseApp {
   }
 
   _onCircleCallInvite(fp, msg) {
+    if (!this.circleCallingEnabled) {
+      this._log.warn('app','_onCircleCallInvite','circle calling disabled; declining', { from:fp.slice(0,8), type:msg.callType||'walkie' });
+      this.net.sendCtrl(fp,{type:'call-decline',circle:true,reason:'circle-calls-disabled'});
+      this._status('circle calling is unavailable right now — open a node for 1:1 signal','warn',5000);
+      return;
+    }
     if (this.call) { this.net.sendCtrl(fp,{type:'call-decline',circle:true}); return; }
     const callType=msg.callType==='stream'?'stream':'walkie';
     if (this.circleCall?.phase==='active'&&this.circleCall.localStream) {
@@ -1279,6 +1277,7 @@ export class TurquoiseApp {
   }
 
   async _acceptCircleCall(fp) {
+    if (!this.circleCallingEnabled) { this._declineCircleCall(fp); return; }
     if (!this.circleCall) return;
     this._hideCallIncoming();
     const video=this.circleCall.type==='stream';

@@ -125,6 +125,7 @@ async function boot() {
     const awayMs = Date.now() - _hiddenAt;
     if (awayMs < 4000) {
       log.info('main','visible','brief hide — soft reconnect only');
+      window.__tqApp?._status?.('screen woke — refreshing the connection','info', 4000);
       network.forceReconnect();
       return;
     }
@@ -133,6 +134,7 @@ async function boot() {
     // window.__tqUnsafeToReload is set by app.js when a transfer or game is live.
     if (window.__tqUnsafeToReload) {
       log.info('main','visible','unsafe to reload — soft reconnect (transfer/game active)');
+      window.__tqApp?._status?.('screen woke — reconnecting; live transfer/game may need a fresh retry','warn', 7000);
       network.forceReconnect();
       return;
     }
@@ -141,6 +143,7 @@ async function boot() {
     // through the reload. Connections re-establish immediately after boot.
     // This is the cleanest way to heal a stale WebRTC / WebSocket state.
     log.info('main','visible','screen resumed — reloading for clean reconnect', {awayMs});
+    window.__tqApp?._status?.('screen woke — reloading for a clean reconnect','info', 2500);
     location.reload();
   });
 }
