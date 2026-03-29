@@ -134,7 +134,7 @@ async function boot() {
     // window.__tqUnsafeToReload is set by app.js when a transfer or game is live.
     if (window.__tqUnsafeToReload) {
       log.info('main','visible','unsafe to reload — soft reconnect (transfer/game active)');
-      window.__tqApp?._status?.('screen woke — reconnecting; live transfer/game may need a fresh retry','warn', 7000);
+      window.__tqApp?._status?.('screen woke — reconnecting live transfer/game from the last confirmed point','warn', 7000);
       network.forceReconnect();
       return;
     }

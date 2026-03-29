@@ -109,22 +109,17 @@ export class TurquoiseApp {
     this._audioEl = Object.assign(document.createElement('audio'), {autoplay:true, playsInline:true, style:'display:none'});
     document.body.appendChild(this._audioEl);
 
-    // circleFileIds: Map<fileId, remainingPeerCount>
+    // circleFileIds: Map<fileId, peerCount> so resumed control messages keep circle routing.
     this._circleFileIds = new Map();
     this.ft = new FileTransfer(
       (fp,m) => {
-        const remaining = m.fileId ? this._circleFileIds.get(m.fileId) : undefined;
-        const isCircleFile = remaining !== undefined;
+        const isCircleFile = m.fileId ? this._circleFileIds.has(m.fileId) : false;
         const extra = isCircleFile ? {circle:true} : {};
-        if ((m.type==='file-end'||m.type==='file-abort') && isCircleFile) {
-          const newCount = remaining - 1;
-          if (newCount <= 0) this._circleFileIds.delete(m.fileId);
-          else               this._circleFileIds.set(m.fileId, newCount);
-        }
         return network.sendCtrl(fp, {...m, ...extra});
       },
       (fp,b) => network.sendBinary(fp,b),
-      fp     => network.waitForBuffer(fp)
+      fp     => network.waitForBuffer(fp),
+      fp     => network.isBinaryReady(fp)
     );
     this.ft.onProgress  = (id,pct,_dir,_fp,s) => this._onFileProg(id,pct,s);
     this.ft.onSent      = (id,fp,s) => this._onFileSent(id,fp,s);
@@ -134,7 +129,7 @@ export class TurquoiseApp {
     this.folder = new FolderTransfer(this.ft, (fp,m) => network.sendCtrl(fp,m));
     this.folder.onProgress    = (fid,d,t) => this._onFolderProg(fid,d,t);
     this.folder.onFolderReady = info => this._onFolderReady(info);
-    this.folder.onError       = (_,m) => this._status(m,'err',5000);
+    this.folder.onError       = (folderId,m,fp) => this._onFolderErr(folderId,m,fp);
 
     // Expose active-state flags for main.js auto-reload guard
     window.__tqApp = this;
@@ -154,9 +149,9 @@ export class TurquoiseApp {
     const hasT = this.hasActiveTransfer();
     const hasG = this.hasActiveGame();
     if (hasT && hasG) {
-      el.textContent = '◈ live transfer + game running — keep screen on; if the screen sleeps, Turquoise reconnects when you return'; el.classList.add('visible');
+      el.textContent = '◈ live transfer + game running — keep both screens on; if a screen sleeps, Turquoise tries to resume from the last confirmed point when both devices return'; el.classList.add('visible');
     } else if (hasT) {
-      el.textContent = '◈ live transfer running — keep screen on; if the screen sleeps, the live connection can drop'; el.classList.add('visible');
+      el.textContent = '◈ live transfer running — keep both screens on; if a screen sleeps, Turquoise tries to resume from the last confirmed chunk when both devices return'; el.classList.add('visible');
     } else if (hasG) {
       el.textContent = '◈ live game running — keep screen on; if the screen sleeps, the live connection can drop'; el.classList.add('visible');
     } else {
@@ -426,7 +421,10 @@ export class TurquoiseApp {
       loadMessages(fp).then(msgs => { this.sessions.set(fp,this._normalizeLoadedMessages(msgs)); this._renderPeers(); if(this.active===fp) this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
     } else this._renderPeers();
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
-    this._status(name+' joined','ok',3000);
+    const resuming = this.ft.onPeerConnected(fp);
+    this._resendActiveFolderManifests(fp);
+    this._updateTransferWarn();
+    this._status(resuming ? `${name} rejoined — resuming live transfer` : `${name} joined`, resuming ? 'info' : 'ok', 5000);
   }
 
   _onDisconnect(fp) {
@@ -437,20 +435,11 @@ export class TurquoiseApp {
     for (const [key, game] of this.games) {
       if (key.startsWith(fp + ':')) { game?.destroy?.(); this.games.delete(key); }
     }
-    for (const [fileId, info] of this._fileOwners) {
-      if (info.fps.includes(fp)) {
-        this.ft.cancelSend(fileId, fp);
-        info.fps = info.fps.filter(f => f !== fp);
-        info.pending?.delete(fp);
-        if (!info.fps.length) this._fileOwners.delete(fileId);
-      }
-    }
-    const recvState = this.ft._recv?.get(fp);
-    if (recvState?.fileId) this.ft.cancelRecv(fp, recvState.fileId);
+    const pausedTransfers = this.ft.onPeerDisconnected(fp);
     this._updateTransferWarn();
     this._renderPeers();
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
-    this._status(name+' disconnected','warn',5000);
+    this._status(pausedTransfers ? `${name} disconnected — live transfer paused, waiting to resume` : `${name} disconnected`, 'warn', 7000);
   }
 
   // ── Circle members display ─────────────────────────────────────────────────
@@ -720,6 +709,40 @@ export class TurquoiseApp {
     }
   }
 
+  _findTransferMsg(sessionId, type, key, value) {
+    return (this.sessions.get(sessionId) || []).find(m => m?.type===type && m?.[key]===value);
+  }
+
+  _resendActiveFolderManifests(fp) {
+    if (!fp || !this.net.isReady(fp)) return;
+    for (const state of this._folderSendState.values()) {
+      if (!state?.targets?.includes(fp)) continue;
+      this.net.sendCtrl(fp, {
+        type:'folder-manifest',
+        folderId:state.folderId,
+        name:state.name,
+        totalSize:state.totalSize,
+        files:state.manifest,
+        circle:state.circle||undefined,
+      });
+    }
+  }
+
+  _onFolderErr(folderId, errMsg, fp) {
+    for (const msgs of this.sessions.values()) {
+      const m=msgs.find(msg=>msg.folderId===folderId && (!fp || msg.own || msg.from===fp));
+      if (m) { m.status='error'; m._sentError=errMsg; this._persistMsg(m); }
+    }
+    const card=document.querySelector(`[data-folderid="${folderId}"]`);
+    if (card) {
+      card.querySelector('.prog-track')?.remove();
+      card.querySelector('.folder-count')?.remove();
+      this._setFolderCardNote(card, `⚠ ${errMsg}`, 'err');
+    }
+    this._updateTransferWarn();
+    if (errMsg!=='Cancelled') this._status('folder error: '+errMsg,'err',5000);
+  }
+
   _status(text, cls='', ms=0) {
     const el=$('status-line'); if(!el) return;
     el.textContent=text; el.className=cls;
@@ -738,19 +761,36 @@ export class TurquoiseApp {
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
     if (type==='file-meta')       {
       const sid=msg.circle?CIRCLE:fp;
-      const fmsg={id:msg.fileId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'file',fileId:msg.fileId,name:msg.name||'file',size:msg.size||0,mimeType:msg.mimeType,ts:Date.now(),status:'receiving'};
-      this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
-      this._status(`receiving ${fmsg.name}…`,'info');
-      this._updateTransferWarn();
+      const existing=this._findTransferMsg(sid,'file','fileId',msg.fileId);
+      if (!existing) {
+        const fmsg={id:msg.fileId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'file',fileId:msg.fileId,name:msg.name||'file',size:msg.size||0,mimeType:msg.mimeType,ts:Date.now(),status:'receiving'};
+        this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
+        this._status(`receiving ${fmsg.name}…`,'info');
+        this._updateTransferWarn();
+      } else if (existing.status!=='done') {
+        existing.status='receiving';
+        delete existing._sentError;
+        this._persistMsg(existing);
+      }
       this.ft.handleCtrl(fp,msg); return;
     }
-    if (type==='file-end'||type==='file-abort') { this.ft.handleCtrl(fp,msg); return; }
+    if (type==='file-ack'||type==='file-end'||type==='file-complete'||type==='file-abort') { this.ft.handleCtrl(fp,msg); return; }
     if (type==='folder-manifest')  {
       const sid=msg.circle?CIRCLE:fp;
-      const fmsg={id:msg.folderId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'folder',folderId:msg.folderId,name:msg.name||'folder',totalSize:msg.totalSize||0,fileCount:msg.files?.length||0,manifest:msg.files||[],ts:Date.now(),status:'receiving'};
-      this._pushMsg(sid,fmsg,()=>this._appendFolderCard(fmsg));
-      this._status(`receiving "${fmsg.name}"…`,'info');
-      this._updateTransferWarn();
+      const existing=this._findTransferMsg(sid,'folder','folderId',msg.folderId);
+      if (!existing) {
+        const fmsg={id:msg.folderId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'folder',folderId:msg.folderId,name:msg.name||'folder',totalSize:msg.totalSize||0,fileCount:msg.files?.length||0,manifest:msg.files||[],ts:Date.now(),status:'receiving'};
+        this._pushMsg(sid,fmsg,()=>this._appendFolderCard(fmsg));
+        this._status(`receiving "${fmsg.name}"…`,'info');
+        this._updateTransferWarn();
+      } else if (existing.status!=='done') {
+        existing.status='receiving';
+        existing.manifest=msg.files||existing.manifest||[];
+        existing.totalSize=msg.totalSize||existing.totalSize||0;
+        existing.fileCount=msg.files?.length||existing.fileCount||0;
+        delete existing._sentError;
+        this._persistMsg(existing);
+      }
       this.folder.handleCtrl(fp,msg); return;
     }
     if (type==='call-invite')  { msg.circle?this._onCircleCallInvite(fp,msg):this._onCallInvite(fp,msg); return; }
@@ -882,6 +922,7 @@ export class TurquoiseApp {
         info.pending.delete(fp);
         if (info.pending.size > 0) return;
       }
+      if (this._circleFileIds.has(fileId)) this._circleFileIds.delete(fileId);
       this._fileOwners.delete(fileId);
       ownMsgs.forEach(m => { m.status='done'; this._persistMsg(m); });
       this._updateTransferWarn();
@@ -900,6 +941,11 @@ export class TurquoiseApp {
     const key = `${fp}:${fileId}`;
     if (state.completed.has(key)) return;
     state.completed.add(key);
+    if (this._circleFileIds.has(fileId)) {
+      const rem = (this._circleFileIds.get(fileId) || 1) - 1;
+      if (rem <= 0) this._circleFileIds.delete(fileId);
+      else this._circleFileIds.set(fileId, rem);
+    }
     state.doneTransfers++;
     state.doneFiles.add(fileId);
     const done = state.peerCount > 1 ? state.doneTransfers : state.doneFiles.size;
@@ -930,8 +976,10 @@ export class TurquoiseApp {
   _onFileErr(fileId, errMsg, fp) {
     this._log.warn('app','_onFileErr', errMsg, { fileId });
     const folderId = this._folderSendByFile.get(fileId);
+    if (this._circleFileIds.has(fileId)) this._circleFileIds.delete(fileId);
     if (folderId) this._failOutgoingFolder(folderId, errMsg, fp);
     else {
+      this.folder.handleFileError(fileId, fp, errMsg);
       for (const msgs of this.sessions.values()) {
         const m=msgs.find(m=>m.fileId===fileId && (m.own || m.from===fp));
         if (m) { m.status='error'; m._sentError=errMsg; this._persistMsg(m); }
@@ -980,8 +1028,13 @@ export class TurquoiseApp {
       totalTransfers:fileList.length * fps.length,
       doneTransfers:0, doneFiles:new Set(), completed:new Set(),
       fileIds:fileList.map(f => f.fileId),
+      manifest:fileList,
+      targets:[...fps],
+      totalSize,
+      circle:isCircle,
     });
     fileList.forEach(f => this._folderSendByFile.set(f.fileId, folderId));
+    if (isCircle) fileList.forEach(f => this._circleFileIds.set(f.fileId, fps.length));
 
     fps.forEach(fp=>{
       this.net.sendCtrl(fp,{type:'folder-manifest',folderId,name:folderName,totalSize,files:fileList,circle:isCircle||undefined});
@@ -1036,7 +1089,10 @@ export class TurquoiseApp {
     const state = this._folderSendState.get(folderId);
     if (!state) return;
     this._folderSendState.delete(folderId);
-    state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
+    state.fileIds.forEach(fileId => {
+      this._folderSendByFile.delete(fileId);
+      this._circleFileIds.delete(fileId);
+    });
     for (const msgs of this.sessions.values()) {
       const m=msgs.find(m=>m.folderId===folderId && m.own);
       if (m) { m.status='done'; m._sentInfo={peerCount:state.peerCount}; this._persistMsg(m); }
@@ -1055,7 +1111,10 @@ export class TurquoiseApp {
     const state = this._folderSendState.get(folderId);
     if (!state) return;
     this._folderSendState.delete(folderId);
-    state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
+    state.fileIds.forEach(fileId => {
+      this._folderSendByFile.delete(fileId);
+      this._circleFileIds.delete(fileId);
+    });
     for (const msgs of this.sessions.values()) {
       const m=msgs.find(m=>m.folderId===folderId && m.own);
       if (m) { m.status='error'; m._sentError=errMsg; this._persistMsg(m); }

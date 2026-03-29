@@ -47,7 +47,7 @@ const RELAY_TYPES = new Set([
   'offer','answer','ice','chat',
   'call-invite','call-accept','call-decline','call-end','call-request',
   'offer-reneg','answer-reneg','permission-denied',
-  'file-meta','file-end','file-abort','bin-relay',
+  'file-meta','file-ack','file-end','file-complete','file-abort','bin-relay',
   'nick-update','game','folder-manifest',
   'ping','pong','p2p-relay','tool-action','nudge',
   'circle-peer-joined','circle-peer-left',  // coordinator messages for full-mesh circle calls

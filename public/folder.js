@@ -92,10 +92,21 @@ export class FolderTransfer {
     if (msg.type !== 'folder-manifest') return;
     const { folderId, name, files, totalSize } = msg;
     if (!folderId || !Array.isArray(files)) return;
-    const state = { folderId, name:name||'folder', from:fp, manifest:files, received:new Map(), total:files.length, totalSize:totalSize||0 };
-    this._recv.set(folderId, state);
-    files.forEach(f => { if (f?.fileId) this._f2folder.set(f.fileId, folderId); });
-    this.onProgress?.(folderId, 0, files.length, 'recv', fp);
+    let state = this._recv.get(folderId);
+    if (!state) {
+      state = { folderId, name:name||'folder', from:fp, manifest:files, received:new Map(), total:files.length, totalSize:totalSize||0 };
+      this._recv.set(folderId, state);
+    } else {
+      state.name = name || state.name || 'folder';
+      state.from = fp;
+      state.manifest = files;
+      state.total = files.length;
+      state.totalSize = totalSize || state.totalSize || 0;
+    }
+    files.forEach(f => {
+      if (f?.fileId && !state.received.has(f.fileId)) this._f2folder.set(f.fileId, folderId);
+    });
+    this.onProgress?.(folderId, state.received.size, files.length, 'recv', fp);
   }
 
   /**
@@ -113,6 +124,13 @@ export class FolderTransfer {
     state.received.set(fileId, { url:fileInfo.url, blob:fileInfo.blob||null, name:fileInfo.name, size:fileInfo.size, mimeType:fileInfo.mimeType, relativePath:entry?.relativePath||fileInfo.name });
     this.onProgress?.(folderId, state.received.size, state.total, 'recv', fileInfo.from);
     if (state.received.size >= state.total) this._finalize(folderId);
+    return true;
+  }
+
+  handleFileError(fileId, from, msg) {
+    const folderId = this._f2folder.get(fileId);
+    if (!folderId) return false;
+    this._fail(folderId, msg, from);
     return true;
   }
 
@@ -143,6 +161,16 @@ export class FolderTransfer {
     const download    = fid => { const f=byId.get(fid); if(f) _dl(f.url, f.name||f.relativePath.split('/').pop()||'file'); };
 
     this.onFolderReady?.({ folderId, name:state.name, from:state.from, manifest:state.manifest, files, totalSize:total, downloadZip, downloadAll, download });
+  }
+
+  _fail(folderId, msg, fp) {
+    const state = this._recv.get(folderId);
+    if (!state) return;
+    this._recv.delete(folderId);
+    (state.manifest || []).forEach(f => {
+      if (f?.fileId) this._f2folder.delete(f.fileId);
+    });
+    this.onError?.(folderId, msg, fp);
   }
 
   // ── Directory picker ──────────────────────────────────────────────────────
