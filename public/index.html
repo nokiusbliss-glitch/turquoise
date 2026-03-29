@@ -328,6 +328,12 @@ body{font-family:'Space Mono',monospace;font-size:13px}
   font-size:9px;color:var(--uy);letter-spacing:.08em;margin-bottom:3px;
   font-family:'Syne',sans-serif;font-weight:700;
 }
+/* Short fingerprint code shown after sender name */
+.sender-code{
+  font-family:'Space Mono',monospace;
+  font-size:7px;color:var(--dim);letter-spacing:.06em;
+  margin-left:4px;opacity:.7;font-weight:400;
+}
 .msg.sent .sender{color:var(--tq2)}
 .msg .ts{font-size:8px;color:var(--dim);position:absolute;bottom:3px;right:8px;}
 .msg.sys{
@@ -831,6 +837,41 @@ body{font-family:'Space Mono',monospace;font-size:13px}
     0 0 10px rgba(64,224,208,.25);
 }
 
+/* ── Circle peer cards (selectable node list rendered in circle chat) ──── */
+#circle-peer-list{
+  flex-shrink:0;
+  border-bottom:1px solid rgba(30,85,80,.4);
+  background:var(--bg1);
+  padding:8px 12px 6px;
+}
+.cp-header{
+  font-size:8px;letter-spacing:.18em;color:var(--dim);
+  text-transform:uppercase;margin-bottom:6px;
+  display:flex;align-items:center;gap:6px;
+}
+.cp-header::before{content:'◈';color:var(--tq3)}
+.cp-nodes{
+  display:flex;gap:6px;flex-wrap:wrap;
+}
+.cp-node{
+  display:flex;align-items:center;gap:5px;
+  padding:4px 9px 4px 7px;
+  background:var(--bg2);border:1px solid var(--mute);
+  cursor:pointer;
+  clip-path:polygon(0 0,calc(100%-6px) 0,100% 6px,100% 100%,6px 100%,0 calc(100%-6px));
+  transition:all .14s;font-size:10px;color:var(--dim);
+  letter-spacing:.04em;
+}
+.cp-node:hover{
+  background:rgba(64,224,208,.08);border-color:var(--tq2);color:var(--tq);
+}
+.cp-node-dot{
+  width:6px;height:6px;border-radius:0;transform:rotate(45deg);
+  background:var(--tq);flex-shrink:0;
+}
+.cp-node-nick{max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cp-node-id{font-size:7px;color:var(--dim);opacity:.7}
+
 /* ── Strand (Snake Duel) ─────────────────────────────────────────────────── */
 .tqapp-snake{font-size:11px;user-select:none}
 .sn-field{position:relative;margin:4px 0;line-height:0}
@@ -1041,11 +1082,19 @@ body{font-family:'Space Mono',monospace;font-size:13px}
         <div id="chat-peer-name">—</div>
         <div id="chat-peer-fp"></div>
       </div>
-      <!-- Circle members badge: shown by app.js when in circle view -->
+      <!-- Call buttons: shown for 1:1 nodes, hidden in circle -->
+      <div id="call-btns" style="display:none">
+        <button class="call-btn" id="btn-walkie">◈ signal</button>
+        <button class="call-btn" id="btn-stream">◉ eyes·on</button>
+      </div>
+      <!-- Circle members badge: shown in circle view -->
       <div id="circle-members" style="display:none"></div>
     </div>
 
     <div id="tool-panel"></div>
+
+    <!-- Circle: selectable peer list, shown above chat when in circle view -->
+    <div id="circle-peer-list" style="display:none"></div>
 
     <div id="chat-area"></div>
 

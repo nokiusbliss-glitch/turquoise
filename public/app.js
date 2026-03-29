@@ -248,7 +248,24 @@ export class TurquoiseApp {
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
 
-    // Call buttons removed from UI — calls disabled pending fix
+    $('btn-walkie')?.addEventListener('click', () => {
+      if (this.active && this.active!==CIRCLE) this._startCall(this.active,'walkie');
+    });
+    $('btn-stream')?.addEventListener('click', () => {
+      if (this.active && this.active!==CIRCLE) this._startCall(this.active,'stream');
+    });
+    $('ctrl-mute')?.addEventListener('click', () => this._toggleMute());
+    $('ctrl-cam')?.addEventListener('click',  () => this._toggleCam());
+    $('ctrl-cam-switch')?.addEventListener('click', () => this._switchCamera());
+    $('ctrl-end')?.addEventListener('click',  () => this._endCallLocal(true));
+    $('ci-accept')?.addEventListener('click',  () => {
+      const d=$('call-incoming'), fp=d?.dataset.callFp;
+      if (fp) this._acceptCall(fp);
+    });
+    $('ci-decline')?.addEventListener('click', () => {
+      const d=$('call-incoming'), fp=d?.dataset.callFp;
+      if (fp) this._declineCall(fp);
+    });
   }
 
   _startNickEdit() {
@@ -437,6 +454,36 @@ export class TurquoiseApp {
       }).join('')}</div>`;
   }
 
+  // ── Circle peer list in chat area ────────────────────────────────────────
+  // Renders a strip of selectable node cards above the circle chat.
+  // Clicking a card opens a 1:1 chat with that peer (same as clicking in sidebar).
+  _renderCirclePeerList(isCircle) {
+    const el = $('circle-peer-list'); if (!el) return;
+    if (!isCircle) { el.style.display='none'; return; }
+    const connected = this.net.getConnectedPeers();
+    if (!connected.length) { el.style.display='none'; return; }
+    el.style.display = 'block';
+    const nodes = connected.map(fp => {
+      const p    = this.peers.get(fp)||{};
+      const nick = p.nick || fp.slice(0,8);
+      const sid  = fp.slice(0,6);
+      return `<div class="cp-node" data-fp="${fp}" title="open chat with ${esc(nick)}">
+        <span class="cp-node-dot"></span>
+        <span class="cp-node-nick">${esc(nick)}</span>
+        <span class="cp-node-id">${sid}</span>
+      </div>`;
+    }).join('');
+    el.innerHTML = `
+      <div class="cp-header">nodes in circle</div>
+      <div class="cp-nodes">${nodes}</div>`;
+    el.querySelectorAll('.cp-node').forEach(card => {
+      card.addEventListener('click', () => {
+        const fp = card.dataset.fp;
+        if (fp) this._openSession(fp);
+      });
+    });
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   _renderPeers() {
@@ -462,8 +509,11 @@ export class TurquoiseApp {
     }
     list.innerHTML=''; list.appendChild(frag);
     const cnt=$('peer-count'); if(cnt) cnt.textContent=`(${this.peers.size})`;
-    // Refresh circle members display if circle is the active session
-    if (this.active===CIRCLE) this._renderCircleMembers(true);
+    // Refresh circle members + peer list if circle is active
+    if (this.active===CIRCLE) {
+      this._renderCircleMembers(true);
+      this._renderCirclePeerList(true);
+    }
   }
 
   _renderHeader() {
@@ -481,8 +531,15 @@ export class TurquoiseApp {
         fpe.textContent = tier === 'p2p' ? 'p2p · direct' : tier === 'ws-relay' ? 'relay' : fp ? fp.slice(0,16)+'…' : '';
       }
     }
-    // Call buttons removed — update circle members display instead
+    // Show call buttons for 1:1 chats, hide for circle
+    const cb = $('call-btns');
+    if (cb) cb.style.display = isCircle ? 'none' : 'flex';
+    const bw=$('btn-walkie'), bv=$('btn-stream');
+    if(bw) bw.textContent = '◈ signal';
+    if(bv) bv.textContent = '◉ eyes·on';
+    // Circle members badge + peer list
     this._renderCircleMembers(isCircle);
+    this._renderCirclePeerList(isCircle);
   }
 
   async _openSession(fp) {
@@ -514,7 +571,13 @@ export class TurquoiseApp {
     const el = document.createElement('div');
     el.className = isSys ? 'msg sys'+(msg.err?' err':'') : ('msg '+(msg.own?'sent':'recv'));
     if (!isSys) { el.dataset.shape=shape; el.style.transform=`rotate(${rot}deg)`; }
-    if (!msg.own && !isSys) el.innerHTML = `<div class="sender">${esc(msg.fromNick||'?')}</div>`;
+    if (!msg.own && !isSys) {
+      // Show name + short fingerprint code so nick changes don't cause confusion
+      const senderFp   = msg.from || '';
+      const shortCode  = senderFp.slice(0,6);
+      const codePart   = shortCode ? ` <span class="sender-code">${shortCode}</span>` : '';
+      el.innerHTML = `<div class="sender">${esc(msg.fromNick||'?')}${codePart}</div>`;
+    }
     const t = document.createElement('span'); t.textContent=msg.text; el.appendChild(t);
     if (!isSys) {
       const ts=document.createElement('span'); ts.className='ts';
