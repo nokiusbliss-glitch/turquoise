@@ -190,6 +190,31 @@ export class TurquoiseApp {
     } else {
       this._status('connecting…','info');
     }
+
+    // ── Auto-reload on screen wake ──────────────────────────────────────────
+    // When the user returns to the page after the screen was off, the WebRTC
+    // connections and WebSocket are almost certainly dead (OS killed sockets).
+    // If nothing critical is in-flight we reload the page — all chat history
+    // persists in IndexedDB/localStorage, so no data is lost.
+    // If a transfer or game is active we just reconnect in-place and show
+    // the warning banner so the user understands what happened.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      // Picker / import suppression window
+      const suppressUntil = Number(window.__tqSuppressVisibleReconnectUntil || 0);
+      if (suppressUntil > Date.now()) return;
+
+      const unsafe = window.__tqUnsafeToReload;   // set by _updateTransferWarn()
+      if (!unsafe) {
+        // Clean state: reload for a guaranteed fresh connection.
+        // Small delay lets the device fully wake before hitting network.
+        setTimeout(() => location.reload(), 600);
+      } else {
+        // Something valuable in-flight: reconnect without reload and tell user.
+        this._status('reconnecting… (transfer/game in progress)','warn');
+        this.net.forceReconnect?.();
+      }
+    });
   }
 
   // ── Log panel ──────────────────────────────────────────────────────────────
@@ -460,21 +485,26 @@ export class TurquoiseApp {
   _renderCirclePeerList(isCircle) {
     const el = $('circle-peer-list'); if (!el) return;
     if (!isCircle) { el.style.display='none'; return; }
-    const connected = this.net.getConnectedPeers();
-    if (!connected.length) { el.style.display='none'; return; }
     el.style.display = 'block';
+    const connected = this.net.getConnectedPeers();
+    if (!connected.length) {
+      // Show waiting state so user understands what circle is
+      el.innerHTML = `<div class="cp-header">nodes in circle</div>
+        <div class="cp-empty">no nodes online yet — share your device fingerprint to connect</div>`;
+      return;
+    }
     const nodes = connected.map(fp => {
       const p    = this.peers.get(fp)||{};
       const nick = p.nick || fp.slice(0,8);
       const sid  = fp.slice(0,6);
-      return `<div class="cp-node" data-fp="${fp}" title="open chat with ${esc(nick)}">
+      return `<div class="cp-node" data-fp="${fp}" title="tap to open 1:1 chat with ${esc(nick)}">
         <span class="cp-node-dot"></span>
         <span class="cp-node-nick">${esc(nick)}</span>
-        <span class="cp-node-id">${sid}</span>
+        <span class="cp-node-id">(${sid})</span>
       </div>`;
     }).join('');
     el.innerHTML = `
-      <div class="cp-header">nodes in circle</div>
+      <div class="cp-header">nodes in circle · tap to chat 1:1</div>
       <div class="cp-nodes">${nodes}</div>`;
     el.querySelectorAll('.cp-node').forEach(card => {
       card.addEventListener('click', () => {
@@ -575,7 +605,7 @@ export class TurquoiseApp {
       // Show name + short fingerprint code so nick changes don't cause confusion
       const senderFp   = msg.from || '';
       const shortCode  = senderFp.slice(0,6);
-      const codePart   = shortCode ? ` <span class="sender-code">${shortCode}</span>` : '';
+      const codePart   = shortCode ? ` <span class="sender-code">(${shortCode})</span>` : '';
       el.innerHTML = `<div class="sender">${esc(msg.fromNick||'?')}${codePart}</div>`;
     }
     const t = document.createElement('span'); t.textContent=msg.text; el.appendChild(t);

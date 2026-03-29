@@ -1,19 +1,16 @@
 /**
- * webrtc.js — Turquoise v7.3
+ * webrtc.js — Turquoise v7.2
  *
- * Fixes over v7:
+ * New in v7.2:
+ *   - replaceVideoTrack(fp, newTrack): replaces the outgoing video sender track
+ *     without renegotiation. Used by app.js _switchCamera() for front/back flip.
+ *
+ * From v7.1:
  *   - offer-reneg forwarded to onMessage so app.js call handlers fire.
- *     answer-reneg is applied internally as an SDP answer.
- *   - answerWithStream(fp, sdp, stream): now accepts the SDP from the
- *     offer-reneg, sets remote description, adds tracks, sends answer-reneg.
- *     Previously only added tracks with no SDP exchange → call never connected.
- *   - pc.ontrack replaced with addEventListener('track') + ps.onRemoteStream
- *     callback. App uses net.setRemoteStreamHandler(fp, fn) instead of
- *     directly overwriting ps.pc.ontrack (which clobbered the existing handler).
- *   - stopMedia: switched to removing sender tracks directly (was checking
- *     ps.stream which is only set from the remote track event, not local).
- *   - isReady(fp) public helper added so app.js doesn't need to access
- *     internal peers Map directly.
+ *   - answerWithStream(fp, sdp, stream): full SDP exchange on accept side.
+ *   - pc.ontrack → addEventListener('track') + setRemoteStreamHandler API.
+ *   - stopMedia: removes sender tracks + stops all transceivers.
+ *   - isReady(fp) public helper.
  */
 
 import { TQLog } from './tqlog.js';
@@ -205,10 +202,7 @@ export class TurquoiseNetwork {
       if (ps.makingOffer) return;
       try {
         ps.makingOffer = true;
-        // Explicit createOffer → setLocalDescription for broad browser compat.
-        // Implicit setLocalDescription() requires Safari 15.4+ — many iPhones fail silently.
-        const offer = await ps.pc.createOffer();
-        await ps.pc.setLocalDescription(offer);
+        await ps.pc.setLocalDescription();
         this._sig({type:'offer', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
       } catch(e) { this._log.warn(FILE, 'neg', e.message); }
       finally { ps.makingOffer = false; }
@@ -372,8 +366,7 @@ export class TurquoiseNetwork {
         // was lost (WS was down when onnegotiationneeded fired) stays in the map
         // forever and _initiate is never retried.
         const pcState = ps.pc.connectionState;
-        // Also treat 'new' as stale if it's been lingering — the offer was likely lost
-        const stale   = !ps.ready && (pcState === 'failed' || pcState === 'closed' || pcState === 'new');
+        const stale   = !ps.ready && (pcState === 'failed' || pcState === 'closed');
         const alsoStale = ps.ready && (pcState === 'failed' || pcState === 'closed');
         if (stale || alsoStale) {
           this._log.debug(FILE, '_reconnectKnown', `${fp.slice(0,8)}: stale (${pcState}), replacing`);
@@ -434,24 +427,14 @@ export class TurquoiseNetwork {
     if (ps.ignoreOffer) return;
 
     try {
-      if (coll) {
-        // Explicit rollback required; must be sequential not Promise.all.
-        // Guard with signalingState check — rollback only valid in offer states.
-        const s = ps.pc.signalingState;
-        if (s === 'have-local-offer' || s === 'have-local-pranswer') {
-          try { await ps.pc.setLocalDescription({type:'rollback'}); }
-          catch(re) { this._log.warn(FILE,'_onOffer','rollback failed: '+re.message); }
-        }
-      }
-      await ps.pc.setRemoteDescription({type:'offer', sdp});
+      if (coll) await Promise.all([ps.pc.setLocalDescription({type:'rollback'}), ps.pc.setRemoteDescription({type:'offer',sdp})]);
+      else      await ps.pc.setRemoteDescription({type:'offer',sdp});
     } catch(e) { this._log.warn(FILE,'_onOffer',e.message); return; }
 
     for (const c of ps.pendingIce) try { await ps.pc.addIceCandidate(c); } catch {}
     ps.pendingIce = [];
 
-    // Explicit createAnswer → setLocalDescription for iOS Safari compat
-    const answer = await ps.pc.createAnswer();
-    await ps.pc.setLocalDescription(answer);
+    await ps.pc.setLocalDescription();
     this._sig({type:'answer', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
   }
 
@@ -586,10 +569,9 @@ export class TurquoiseNetwork {
       ps.pc.addTransceiver(track, { streams:[stream], direction:'sendrecv' });
     }
     try {
-      // Explicit createOffer — 'implicit' setLocalDescription() fails on iOS Safari < 15.4.
-      // addTransceiver above already added the new m-lines; createOffer picks them up.
-      const offer = await ps.pc.createOffer();
-      await ps.pc.setLocalDescription(offer);
+      // setLocalDescription() with no args = implicit offer. It appends new
+      // m-lines after existing ones rather than reordering them.
+      await ps.pc.setLocalDescription();
       this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'offerWithStream',e.message); }
   }
@@ -626,9 +608,7 @@ export class TurquoiseNetwork {
           ps.pc.addTrack(track, stream); // shouldn't happen but safe fallback
         }
       }
-      // Explicit createAnswer for iOS Safari compat
-      const ans = await ps.pc.createAnswer();
-      await ps.pc.setLocalDescription(ans);
+      await ps.pc.setLocalDescription();
       this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
   }
@@ -653,17 +633,28 @@ export class TurquoiseNetwork {
   }
 
   /**
-   * Replace a specific video track in an active peer connection (camera flip).
-   * Replaces the sender track in-place so the remote side keeps the same m-line —
-   * no renegotiation needed if the browser supports replaceTrack without renegotiation.
+   * Replace the outgoing video track on an existing peer connection.
+   * Used by app.js _switchCamera() to flip between front and back cameras
+   * without renegotiating the full connection (replaceTrack is non-negotiation).
+   *
+   * @param {string}       fp    — peer fingerprint
+   * @param {MediaStreamTrack} newTrack — the replacement video track
    */
   async replaceVideoTrack(fp, newTrack) {
     const ps = this.peers.get(fp);
-    if (!ps) throw new Error('peer not found');
+    if (!ps) return;
     const sender = ps.pc.getSenders().find(s => s.track?.kind === 'video');
-    if (!sender) throw new Error('no video sender');
-    await sender.replaceTrack(newTrack);
-    this._log.debug(FILE, 'replaceVideoTrack', `${fp.slice(0,8)}: track replaced`);
+    if (!sender) {
+      this._log.warn(FILE, 'replaceVideoTrack', `no video sender for ${fp.slice(0,8)}`);
+      return;
+    }
+    try {
+      await sender.replaceTrack(newTrack);
+      this._log.info(FILE, 'replaceVideoTrack', `replaced for ${fp.slice(0,8)}`);
+    } catch(e) {
+      this._log.warn(FILE, 'replaceVideoTrack', `failed for ${fp.slice(0,8)}: ${e.message}`);
+      throw e;
+    }
   }
 
   // ── Status ────────────────────────────────────────────────────────────────
