@@ -1,5 +1,5 @@
 /**
- * webrtc.js — Turquoise v7.1
+ * webrtc.js — Turquoise v7.3
  *
  * Fixes over v7:
  *   - offer-reneg forwarded to onMessage so app.js call handlers fire.
@@ -205,7 +205,10 @@ export class TurquoiseNetwork {
       if (ps.makingOffer) return;
       try {
         ps.makingOffer = true;
-        await ps.pc.setLocalDescription();
+        // Explicit createOffer → setLocalDescription for broad browser compat.
+        // Implicit setLocalDescription() requires Safari 15.4+ — many iPhones fail silently.
+        const offer = await ps.pc.createOffer();
+        await ps.pc.setLocalDescription(offer);
         this._sig({type:'offer', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
       } catch(e) { this._log.warn(FILE, 'neg', e.message); }
       finally { ps.makingOffer = false; }
@@ -369,7 +372,8 @@ export class TurquoiseNetwork {
         // was lost (WS was down when onnegotiationneeded fired) stays in the map
         // forever and _initiate is never retried.
         const pcState = ps.pc.connectionState;
-        const stale   = !ps.ready && (pcState === 'failed' || pcState === 'closed');
+        // Also treat 'new' as stale if it's been lingering — the offer was likely lost
+        const stale   = !ps.ready && (pcState === 'failed' || pcState === 'closed' || pcState === 'new');
         const alsoStale = ps.ready && (pcState === 'failed' || pcState === 'closed');
         if (stale || alsoStale) {
           this._log.debug(FILE, '_reconnectKnown', `${fp.slice(0,8)}: stale (${pcState}), replacing`);
@@ -430,14 +434,24 @@ export class TurquoiseNetwork {
     if (ps.ignoreOffer) return;
 
     try {
-      if (coll) await Promise.all([ps.pc.setLocalDescription({type:'rollback'}), ps.pc.setRemoteDescription({type:'offer',sdp})]);
-      else      await ps.pc.setRemoteDescription({type:'offer',sdp});
+      if (coll) {
+        // Explicit rollback required; must be sequential not Promise.all.
+        // Guard with signalingState check — rollback only valid in offer states.
+        const s = ps.pc.signalingState;
+        if (s === 'have-local-offer' || s === 'have-local-pranswer') {
+          try { await ps.pc.setLocalDescription({type:'rollback'}); }
+          catch(re) { this._log.warn(FILE,'_onOffer','rollback failed: '+re.message); }
+        }
+      }
+      await ps.pc.setRemoteDescription({type:'offer', sdp});
     } catch(e) { this._log.warn(FILE,'_onOffer',e.message); return; }
 
     for (const c of ps.pendingIce) try { await ps.pc.addIceCandidate(c); } catch {}
     ps.pendingIce = [];
 
-    await ps.pc.setLocalDescription();
+    // Explicit createAnswer → setLocalDescription for iOS Safari compat
+    const answer = await ps.pc.createAnswer();
+    await ps.pc.setLocalDescription(answer);
     this._sig({type:'answer', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
   }
 
@@ -572,9 +586,10 @@ export class TurquoiseNetwork {
       ps.pc.addTransceiver(track, { streams:[stream], direction:'sendrecv' });
     }
     try {
-      // setLocalDescription() with no args = implicit offer. It appends new
-      // m-lines after existing ones rather than reordering them.
-      await ps.pc.setLocalDescription();
+      // Explicit createOffer — 'implicit' setLocalDescription() fails on iOS Safari < 15.4.
+      // addTransceiver above already added the new m-lines; createOffer picks them up.
+      const offer = await ps.pc.createOffer();
+      await ps.pc.setLocalDescription(offer);
       this._sig({type:'offer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'offerWithStream',e.message); }
   }
@@ -611,7 +626,9 @@ export class TurquoiseNetwork {
           ps.pc.addTrack(track, stream); // shouldn't happen but safe fallback
         }
       }
-      await ps.pc.setLocalDescription();
+      // Explicit createAnswer for iOS Safari compat
+      const ans = await ps.pc.createAnswer();
+      await ps.pc.setLocalDescription(ans);
       this._sig({type:'answer-reneg', sdp:ps.pc.localDescription.sdp, to:fp, from:this.id.fingerprint});
     } catch(e) { this._log.warn(FILE,'answerWithStream',e.message); }
   }
@@ -633,6 +650,20 @@ export class TurquoiseNetwork {
       });
     } catch {}
     ps.stream = null;
+  }
+
+  /**
+   * Replace a specific video track in an active peer connection (camera flip).
+   * Replaces the sender track in-place so the remote side keeps the same m-line —
+   * no renegotiation needed if the browser supports replaceTrack without renegotiation.
+   */
+  async replaceVideoTrack(fp, newTrack) {
+    const ps = this.peers.get(fp);
+    if (!ps) throw new Error('peer not found');
+    const sender = ps.pc.getSenders().find(s => s.track?.kind === 'video');
+    if (!sender) throw new Error('no video sender');
+    await sender.replaceTrack(newTrack);
+    this._log.debug(FILE, 'replaceVideoTrack', `${fp.slice(0,8)}: track replaced`);
   }
 
   // ── Status ────────────────────────────────────────────────────────────────
