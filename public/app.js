@@ -38,7 +38,7 @@ const fmtEta = s => !s||s<=0||!isFinite(s) ? '—' : s<60 ? Math.ceil(s)+'s' : M
 const gameLabel = type => type==='ttt' ? 'tic tac toe' : type==='sps' ? 'stone paper scissors' : type==='airh' ? 'air hockey' : type==='snake' ? 'strand' : 'chess';
 
 const CIRCLE = 'circle';
-const TTL    = 60_000;
+const TTL    = 86_400_000;
 
 function msgStyle(id='') {
   let h = 0;
@@ -98,6 +98,10 @@ export class TurquoiseApp {
     this._pipCleanup= null;
     this.games      = new Map();
     this.circleCallingEnabled = false;
+    this._wakeLock = null;
+    this._wakeLockBound = false;
+    this._wakeLockWarned = false;
+    this._audioCtx = null;
 
     // Camera facing mode for video calls (front/back flip)
     this._facingMode = 'user';   // 'user' = front, 'environment' = back
@@ -140,7 +144,7 @@ export class TurquoiseApp {
   // Returns true when it's unsafe to reload (active transfer or active game).
   hasActiveTransfer() {
     return this._fileOwners.size > 0 || this.ft._recv?.size > 0
-        || this._folderSendState.size > 0;
+        || this._folderSendState.size > 0 || this.folder._recv?.size > 0;
   }
   hasActiveGame() {
     return this.games.size > 0;
@@ -177,7 +181,7 @@ export class TurquoiseApp {
         this.net.addKnownPeer(p.fingerprint, p.nickname||p.fingerprint.slice(0,8));
       }
     } catch {}
-    try { this.sessions.set(CIRCLE, await loadMessages(CIRCLE)); } catch { this.sessions.set(CIRCLE,[]); }
+    try { this.sessions.set(CIRCLE, this._normalizeLoadedMessages(await loadMessages(CIRCLE))); } catch { this.sessions.set(CIRCLE,[]); }
 
     this._bindUI();
     this._wireNetwork();
@@ -193,6 +197,8 @@ export class TurquoiseApp {
     }
 
     this._updateTransferWarn();
+    this._bindWakeLock();
+    this._refreshWakeLock('mount');
 
   }
 
@@ -249,6 +255,7 @@ export class TurquoiseApp {
 
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
     $('sidebar-log-btn')?.addEventListener('click', () => TQLog.get().exportToFile(this.id.fingerprint));
+    $('sidebar-ping-btn')?.addEventListener('click', () => this._pingActivePeer());
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
 
@@ -416,7 +423,7 @@ export class TurquoiseApp {
     this.peers.set(fp, {nick:name, connected:true});
     savePeer({fingerprint:fp, shortId:fp.slice(0,8), nickname:name}).catch(()=>{});
     if (!this.sessions.has(fp)) {
-      loadMessages(fp).then(msgs => { this.sessions.set(fp,msgs); this._renderPeers(); if(this.active===fp) this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
+      loadMessages(fp).then(msgs => { this.sessions.set(fp,this._normalizeLoadedMessages(msgs)); this._renderPeers(); if(this.active===fp) this._renderMsgs(); }).catch(() => this.sessions.set(fp,[]));
     } else this._renderPeers();
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     this._status(name+' joined','ok',3000);
@@ -523,11 +530,23 @@ export class TurquoiseApp {
     }
     list.innerHTML=''; list.appendChild(frag);
     const cnt=$('peer-count'); if(cnt) cnt.textContent=`(${this.peers.size})`;
+    this._renderSidebarPing();
     // Refresh circle members + peer list if circle is active
     if (this.active===CIRCLE) {
       this._renderCircleMembers(true);
       this._renderCirclePeerList(true);
     }
+  }
+
+  _normalizeLoadedMessages(msgs=[]) {
+    return msgs.map(msg => {
+      if ((msg.type==='file' || msg.type==='folder') && (msg.status==='sending' || msg.status==='receiving')) {
+        const fixed = { ...msg, status:'error', _sentError:'interrupted after reload' };
+        this._persistMsg(fixed);
+        return fixed;
+      }
+      return msg;
+    });
   }
 
   _renderHeader() {
@@ -617,6 +636,7 @@ export class TurquoiseApp {
     } else if (msg.status==='done') {
       const f=this._fileUrls.get(msg.fileId); if(f) this._attachDownload(el,f);
       else if (msg.own) this._setFileCardNote(el, 'transmitted');
+      else this._setFileCardNote(el, 'file not available after reload');
     } else if (msg.status==='error' && msg._sentError) {
       this._setFileCardNote(el, `⚠ ${msg._sentError}`, 'err');
     }
@@ -686,6 +706,20 @@ export class TurquoiseApp {
     ca.appendChild(el); ca.scrollTop=ca.scrollHeight;
   }
 
+  _persistMsg(msg) {
+    if (!msg?.id || !msg?.sessionId) return;
+    try {
+      const persistable = JSON.parse(JSON.stringify(msg, (key, val) => {
+        if (typeof val === 'function') return undefined;
+        if (key === '_downloadFns' || key === 'files' || key === 'blob' || key === 'url') return undefined;
+        return val;
+      }));
+      saveMessage(persistable).catch(()=>{});
+    } catch (e) {
+      this._log.warn('app','_persistMsg','failed: '+e.message, { id:msg.id });
+    }
+  }
+
   _status(text, cls='', ms=0) {
     const el=$('status-line'); if(!el) return;
     el.textContent=text; el.className=cls;
@@ -700,11 +734,14 @@ export class TurquoiseApp {
       const p=this.peers.get(fp); if(p&&msg.nick){p.nick=msg.nick;this._renderPeers();if(this.active===fp)this._renderHeader();savePeer({fingerprint:fp,shortId:fp.slice(0,8),nickname:msg.nick}).catch(()=>{});}
       return;
     }
+    if (type==='nudge')           { this._onNudge(fp,msg); return; }
     if (type==='chat')            { msg.circle?this._recvCircle(fp,msg):this._recv1to1(fp,msg); return; }
     if (type==='file-meta')       {
       const sid=msg.circle?CIRCLE:fp;
       const fmsg={id:msg.fileId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'file',fileId:msg.fileId,name:msg.name||'file',size:msg.size||0,mimeType:msg.mimeType,ts:Date.now(),status:'receiving'};
       this._pushMsg(sid,fmsg,()=>this._appendFileCard(fmsg));
+      this._status(`receiving ${fmsg.name}…`,'info');
+      this._updateTransferWarn();
       this.ft.handleCtrl(fp,msg); return;
     }
     if (type==='file-end'||type==='file-abort') { this.ft.handleCtrl(fp,msg); return; }
@@ -712,6 +749,8 @@ export class TurquoiseApp {
       const sid=msg.circle?CIRCLE:fp;
       const fmsg={id:msg.folderId+'_recv',sessionId:sid,from:fp,fromNick:this.peers.get(fp)?.nick||fp.slice(0,8),own:false,type:'folder',folderId:msg.folderId,name:msg.name||'folder',totalSize:msg.totalSize||0,fileCount:msg.files?.length||0,manifest:msg.files||[],ts:Date.now(),status:'receiving'};
       this._pushMsg(sid,fmsg,()=>this._appendFolderCard(fmsg));
+      this._status(`receiving "${fmsg.name}"…`,'info');
+      this._updateTransferWarn();
       this.folder.handleCtrl(fp,msg); return;
     }
     if (type==='call-invite')  { msg.circle?this._onCircleCallInvite(fp,msg):this._onCallInvite(fp,msg); return; }
@@ -752,6 +791,7 @@ export class TurquoiseApp {
   _pushMsg(sessionId, msg, renderFn) {
     if (!this.sessions.has(sessionId)) this.sessions.set(sessionId,[]);
     this.sessions.get(sessionId).push(msg);
+    this._persistMsg(msg);
     if (this.active===sessionId) renderFn();
     else { this.unread.set(sessionId,(this.unread.get(sessionId)||0)+1); this._renderPeers(); }
   }
@@ -821,6 +861,7 @@ export class TurquoiseApp {
     const {fileId,own,from}=msg; if(!fileId) return;
     if (own) { const info=this._fileOwners.get(fileId); if(info){info.fps.forEach(fp=>this.ft.cancelSend(fileId,fp));this._fileOwners.delete(fileId);} }
     else this.ft.cancelRecv(from,fileId);
+    this._updateTransferWarn();
   }
 
   _onFileProg(fileId, pct, stats) {
@@ -842,7 +883,7 @@ export class TurquoiseApp {
         if (info.pending.size > 0) return;
       }
       this._fileOwners.delete(fileId);
-      ownMsgs.forEach(m => { m.status='done'; });
+      ownMsgs.forEach(m => { m.status='done'; this._persistMsg(m); });
       this._updateTransferWarn();
       document.querySelectorAll(`[data-fcid="${fileId}"]`).forEach(card=>{
         card.querySelector('.prog-track')?.remove();
@@ -850,6 +891,8 @@ export class TurquoiseApp {
         card.querySelector('.file-cancel')?.remove();
         this._setFileCardNote(card, `transmitted${info?.totalPeers>1?` to ${info.totalPeers} nodes`:''}`);
       });
+      const fileName = ownMsgs[0]?.name || 'file';
+      this._status(`${fileName} transmitted${info?.totalPeers>1?` to ${info.totalPeers} nodes`:''}`,'ok',6000);
       return;
     }
     const state = this._folderSendState.get(folderId);
@@ -869,7 +912,10 @@ export class TurquoiseApp {
     if (this.folder.claimFile(f)) return;
     this._fileUrls.set(f.fileId, f);
     setTimeout(()=>{ if(this._fileUrls.get(f.fileId)===f) URL.revokeObjectURL(f.url); }, TTL);
-    for (const msgs of this.sessions.values()) { const m=msgs.find(m=>m.fileId===f.fileId); if(m) m.status='done'; }
+    for (const msgs of this.sessions.values()) {
+      const m=msgs.find(m=>m.fileId===f.fileId);
+      if(m) { m.status='done'; this._persistMsg(m); }
+    }
     this._fileOwners.delete(f.fileId);
     const cards=document.querySelectorAll(`[data-fcid="${f.fileId}"]`);
     cards.forEach(card=>{
@@ -878,6 +924,7 @@ export class TurquoiseApp {
     });
     const nick=this.peers.get(f.from)?.nick||f.from?.slice(0,8)||'?';
     this._status(f.name+(cards.length?' received':' from '+nick+' — open chat to download'),'ok',6000);
+    this._updateTransferWarn();
   }
 
   _onFileErr(fileId, errMsg, fp) {
@@ -886,8 +933,8 @@ export class TurquoiseApp {
     if (folderId) this._failOutgoingFolder(folderId, errMsg, fp);
     else {
       for (const msgs of this.sessions.values()) {
-        const m=msgs.find(m=>m.fileId===fileId && m.own);
-        if (m) { m.status='error'; m._sentError=errMsg; }
+        const m=msgs.find(m=>m.fileId===fileId && (m.own || m.from===fp));
+        if (m) { m.status='error'; m._sentError=errMsg; this._persistMsg(m); }
       }
     }
     this._fileOwners.delete(fileId);
@@ -941,6 +988,7 @@ export class TurquoiseApp {
       entries.forEach((e,i)=>this.ft.send(e.file,fp,fileList[i].fileId));
     });
     this._status(`transmitting "${folderName}" (${fileList.length} files)…`,'info');
+    this._updateTransferWarn();
   }
 
   _onFolderProg(folderId, done, total) {
@@ -957,7 +1005,7 @@ export class TurquoiseApp {
     const {folderId,name,from,files,manifest,totalSize,downloadZip,downloadAll,download}=info;
     for (const msgs of this.sessions.values()) {
       const m=msgs.find(m=>m.folderId===folderId);
-      if (m) { m.status='done'; m.files=files; m.manifest=manifest; m._downloadFns={downloadZip,downloadAll,download}; }
+      if (m) { m.status='done'; m.files=files; m.manifest=manifest; m._downloadFns={downloadZip,downloadAll,download}; this._persistMsg(m); }
     }
     const card=document.querySelector(`[data-folderid="${folderId}"]`);
     if (card) {
@@ -966,6 +1014,7 @@ export class TurquoiseApp {
     }
     const nick=this.peers.get(from)?.nick||from?.slice(0,8)||'?';
     this._status(`folder "${name}" from ${nick} — ${files.length} files, ${fmt(totalSize)}`,'ok',8000);
+    this._updateTransferWarn();
   }
 
   _finalizeFolderCard(card, {manifest,downloadZip,downloadAll,download}) {
@@ -990,7 +1039,7 @@ export class TurquoiseApp {
     state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
     for (const msgs of this.sessions.values()) {
       const m=msgs.find(m=>m.folderId===folderId && m.own);
-      if (m) { m.status='done'; m._sentInfo={peerCount:state.peerCount}; }
+      if (m) { m.status='done'; m._sentInfo={peerCount:state.peerCount}; this._persistMsg(m); }
     }
     const card=document.querySelector(`[data-folderid="${folderId}"]`);
     if (card) {
@@ -999,6 +1048,7 @@ export class TurquoiseApp {
       this._setFolderCardNote(card, `transmitted to ${state.peerCount} node${state.peerCount===1?'':'s'}`);
     }
     this._status(`folder "${state.name}" transmitted to ${state.peerCount} node${state.peerCount===1?'':'s'}`,'ok',6000);
+    this._updateTransferWarn();
   }
 
   _failOutgoingFolder(folderId, errMsg, _fp) {
@@ -1008,7 +1058,7 @@ export class TurquoiseApp {
     state.fileIds.forEach(fileId => this._folderSendByFile.delete(fileId));
     for (const msgs of this.sessions.values()) {
       const m=msgs.find(m=>m.folderId===folderId && m.own);
-      if (m) { m.status='error'; m._sentError=errMsg; }
+      if (m) { m.status='error'; m._sentError=errMsg; this._persistMsg(m); }
     }
     const card=document.querySelector(`[data-folderid="${folderId}"]`);
     if (card) {
@@ -1016,6 +1066,7 @@ export class TurquoiseApp {
       card.querySelector('.folder-count')?.remove();
       this._setFolderCardNote(card, `⚠ ${errMsg}`, 'err');
     }
+    this._updateTransferWarn();
   }
 
   // ── Voice Memo ─────────────────────────────────────────────────────────────
@@ -1593,6 +1644,94 @@ export class TurquoiseApp {
     },3000);
   }
   _stopStatsPolling() { clearInterval(this._statsTimer); this._statsTimer=null; }
+
+  _renderSidebarPing() {
+    const btn=$('sidebar-ping-btn'); if(!btn) return;
+    const activePeer = this.active && this.active!==CIRCLE ? this.active : null;
+    const online = activePeer ? this.net.isReady(activePeer) : false;
+    btn.disabled = !online;
+    btn.textContent = activePeer ? `◉ ping ${this.peers.get(activePeer)?.nick||activePeer.slice(0,8)}` : '◉ ping active node';
+    btn.title = online ? 'send a nudge tone to the active node' : 'open an online node chat to send a nudge';
+  }
+
+  _pingActivePeer() {
+    const fp = this.active;
+    if (!fp || fp===CIRCLE) { this._status('open an individual node chat to send a ping','warn',5000); return; }
+    if (!this.net.isReady(fp)) { this._status('node offline — ping not sent','warn',5000); return; }
+    const ok = this.net.sendCtrl(fp,{type:'nudge',nick:this.id.nickname,ts:Date.now()});
+    if (!ok) { this._status('ping failed','err',4000); return; }
+    this._status(`ping sent to ${this.peers.get(fp)?.nick||fp.slice(0,8)}`,'ok',4000);
+  }
+
+  async _playNudgeTone() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!this._audioCtx) this._audioCtx = new AC();
+      await this._audioCtx.resume?.();
+      const ctx = this._audioCtx;
+      const pulses = [0, 0.22, 0.44];
+      pulses.forEach((offset, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = i === 1 ? 'triangle' : 'sine';
+        osc.frequency.value = i === 1 ? 1020 : 860;
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime + offset);
+        gain.gain.exponentialRampToValueAtTime(0.055, ctx.currentTime + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + offset + 0.16);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(ctx.currentTime + offset);
+        osc.stop(ctx.currentTime + offset + 0.18);
+      });
+    } catch {}
+  }
+
+  _onNudge(fp, msg={}) {
+    const name = msg.nick || this.peers.get(fp)?.nick || fp.slice(0,8);
+    this._playNudgeTone();
+    navigator.vibrate?.([160, 80, 160]);
+    if (document.hidden && window.Notification?.permission === 'granted') {
+      try { new window.Notification('Turquoise ping', { body:`${name} wants your attention` }); } catch {}
+    }
+    this._status(`${name} pinged this device`,'warn',7000);
+  }
+
+  _bindWakeLock() {
+    if (this._wakeLockBound) return;
+    this._wakeLockBound = true;
+    const retry = () => this._refreshWakeLock('interaction');
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this._releaseWakeLock();
+      else this._refreshWakeLock('visible');
+    });
+    ['pointerdown','touchstart','keydown'].forEach(ev =>
+      document.addEventListener(ev, retry, { passive:true })
+    );
+  }
+
+  async _refreshWakeLock(reason='app') {
+    if (!navigator.wakeLock?.request || document.hidden || this._wakeLock) return;
+    try {
+      const wl = await navigator.wakeLock.request('screen');
+      this._wakeLock = wl;
+      this._log.info('app','_refreshWakeLock',`granted (${reason})`);
+      wl.addEventListener?.('release', () => {
+        if (this._wakeLock === wl) this._wakeLock = null;
+        if (!document.hidden) setTimeout(() => this._refreshWakeLock('release'), 250);
+      });
+    } catch (e) {
+      if (!this._wakeLockWarned) {
+        this._wakeLockWarned = true;
+        this._log.warn('app','_refreshWakeLock','failed: '+e.message);
+      }
+    }
+  }
+
+  _releaseWakeLock() {
+    const wl = this._wakeLock;
+    this._wakeLock = null;
+    wl?.release?.().catch?.(()=>{});
+  }
 
   _handleMediaError(e, fp) {
     const msg=e.name==='NotAllowedError'?'mic/cam permission denied':'no mic/cam found';

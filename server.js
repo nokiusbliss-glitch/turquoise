@@ -49,7 +49,7 @@ const RELAY_TYPES = new Set([
   'offer-reneg','answer-reneg','permission-denied',
   'file-meta','file-end','file-abort','bin-relay',
   'nick-update','game','folder-manifest',
-  'ping','pong','p2p-relay','tool-action',
+  'ping','pong','p2p-relay','tool-action','nudge',
   'circle-peer-joined','circle-peer-left',  // coordinator messages for full-mesh circle calls
 ]);
 
