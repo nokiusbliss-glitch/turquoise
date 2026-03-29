@@ -31,6 +31,7 @@ const RB_MAX  = 30_000;
 const FILE    = 'webrtc';
 
 const jit = (base, f=0.25) => base * (1 - f/2 + Math.random() * f);
+const mediaKind = tc => tc?.receiver?.track?.kind || tc?.sender?.track?.kind || null;
 
 const ab2b64 = buf => { const u=new Uint8Array(buf); let s=''; for(let i=0;i<u.length;i++) s+=String.fromCharCode(u[i]); return btoa(s); };
 const b642ab = s   => { const b=atob(s); const u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u.buffer; };
@@ -422,13 +423,23 @@ export class TurquoiseNetwork {
     }
 
     const polite   = this.id.fingerprint < fp;
-    const coll     = ps.makingOffer || ps.pc.signalingState !== 'stable';
+    const sigState = ps.pc.signalingState;
+    const coll     = ps.makingOffer || sigState !== 'stable';
     ps.ignoreOffer = !polite && coll;
     if (ps.ignoreOffer) return;
 
     try {
-      if (coll) await Promise.all([ps.pc.setLocalDescription({type:'rollback'}), ps.pc.setRemoteDescription({type:'offer',sdp})]);
-      else      await ps.pc.setRemoteDescription({type:'offer',sdp});
+      if (ps.makingOffer || sigState === 'have-local-offer' || sigState === 'have-local-pranswer') {
+        await Promise.all([
+          ps.pc.setLocalDescription({type:'rollback'}),
+          ps.pc.setRemoteDescription({type:'offer',sdp}),
+        ]);
+      } else if (sigState === 'stable') {
+        await ps.pc.setRemoteDescription({type:'offer',sdp});
+      } else {
+        this._log.debug(FILE,'_onOffer',`${fp.slice(0,8)}: ignoring overlapping offer (state=${sigState})`);
+        return;
+      }
     } catch(e) { this._log.warn(FILE,'_onOffer',e.message); return; }
 
     for (const c of ps.pendingIce) try { await ps.pc.addIceCandidate(c); } catch {}
@@ -587,25 +598,22 @@ export class TurquoiseNetwork {
     if (!ps || !sdp) return;
     try {
       await ps.pc.setRemoteDescription({type:'offer', sdp});
-      // Parse m-line kinds from the offer SDP to determine transceiver order.
-      // After setRemoteDescription the PC has one transceiver per m-line in the
-      // same order. We assign our tracks by matching kind in that order.
-      // This avoids calling addTrack (which appends new m-lines → order mismatch)
-      // and avoids relying on receiver.track.kind which is null until media flows.
-      const mKinds = sdp.split('\nm=').slice(1).map(s => s.split(/[ \r]/)[0]); // ['audio','video',...]
-      const tcs    = ps.pc.getTransceivers(); // same order as m-lines
-      const kindQueues = {};
-      mKinds.forEach((kind, i) => {
-        if (!kindQueues[kind]) kindQueues[kind] = [];
-        if (tcs[i]) kindQueues[kind].push(tcs[i]);
-      });
+      // Match by actual media kind instead of SDP index. The previous code
+      // counted the application/data m-line and shifted audio/video senders.
+      const kindQueues = { audio: [], video: [] };
+      ps.pc.getTransceivers()
+        .filter(tc => tc && tc.direction !== 'stopped')
+        .forEach(tc => {
+          const kind = mediaKind(tc);
+          if (kind === 'audio' || kind === 'video') kindQueues[kind].push(tc);
+        });
       for (const track of stream.getTracks()) {
         const tc = kindQueues[track.kind]?.shift();
         if (tc) {
           await tc.sender.replaceTrack(track);
-          if (tc.direction === 'recvonly') tc.direction = 'sendrecv';
+          if (tc.direction === 'recvonly' || tc.direction === 'inactive') tc.direction = 'sendrecv';
         } else {
-          ps.pc.addTrack(track, stream); // shouldn't happen but safe fallback
+          this._log.warn(FILE,'answerWithStream',`no ${track.kind} transceiver for ${fp.slice(0,8)}`);
         }
       }
       await ps.pc.setLocalDescription();

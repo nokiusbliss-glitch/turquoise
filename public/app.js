@@ -44,7 +44,7 @@ function msgStyle(id='') {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   const shape = h % 8;
-  const rot   = ((h >> 8) % 51 - 25) / 10;
+  const rot   = ((h >> 8) % 17 - 8) / 20;
   return { shape, rot };
 }
 
@@ -1515,6 +1515,10 @@ export class TurquoiseApp {
     return v;
   }
 
+  _streamHasLiveVideo(stream) {
+    return !!stream?.getVideoTracks?.().some(track => track.readyState !== 'ended');
+  }
+
   _makeCallPlaceholder(text) {
     const ph = document.createElement('div');
     ph.className = 'call-stage-placeholder';
@@ -1556,10 +1560,14 @@ export class TurquoiseApp {
     const remote=document.createElement('div');
     remote.className='call-video-tile'+(c.type==='walkie'?' walkie-tile':'');
     remote.style.cssText='flex:1;min-width:200px;max-width:480px;background:var(--bg2)';
-    if (c.remoteStream&&c.type==='stream') remote.appendChild(this._makeCallVideo(c.remoteStream, true));
-    else if (c.type==='stream') remote.classList.add('call-video-empty');
+    const hasRemoteVideo = c.type==='stream' && this._streamHasLiveVideo(c.remoteStream);
+    if (hasRemoteVideo) remote.appendChild(this._makeCallVideo(c.remoteStream, true));
+    else if (c.type==='stream') {
+      remote.classList.add('call-video-empty');
+      remote.dataset.emptyLabel = c.remoteStream ? 'camera not live yet' : 'no signal yet';
+    }
     const lbl=document.createElement('div'); lbl.className='vtile-label'; lbl.textContent=peerName; remote.appendChild(lbl);
-    if (c.phase==='active'||c.remoteStream) vids.appendChild(remote);
+    if (c.phase==='active'||c.remoteStream||c.type==='stream') vids.appendChild(remote);
     this._mountLocalPIP(panel, c.localStream, c.camOff, c.type==='walkie');
 
     const mu=$('ctrl-mute'); if(mu) { mu.textContent=c.muted?'unmute':'mute'; mu.classList.toggle('active',!!c.muted); }
@@ -1614,7 +1622,11 @@ export class TurquoiseApp {
       const tile = document.createElement('div');
       tile.className = 'call-video-tile' + (cc.type==='walkie' ? ' walkie-tile' : '');
       tile.style.cssText = 'flex:1;min-width:140px;max-width:260px;background:var(--bg2)';
-      if (cc.type==='stream') tile.appendChild(this._makeCallVideo(stream, true));
+      if (cc.type==='stream' && this._streamHasLiveVideo(stream)) tile.appendChild(this._makeCallVideo(stream, true));
+      else if (cc.type==='stream') {
+        tile.classList.add('call-video-empty');
+        tile.dataset.emptyLabel = 'camera not live yet';
+      }
       const lbl = document.createElement('div'); lbl.className='vtile-label';
       lbl.textContent = this.peers.get(fp)?.nick || fp.slice(0,8);
       tile.appendChild(lbl); vids.appendChild(tile);
