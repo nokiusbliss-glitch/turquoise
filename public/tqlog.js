@@ -21,6 +21,12 @@ const MAX_ENTRIES = 5000;
 const BATCH_MS    = 300;
 const APP_VER     = '7.0.0';
 
+// In-memory ring buffer — always current, no flush lag.
+// liveViewer reads from here instead of IDB so it never shows the last
+// entry missing during the 300ms batch window.
+const MEM_MAX  = 5000;
+const _memRing = [];  // chronological, oldest first
+
 export const LEVEL    = Object.freeze({ DEBUG:0, INFO:1, WARN:2, ERROR:3 });
 const LEVEL_NAME      = ['DEBUG','INFO','WARN','ERROR'];
 const SESSION_ID      = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
@@ -133,7 +139,7 @@ export class TQLog {
    */
   liveViewer(container, limit=120) {
     container.style.overflowY = 'auto';
-    let paused = false;   // user scrolled up → don't auto-scroll
+    let paused = false;
 
     container.addEventListener('scroll', () => {
       const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
@@ -155,18 +161,25 @@ export class TQLog {
       if (!paused) container.scrollTop = container.scrollHeight;
     };
 
-    // Initial render
-    this.read(limit).then(render);
-
-    // Register as live viewer
-    const cb = entry => {
-      this.read(limit).then(render);
+    // Read from the in-memory ring (always up-to-date; no flush lag).
+    // Fall back to IDB only on cold start when the ring is empty.
+    const renderLatest = () => {
+      if (_memRing.length > 0) {
+        render(_memRing.slice(-limit));
+      } else {
+        // Cold start: ring not yet populated, load from IDB once
+        this.read(limit).then(entries => render([...entries].reverse())).catch(() => {});
+      }
     };
+
+    renderLatest();
+
+    const cb = () => renderLatest();
     this._viewers.push(cb);
 
     return () => {
       const i = this._viewers.indexOf(cb);
-      if (i !== -1) this._viewers.splice(i,1);
+      if (i !== -1) this._viewers.splice(i, 1);
     };
   }
 
@@ -191,6 +204,10 @@ export class TQLog {
     else if (level===LEVEL.WARN)  console.warn (pfx, msg, data??'');
     else if (level===LEVEL.DEBUG) console.debug(pfx, msg, data??'');
     else                          console.log  (pfx, msg, data??'');
+
+    // Keep in-memory ring capped — splice off the oldest when full
+    _memRing.push(entry);
+    if (_memRing.length > MEM_MAX) _memRing.splice(0, _memRing.length - MEM_MAX);
 
     this._queue.push(entry);
     this._schedFlush();

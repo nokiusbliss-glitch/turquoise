@@ -1013,7 +1013,8 @@ export class TurquoiseApp {
     if (type==='permission-denied') {
       const nick=this.peers.get(fp)?.nick||fp.slice(0,8);
       this._status(nick+': '+(msg.media||'mic')+' permission denied','err',8000);
-      if(this.call?.fp===fp) this._endCallLocal(false); this._hideCallIncoming(); return;
+      if(this.call?.fp===fp) { this._endCallLocal(false); this._hideCallIncoming(); }
+      return;
     }
     if (type==='game') { this._dispatchGame(fp,msg); return; }
   }
@@ -1059,7 +1060,11 @@ export class TurquoiseApp {
       const msg={id,sessionId:fp,from:this.id.fingerprint,fromNick:this.id.nickname,text,ts,type:'text',own:true};
       this._pushMsg(fp,msg,()=>this._appendMsg(msg));
     }
-    if (inp) { inp.value=''; inp.style.height='auto'; }
+    if (inp) {
+      inp.value = '';
+      inp.style.height = '';   // remove inline height so CSS min-height takes over cleanly
+      inp.dispatchEvent(new Event('input')); // let auto-resize listener normalize
+    }
   }
 
   // ── Files ──────────────────────────────────────────────────────────────────

@@ -394,7 +394,10 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
   transform-origin:center center;
   isolation:isolate;
   overflow:hidden;
-  border-radius:24px 20px 22px 18px / 20px 24px 18px 22px;
+  /* border-radius removed: clip-path (set via data-shape) defines the visual
+     boundary. Having both active caused double-clipping — overflow:hidden clipped
+     to the rounded rect AND clip-path clipped to the polygon, making stones
+     shrink at corners on content reflow. clip-path alone is correct here. */
 }
 .msg.recv{
   align-self:flex-start;
@@ -466,7 +469,7 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
   display:flex;flex-direction:column;gap:4px;
   clip-path:polygon(0 0,calc(100%-7px) 0,100% 7px,100% 100%,0 100%);
   position:relative;overflow:hidden;isolation:isolate;
-  border-radius:24px 18px 22px 16px / 18px 22px 16px 24px;
+  /* border-radius removed: same double-clipping issue as .msg */
   box-shadow:0 10px 24px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.025);
 }
 .file-card.sent,.folder-card.sent{
@@ -1183,7 +1186,14 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 }
 
 /* ── Animations ──────────────────────────────────────────────────────────── */
-@keyframes fadein{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+/* fadein uses the CSS `translate` property (separate from `transform`) so it
+   composes correctly with the inline style.transform='rotate(Xdeg)' that app.js
+   sets on each .msg. Previously the keyframe transform:translateY() was silently
+   discarded because inline styles win — messages appeared without the slide-in. */
+@keyframes fadein{
+  from{opacity:0;translate:0 5px}
+  to  {opacity:1;translate:0 0}
+}
 .msg,.file-card,.folder-card,.tool-embed{animation:fadein .18s ease-out}
 
 #peers-list::-webkit-scrollbar{width:2px}

@@ -32,7 +32,11 @@ class ZipBuilder {
     lh.setUint16(26, name.length, true);
     new Uint8Array(lh.buffer, 30).set(name);
     const localOffset = this._offset;
-    this._parts.push(lh.buffer, u8.buffer ?? u8);
+    // Slice the exact byte range — u8.buffer may be a larger backing buffer
+    // when u8 is a subarray; using it directly would write excess bytes and
+    // corrupt the ZIP entry.
+    const dataSlice = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+    this._parts.push(lh.buffer, dataSlice);
     this._offset += 30 + name.length + sz;
     this._entries.push({ name, crc, sz, localOffset });
   }
