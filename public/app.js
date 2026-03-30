@@ -32,6 +32,7 @@ import { TicTacToe, StonePaperScissors, Chess, AirHockey, BattleGalactica, Voice
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const shortCode = fp => String(fp||'').slice(0,8);
 const fmt  = b => !b ? '0 B' : b < 1024 ? b+' B' : b < 1_048_576 ? (b/1024).toFixed(1)+' KB' : b < 1_073_741_824 ? (b/1_048_576).toFixed(1)+' MB' : (b/1_073_741_824).toFixed(2)+' GB';
 const fmtSpd = s => !s ? '—' : s < 1024 ? s.toFixed(0)+' B/s' : s < 1_048_576 ? (s/1024).toFixed(1)+' KB/s' : (s/1_048_576).toFixed(2)+' MB/s';
 const fmtEta = s => !s||s<=0||!isFinite(s) ? '—' : s<60 ? Math.ceil(s)+'s' : Math.floor(s/60)+'m'+Math.ceil(s%60)+'s';
@@ -50,6 +51,17 @@ function msgStyle(id='') {
   const shape = h % 8;
   const rot   = ((h >> 8) % 17 - 8) / 52;
   return { shape, rot };
+}
+
+function labelWithCodeHtml(name='', fp='', codeClass='ui-code', nameClass='ui-name') {
+  const code = shortCode(fp);
+  const label = String(name || code || '—');
+  const showName = !code || label !== code;
+  return `${code ? `<span class="${codeClass}">(${esc(code)})</span>` : ''}${showName ? `<span class="${nameClass}">${esc(label)}</span>` : ''}`;
+}
+
+function buttonIconHtml(icon, iconClass, label='') {
+  return `<span class="btn-icon ${iconClass}">${esc(icon)}</span>${label ? `<span class="btn-label">${esc(label)}</span>` : ''}`;
 }
 
 function _buildFileTree(manifest) {
@@ -165,7 +177,7 @@ export class TurquoiseApp {
     } else if (hasT) {
       el.textContent = '◈ live transfer running — keep both screens on; if a screen sleeps, Turquoise tries to resume from the last confirmed chunk when both devices return'; el.classList.add('visible');
     } else if (hasG) {
-      el.textContent = '◈ live game running — keep screen on; if the screen sleeps, the live connection can drop'; el.classList.add('visible');
+      el.textContent = '◈ live game running — keep both screens on; if a screen sleeps, the live connection can drop'; el.classList.add('visible');
     } else {
       el.classList.remove('visible');
     }
@@ -174,14 +186,57 @@ export class TurquoiseApp {
     if (!this._hasActiveReceiveTransfer()) this._clearFailureReload();
   }
 
+  _renderSelfIdentity() {
+    const nd=$('nick-display'), ni=$('nick-input'), fp=$('full-fp');
+    if (nd) nd.innerHTML = labelWithCodeHtml(this.id.nickname, this.id.fingerprint, 'ui-code self-code', 'ui-name self-name');
+    if (ni) ni.value = this.id.nickname;
+    if (fp) fp.textContent = this.id.fingerprint;
+  }
+
+  _loadTheme() {
+    try { return localStorage.getItem('tq-color-twist') === 'emerald' ? 'emerald' : 'turquoise'; }
+    catch { return 'turquoise'; }
+  }
+
+  _applyTheme(theme='turquoise', persist=true) {
+    const root = document.documentElement;
+    if (!root) return;
+    const emerald = theme === 'emerald';
+    if (emerald) root.dataset.twist = 'emerald';
+    else delete root.dataset.twist;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', emerald ? '#07120a' : '#040a09');
+    if (persist) {
+      try { localStorage.setItem('tq-color-twist', emerald ? 'emerald' : 'turquoise'); } catch {}
+    }
+    this._renderThemeButton();
+  }
+
+  _toggleTheme() {
+    const emerald = document.documentElement?.dataset?.twist === 'emerald';
+    this._applyTheme(emerald ? 'turquoise' : 'emerald');
+    this._status(emerald ? 'turquoise restored' : 'emerald twist engaged', 'ok', 2600);
+  }
+
+  _renderThemeButton() {
+    const btn = $('sidebar-theme-btn'); if (!btn) return;
+    const emerald = document.documentElement?.dataset?.twist === 'emerald';
+    btn.classList.toggle('theme-on', emerald);
+    btn.innerHTML = buttonIconHtml('✦', 'ico-options', emerald ? 'emerald twist · on' : 'emerald twist');
+  }
+
+  _renderChromeButtons() {
+    const bw=$('btn-walkie'), bv=$('btn-stream'), plus=$('plus-btn'), send=$('send-btn');
+    if (bw) bw.innerHTML = buttonIconHtml('∿', 'ico-signal', 'signal');
+    if (bv) bv.innerHTML = buttonIconHtml('◌', 'ico-eyes', 'eyes·on');
+    if (plus) plus.innerHTML = buttonIconHtml('✦', 'ico-options');
+    if (send) send.innerHTML = buttonIconHtml('⟿', 'ico-send');
+  }
+
   // ── Mount ──────────────────────────────────────────────────────────────────
 
   async mount() {
-    const {nickname, fingerprint} = this.id;
-    const nd=$('nick-display'), ni=$('nick-input'), fp=$('full-fp');
-    if (nd) nd.textContent = nickname;
-    if (ni) ni.value = nickname;
-    if (fp) fp.textContent = fingerprint;
+    this._applyTheme(this._loadTheme(), false);
+    this._renderSelfIdentity();
 
     try {
       for (const p of await loadPeers()) {
@@ -197,6 +252,8 @@ export class TurquoiseApp {
     await this._openSession(CIRCLE);
 
     this._buildSuggestions();
+    this._renderChromeButtons();
+    this._renderThemeButton();
     if (this.id.isNewUser) {
       this._status('tap your call sign to set it','info');
       setTimeout(() => this._startNickEdit(), 500);
@@ -229,7 +286,8 @@ export class TurquoiseApp {
       const save = async () => {
         if (!ni.classList.contains('visible')) return;
         const saved = await this.id.saveNickname(ni.value).catch(() => this.id.nickname);
-        nd.textContent = saved; ni.value = saved;
+        this.id.nickname = saved;
+        this._renderSelfIdentity();
         nd.classList.remove('hidden'); ni.classList.remove('visible');
         this.net.getConnectedPeers().forEach(fp => this.net.sendCtrl(fp,{type:'nick-update',nick:saved}));
         this._status('call sign: '+saved,'ok',3000);
@@ -263,7 +321,10 @@ export class TurquoiseApp {
 
     $('back-btn')?.addEventListener('click', () => this._showSidebar());
     $('sidebar-log-btn')?.addEventListener('click', () => TQLog.get().exportToFile(this.id.fingerprint));
+    $('sidebar-export-btn')?.addEventListener('click', () => this._exportState());
+    $('sidebar-import-btn')?.addEventListener('click', () => { this._suppressVisibleReconnect(); $('__import-input')?.click(); });
     $('sidebar-ping-btn')?.addEventListener('click', () => this._pingActivePeer());
+    $('sidebar-theme-btn')?.addEventListener('click', () => this._toggleTheme());
     $('sidebar-backdrop')?.addEventListener('click', () => this._hideSidebar());
     $('reset-btn')?.addEventListener('click', () => this._confirmReset());
 
@@ -446,8 +507,8 @@ export class TurquoiseApp {
     if (p) p.connected=false;
     if (this.call?.fp===fp) this._endCallLocal(false);
     if (this.circleCall) this._removeCirclePeer(fp);
-    for (const [key, game] of this.games) {
-      if (key.startsWith(fp + ':')) { game?.destroy?.(); this.games.delete(key); }
+    for (const [key] of [...this.games]) {
+      if (key.startsWith(fp + ':')) this._closeGameShell(key);
     }
     const pausedTransfers = this.ft.onPeerDisconnected(fp);
     if (pausedTransfers && this._hasActiveReceiveTransfer()) {
@@ -530,7 +591,7 @@ export class TurquoiseApp {
       const ur = this.unread.get(fp)||0;
       const tier = this.net.connTier(fp);
       el.className = 'peer-item' + (p.connected?' online':'') + (this.active===fp?' active':'');
-      el.innerHTML = `<span class="peer-dot"></span><span class="peer-nick">${esc(p.nick)}</span>${tier&&tier!=='disconnected'?`<span class="peer-tier ${tier==='p2p'?'p2p':''}">${tier==='p2p'?'p2p':'relay'}</span>`:''}${ur?`<span class="peer-badge">${ur}</span>`:''}`;
+      el.innerHTML = `<span class="peer-dot"></span><span class="peer-nick">${labelWithCodeHtml(p.nick, fp, 'ui-code peer-code', 'ui-name peer-name')}</span>${tier&&tier!=='disconnected'?`<span class="peer-tier ${tier==='p2p'?'p2p':''}">${tier==='p2p'?'p2p':'relay'}</span>`:''}${ur?`<span class="peer-badge">${ur}</span>`:''}`;
       el.addEventListener('click', () => { this._hideSidebar(); this._openSession(fp); });
       frag.appendChild(el);
     }
@@ -559,7 +620,7 @@ export class TurquoiseApp {
     const fp = this.active;
     const isCircle = fp===CIRCLE;
     const p = this.peers.get(fp)||{};
-    const el=$('chat-peer-name'); if(el) el.textContent= isCircle ? '◉ circle' : (p.nick || fp?.slice(0,8) || '—');
+    const el=$('chat-peer-name'); if(el) el.innerHTML = isCircle ? '<span class="hdr-name">◉ circle</span>' : labelWithCodeHtml(p.nick, fp, 'ui-code hdr-code', 'ui-name hdr-name');
     const fpe=$('chat-peer-fp');
     if (fpe) {
       if (isCircle) {
@@ -573,9 +634,7 @@ export class TurquoiseApp {
     // Show call buttons for 1:1 chats, hide for circle
     const cb = $('call-btns');
     if (cb) cb.style.display = isCircle ? 'none' : 'flex';
-    const bw=$('btn-walkie'), bv=$('btn-stream');
-    if(bw) bw.textContent = '◈ signal';
-    if(bv) bv.textContent = '◉ eyes·on';
+    this._renderChromeButtons();
     // Circle members badge + peer list
     this._renderCircleMembers(isCircle);
     this._renderCirclePeerList(isCircle);
@@ -1282,10 +1341,19 @@ export class TurquoiseApp {
 
   // ── Games ──────────────────────────────────────────────────────────────────
 
+  _closeGameShell(key) {
+    const game = this.games.get(key);
+    if (!game) return;
+    game.destroy?.();
+    game._host?.remove?.();
+    this.games.delete(key);
+    this._updateTransferWarn();
+  }
+
   _makeGame(fp, gameType) {
     const key  = fp + ':' + gameType;
     const send = m => this.net.sendCtrl(fp, {type:'game',...m});
-    const close = () => { this.games.delete(key); this._updateTransferWarn(); };
+    const close = () => this._closeGameShell(key);
     if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
     if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
     if (gameType === 'airh')  return new AirHockey(fp, this.id.fingerprint, send, close);
@@ -1308,6 +1376,7 @@ export class TurquoiseApp {
       this._pushMsg(fp,rec,()=>this._appendMsg(rec));
       const ca = $('chat-area'); if (!ca) return;
       const embed = document.createElement('div'); embed.className = 'tool-embed sent';
+      game._host = embed;
       ca.appendChild(embed); ca.scrollTop = ca.scrollHeight; game.render(embed);
     });
   }
@@ -1329,6 +1398,7 @@ export class TurquoiseApp {
         this._pushMsg(fp,rec,()=>this._appendMsg(rec));
         const ca = $('chat-area'); if (!ca) return;
         const embed = document.createElement('div'); embed.className = 'tool-embed';
+        game._host = embed;
         ca.appendChild(embed); ca.scrollTop = ca.scrollHeight;
         game.render(embed); game.handleMsg(msg);
       });
@@ -1864,7 +1934,7 @@ export class TurquoiseApp {
     const activePeer = this.active && this.active!==CIRCLE ? this.active : null;
     const online = activePeer ? this.net.isReady(activePeer) : false;
     btn.disabled = !online;
-    btn.textContent = activePeer ? `◉ ping ${this.peers.get(activePeer)?.nick||activePeer.slice(0,8)}` : '◉ ping active node';
+    btn.innerHTML = buttonIconHtml('∿', 'ico-signal', activePeer ? `ping ${this.peers.get(activePeer)?.nick||activePeer.slice(0,8)}` : 'ping active node');
     btn.title = online ? 'send a nudge tone to the active node' : 'open an online node chat to send a nudge';
   }
 
