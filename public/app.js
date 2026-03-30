@@ -1346,8 +1346,13 @@ export class TurquoiseApp {
     if (!game) return;
     game.destroy?.();
     game._host?.remove?.();
+    game._host = null;
     this.games.delete(key);
     this._updateTransferWarn();
+  }
+
+  _gameShellMissing(game) {
+    return !game || !game._host || game._host.isConnected === false || !game._dom;
   }
 
   _makeGame(fp, gameType) {
@@ -1365,6 +1370,7 @@ export class TurquoiseApp {
     if (!['ttt','sps','chess','airh','skyd','snake'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       const key = fp + ':' + gameType;
+      if (this.games.has(key)) this._closeGameShell(key);
       const game = this._makeGame(fp, gameType);
       if (gameType === 'chess') game.myColor = 'w';
       this.games.set(key, game);
@@ -1386,6 +1392,10 @@ export class TurquoiseApp {
     if (!gameType) return;
     const key = fp + ':' + gameType;
     let game = this.games.get(key);
+    if (game && this._gameShellMissing(game)) {
+      this._closeGameShell(key);
+      game = null;
+    }
     if (!game && msg.action === 'invite') {
       this._openSession(fp).then(() => {
         game = this._makeGame(fp, gameType);
