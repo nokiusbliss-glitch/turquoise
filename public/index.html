@@ -930,8 +930,8 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 .vm-err{font-size:10px;color:var(--err);padding:4px 0}
 
 /* ── Air Hockey ──────────────────────────────────────────────────────────── */
-.tqapp-airh{font-size:11px;user-select:none}
-.ah-field{position:relative;margin:6px 0;line-height:0}
+.tqapp-airh{font-size:11px;user-select:none;width:100%;max-width:100%;box-sizing:border-box}
+.ah-field{position:relative;margin:6px 0;line-height:0;display:flex;justify-content:center;width:100%}
 .ah-field canvas{display:block;cursor:none;
   clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
   border:1px solid var(--mute);}
@@ -1014,8 +1014,8 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 .cp-empty{font-size:9px;color:var(--mute);letter-spacing:.06em;padding:2px 0 4px;font-style:italic}
 
 /* ── Strand (Snake Duel) ─────────────────────────────────────────────────── */
-.tqapp-snake{font-size:11px;user-select:none}
-.sn-field{position:relative;margin:4px 0;line-height:0}
+.tqapp-snake{font-size:11px;user-select:none;width:100%;max-width:100%;box-sizing:border-box}
+.sn-field{position:relative;margin:4px 0;line-height:0;display:flex;justify-content:center;width:100%}
 .sn-field canvas{
   display:block;
   clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
@@ -1024,8 +1024,8 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 }
 
 /* ── Battle Galactica ────────────────────────────────────────────────────── */
-.tqapp-skyd{font-size:11px;user-select:none}
-.sky-field{position:relative;margin:6px 0;line-height:0}
+.tqapp-skyd{font-size:11px;user-select:none;width:100%;max-width:100%;box-sizing:border-box}
+.sky-field{position:relative;margin:6px 0;line-height:0;display:flex;justify-content:center;width:100%}
 .sky-field canvas{
   display:block;
   clip-path:polygon(0 0,calc(100%-10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100%-10px));
@@ -1062,13 +1062,63 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── Tool embed ──────────────────────────────────────────────────────────── */
 .tool-embed{
-  max-width:440px;padding:10px;
+  width:min(100%,620px);max-width:620px;padding:10px 12px 12px;
   background:var(--bg2);border-left:2px solid var(--tq3);
-  align-self:stretch;
+  align-self:flex-start;
   position:relative;overflow:hidden;isolation:isolate;
   border-radius:26px 18px 22px 16px / 18px 24px 16px 22px;
+  box-sizing:border-box;
 }
-.tool-embed.sent{border-left:none;border-right:2px solid var(--tq)}
+.tool-embed.sent{border-left:none;border-right:2px solid var(--tq);align-self:flex-end}
+.tool-embed.game-shell[data-game-type="airh"],
+.tool-embed.game-shell[data-game-type="skyd"],
+.tool-embed.game-shell[data-game-type="snake"]{
+  width:min(100%,560px);
+  max-width:560px;
+}
+.tool-embed-bar{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  margin-bottom:8px;
+}
+.tool-embed-tag{
+  font-size:8px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--tq2);
+}
+.tool-embed-actions{display:flex;gap:6px}
+.tool-mini-btn{
+  font-family:inherit;font-size:9px;letter-spacing:.1em;
+  padding:3px 10px;cursor:pointer;
+  background:rgba(64,224,208,.08);border:1px solid var(--mute);color:var(--dim);
+  clip-path:polygon(0 0,calc(100%-5px) 0,100% 5px,100% 100%,5px 100%,0 calc(100%-5px));
+}
+.tool-mini-btn:hover{border-color:var(--tq2);color:var(--tq)}
+.tool-embed-body{
+  width:100%;
+  display:flex;justify-content:center;
+}
+.tool-embed.game-shell[data-game-type="airh"] .tool-embed-body,
+.tool-embed.game-shell[data-game-type="skyd"] .tool-embed-body,
+.tool-embed.game-shell[data-game-type="snake"] .tool-embed-body{
+  display:block;
+}
+.tool-embed.game-shell[data-game-type="airh"] .tool-embed-body > *,
+.tool-embed.game-shell[data-game-type="skyd"] .tool-embed-body > *,
+.tool-embed.game-shell[data-game-type="snake"] .tool-embed-body > *{
+  width:100%;
+  max-width:100%;
+  box-sizing:border-box;
+}
+.tool-embed:fullscreen,
+.tool-embed:-webkit-full-screen{
+  width:100vw;max-width:none;height:100vh;
+  padding:18px 20px 20px;border:none;border-radius:0;
+  background:linear-gradient(180deg,rgba(7,26,24,.98),rgba(4,10,9,.98));
+  display:flex;flex-direction:column;
+}
+.tool-embed:fullscreen .tool-embed-body,
+.tool-embed:-webkit-full-screen .tool-embed-body{
+  flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;
+}
 
 /* ── Decorative triangles ────────────────────────────────────────────────── */
 #tri-1{

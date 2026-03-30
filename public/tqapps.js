@@ -875,6 +875,7 @@ export class AirHockey {
     this._ctx     = null;
     this._raf     = null;
     this._syncT   = 0;
+    this._cleanupInput = null;
 
     // Physics state — P1 authoritative
     this.ball  = {x:AH_W/2, y:AH_H/2, vx:2.5, vy:3.5, trail:[]};
@@ -1273,7 +1274,9 @@ export class AirHockey {
 
   _resizeCanvas() {
     const cv = this._canvas; if (!cv) return;
-    const w   = Math.min(cv.parentElement?.clientWidth || 300, 300);
+    const shell = cv.closest?.('.tool-embed');
+    const maxW = document.fullscreenElement === shell ? 920 : 520;
+    const w   = Math.min(cv.parentElement?.clientWidth || maxW, maxW);
     const dpr = window.devicePixelRatio || 1;
     cv.width  = w * dpr;
     cv.height = w * (AH_H / AH_W) * dpr;
@@ -1296,13 +1299,26 @@ export class AirHockey {
       p.x  = ahClamp(rx, AH_PR, AH_W-AH_PR);
       p.y  = this.mySlot===1 ? ahClamp(ry, AH_H/2+AH_PR, AH_H-AH_PR) : ahClamp(ry, AH_PR, AH_H/2-AH_PR);
     };
-    cv.addEventListener('mousemove',  e => { if (this.state==='active') pos(e); });
-    cv.addEventListener('touchmove',  e => { if (this.state==='active') { e.preventDefault(); pos(e); } }, {passive:false});
-    cv.addEventListener('touchstart', e => { if (this.state==='active') { e.preventDefault(); pos(e); } }, {passive:false});
+    const moveMouse = e => { if (this.state==='active') pos(e); };
+    const moveTouch = e => { if (this.state==='active') { e.preventDefault(); pos(e); } };
+    const startTouch = e => { if (this.state==='active') { e.preventDefault(); pos(e); } };
+    const resize = () => this._resizeCanvas();
+    cv.addEventListener('mousemove', moveMouse);
+    cv.addEventListener('touchmove', moveTouch, {passive:false});
+    cv.addEventListener('touchstart', startTouch, {passive:false});
+    window.addEventListener('resize', resize);
+    this._cleanupInput = () => {
+      cv.removeEventListener('mousemove', moveMouse);
+      cv.removeEventListener('touchmove', moveTouch);
+      cv.removeEventListener('touchstart', startTouch);
+      window.removeEventListener('resize', resize);
+    };
   }
 
   destroy() {
     this._stopLoop();
+    this._cleanupInput?.();
+    this._cleanupInput = null;
     clearTimeout(this._goalTimer); this._goalTimer = null;
     this._canvas = null; this._ctx = null; this._dom = null;
   }
@@ -1705,7 +1721,9 @@ export class BattleGalactica {
 
   _resizeCanvas() {
     const cv = this._canvas; if (!cv) return;
-    const w = Math.min(cv.parentElement?.clientWidth || 320, 320);
+    const shell = cv.closest?.('.tool-embed');
+    const maxW = document.fullscreenElement === shell ? 960 : 520;
+    const w = Math.min(cv.parentElement?.clientWidth || maxW, maxW);
     const dpr = window.devicePixelRatio || 1;
     cv.width = w * dpr;
     cv.height = Math.round(w * (SKY_H / SKY_W) * dpr);

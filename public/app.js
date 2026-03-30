@@ -1344,6 +1344,7 @@ export class TurquoiseApp {
   _closeGameShell(key) {
     const game = this.games.get(key);
     if (!game) return;
+    game._host?._cleanupFs?.();
     game.destroy?.();
     game._host?.remove?.();
     game._host = null;
@@ -1353,6 +1354,63 @@ export class TurquoiseApp {
 
   _gameShellMissing(game) {
     return !game || !game._host || game._host.isConnected === false || !game._dom;
+  }
+
+  _createGameShell(key, gameType, own=false) {
+    const shell = document.createElement('div');
+    shell.className = 'tool-embed game-shell' + (own ? ' sent' : '');
+    shell.dataset.gameType = gameType;
+
+    const bar = document.createElement('div');
+    bar.className = 'tool-embed-bar';
+
+    const tag = document.createElement('div');
+    tag.className = 'tool-embed-tag';
+    tag.textContent = gameLabel(gameType);
+
+    const actions = document.createElement('div');
+    actions.className = 'tool-embed-actions';
+
+    const full = document.createElement('button');
+    full.className = 'tool-mini-btn';
+    full.type = 'button';
+    actions.appendChild(full);
+
+    const body = document.createElement('div');
+    body.className = 'tool-embed-body';
+    body.dataset.gameType = gameType;
+
+    bar.append(tag, actions);
+    shell.append(bar, body);
+
+    const syncFullscreen = () => {
+      const active = document.fullscreenElement === shell;
+      shell.classList.toggle('fs-active', active);
+      full.textContent = active ? 'back' : 'full';
+      setTimeout(() => {
+        const game = this.games.get(key);
+        game?._resizeCanvas?.();
+        game?._setupCanvas?.();
+        try { window.dispatchEvent(new Event('resize')); } catch {}
+      }, 40);
+    };
+
+    const onFullscreenChange = () => syncFullscreen();
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    shell._cleanupFs = () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+
+    full.addEventListener('click', async e => {
+      e.preventDefault();
+      try {
+        if (document.fullscreenElement === shell) await document.exitFullscreen?.();
+        else await shell.requestFullscreen?.();
+      } catch {}
+      syncFullscreen();
+    });
+
+    if (typeof shell.requestFullscreen !== 'function') full.style.display = 'none';
+    syncFullscreen();
+    return { shell, body };
   }
 
   _makeGame(fp, gameType) {
@@ -1381,9 +1439,9 @@ export class TurquoiseApp {
         type:'text',own:true,ts:Date.now(),text:`▶ started ${label}`};
       this._pushMsg(fp,rec,()=>this._appendMsg(rec));
       const ca = $('chat-area'); if (!ca) return;
-      const embed = document.createElement('div'); embed.className = 'tool-embed sent';
-      game._host = embed;
-      ca.appendChild(embed); ca.scrollTop = ca.scrollHeight; game.render(embed);
+      const { shell, body } = this._createGameShell(key, gameType, true);
+      game._host = shell;
+      ca.appendChild(shell); ca.scrollTop = ca.scrollHeight; game.render(body);
     });
   }
 
@@ -1407,10 +1465,10 @@ export class TurquoiseApp {
           type:'text',own:false,ts:Date.now(),text:`▶ ${nick} invited you to ${label}`};
         this._pushMsg(fp,rec,()=>this._appendMsg(rec));
         const ca = $('chat-area'); if (!ca) return;
-        const embed = document.createElement('div'); embed.className = 'tool-embed';
-        game._host = embed;
-        ca.appendChild(embed); ca.scrollTop = ca.scrollHeight;
-        game.render(embed); game.handleMsg(msg);
+        const { shell, body } = this._createGameShell(key, gameType, false);
+        game._host = shell;
+        ca.appendChild(shell); ca.scrollTop = ca.scrollHeight;
+        game.render(body); game.handleMsg(msg);
       });
     } else {
       game?.handleMsg(msg);
