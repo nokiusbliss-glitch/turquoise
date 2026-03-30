@@ -510,8 +510,19 @@ export class TurquoiseApp {
     for (const [key] of [...this.games]) {
       if (key.startsWith(fp + ':')) this._closeGameShell(key);
     }
+
+    // Check per-peer receive state BEFORE onPeerDisconnected mutates it.
+    // The old code used _hasActiveReceiveTransfer() — a global check — which
+    // fired the reload whenever ANY receive was active, including stale entries
+    // from other peers or past transfers. From the logs: device was only SENDING
+    // a voice memo yet the reload still fired because the global check returned
+    // true. Now we only reload when we were specifically receiving from THIS peer.
+    const recvState = this.ft._recv?.get(fp);
+    const wasReceivingFromPeer = (recvState && !recvState.done)
+      || this.folder._recv?.has(fp);
+
     const pausedTransfers = this.ft.onPeerDisconnected(fp);
-    if (pausedTransfers && this._hasActiveReceiveTransfer()) {
+    if (pausedTransfers && wasReceivingFromPeer) {
       this._scheduleFailureReload('live receive paused too long', 10_000);
     }
     this._updateTransferWarn();
