@@ -17,7 +17,7 @@ export const REGISTRY = [
   { id: 'sps',   label: 'stone paper scissors',  icon: '✂️', p2pOnly: true,  cls: null },
   { id: 'chess', label: 'chess',                 icon: '♟', p2pOnly: true,  cls: null },
   { id: 'airh',  label: 'air hockey',            icon: '◉', p2pOnly: true,  cls: null },
-  { id: 'snake', label: 'strand',                icon: '⟐', p2pOnly: true,  cls: null },
+  { id: 'skyd',  label: 'battle galactica',      icon: '✦', p2pOnly: true,  cls: null },
   { id: 'memo',  label: 'voice memo',            icon: '🎤', p2pOnly: false, cls: null },
 ];
 
@@ -1204,6 +1204,12 @@ export class AirHockey {
 
   _draw() {
     const c = this._dom; if (!c) return;
+    if (this.state !== 'active' && this._canvas) {
+      this._cleanupInput?.();
+      this._cleanupInput = null;
+      this._canvas = null;
+      this._ctx = null;
+    }
 
     if (this.state === 'waiting' && this._invited) {
       c.innerHTML = `<div class="tqapp-airh">
@@ -1299,6 +1305,481 @@ export class AirHockey {
     this._stopLoop();
     clearTimeout(this._goalTimer); this._goalTimer = null;
     this._canvas = null; this._ctx = null; this._dom = null;
+  }
+}
+
+
+// ── Battle Galactica ─────────────────────────────────────────────────────────
+
+const SKY_W = 320, SKY_H = 200;
+const SKY_SYNC_MS = 50;
+const SKY_MOVE = 3.8;
+const SKY_BULLET = 7.2;
+const SKY_FIRE_MS = 360;
+const SKY_HIT_X = 17;
+const SKY_HIT_Y = 13;
+const SKY_MAX_SCORE = 7;
+
+const skyClamp = (v, mn, mx) => v < mn ? mn : v > mx ? mx : v;
+
+export class BattleGalactica {
+  constructor(peerFp, myFp, sendFn, onCloseFn, gameType='skyd') {
+    this.peerFp = peerFp;
+    this.myFp = myFp;
+    this.send = sendFn;
+    this.onClose = onCloseFn;
+    this.gameType = gameType === 'snake' ? 'snake' : 'skyd';
+
+    this.mySlot = null;
+    this.state = 'waiting';
+    this._invited = false;
+    this._dom = null;
+    this._canvas = null;
+    this._ctx = null;
+    this._raf = null;
+    this._syncT = 0;
+    this._lastTs = 0;
+    this._cleanupInput = null;
+
+    this.left = { x: 42, y: SKY_H / 2 };
+    this.right = { x: SKY_W - 42, y: SKY_H / 2 };
+    this.bullets = [];
+    this.score = { left: 0, right: 0 };
+    this._flash = 0;
+    this._cool = { left: 0, right: 0 };
+    this._input = { up: false, down: false, fire: false };
+    this._remoteInput = { up: false, down: false, fire: false };
+    this._stars = Array.from({ length: 26 }, (_, i) => ({
+      x: (i * 73) % SKY_W,
+      y: (i * 41) % SKY_H,
+      r: i % 3 === 0 ? 1.8 : 1.1,
+      a: 0.16 + (i % 5) * 0.05,
+    }));
+  }
+
+  handleMsg(msg) {
+    const { action } = msg;
+    if (action === 'invite') {
+      this._invited = true;
+      this.mySlot = 2;
+      this.state = 'waiting';
+      this._draw();
+      return;
+    }
+    if (action === 'accept') {
+      this.mySlot = 1;
+      this.state = 'active';
+      this._draw();
+      this._startLoop();
+      return;
+    }
+    if (action === 'input') {
+      if (this.mySlot === 1) {
+        this._remoteInput = { up: !!msg.up, down: !!msg.down, fire: !!msg.fire };
+      }
+      return;
+    }
+    if (action === 'state') {
+      if (this.mySlot === 1) return;
+      this.left.y = skyClamp(msg.left?.y ?? this.left.y, 18, SKY_H - 18);
+      this.right.y = skyClamp(msg.right?.y ?? this.right.y, 18, SKY_H - 18);
+      this.bullets = Array.isArray(msg.bullets) ? msg.bullets.map(b => ({ ...b })) : [];
+      if (msg.score) this.score = { ...msg.score };
+      if (msg.flash) this._flash = 10;
+      if (this.state !== 'active') {
+        this.state = 'active';
+        this._draw();
+        this._startLoop();
+      }
+      if (msg.done) {
+        this.state = 'done';
+        this._stopLoop();
+        this._draw();
+      }
+      return;
+    }
+    if (action === 'resign') {
+      this.state = 'done';
+      this._stopLoop();
+      this._draw();
+    }
+  }
+
+  _accept() {
+    this.mySlot = 2;
+    this.state = 'active';
+    this.send({ gameType: this.gameType, action: 'accept' });
+    this._draw();
+    this._startLoop();
+  }
+
+  _resign() {
+    this.send({ gameType: this.gameType, action: 'resign' });
+    this.state = 'done';
+    this._stopLoop();
+    this._draw();
+  }
+
+  _startLoop() {
+    if (this._raf) return;
+    this._lastTs = performance.now();
+    const loop = (ts) => {
+      this._raf = requestAnimationFrame(loop);
+      const dt = Math.min(32, ts - this._lastTs || 16);
+      this._lastTs = ts;
+      if (this.state === 'active') {
+        if (this.mySlot === 1) this._updatePhysics(dt, ts);
+        else if (ts - this._syncT > SKY_SYNC_MS) {
+          this._syncT = ts;
+          this._sendInput();
+        }
+      }
+      if (this._flash > 0) this._flash--;
+      this._drawFrame();
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  _stopLoop() {
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = null;
+    }
+  }
+
+  _sendInput() {
+    if (this.mySlot === 1 || this.state !== 'active') return;
+    this.send({
+      gameType: this.gameType,
+      action: 'input',
+      up: !!this._input.up,
+      down: !!this._input.down,
+      fire: !!this._input.fire,
+    });
+  }
+
+  _updatePhysics(dt, ts) {
+    const step = dt / 16.666;
+    this._moveShip(this.left, this._input, step);
+    this._moveShip(this.right, this._remoteInput, step);
+    this._tryFire('left', this.left, this._input.fire, ts);
+    this._tryFire('right', this.right, this._remoteInput.fire, ts);
+
+    for (let i = this.bullets.length - 1; i >= 0; i--) {
+      const b = this.bullets[i];
+      b.x += b.vx * step;
+      if (b.x < -18 || b.x > SKY_W + 18) {
+        this.bullets.splice(i, 1);
+        continue;
+      }
+      if (b.side === 'left' && Math.abs(b.x - this.right.x) < SKY_HIT_X && Math.abs(b.y - this.right.y) < SKY_HIT_Y) {
+        this.score.left++;
+        this._onScore('left');
+        break;
+      }
+      if (b.side === 'right' && Math.abs(b.x - this.left.x) < SKY_HIT_X && Math.abs(b.y - this.left.y) < SKY_HIT_Y) {
+        this.score.right++;
+        this._onScore('right');
+        break;
+      }
+    }
+
+    if (ts - this._syncT > SKY_SYNC_MS) {
+      this._syncT = ts;
+      this.send({
+        gameType: this.gameType,
+        action: 'state',
+        left: { y: this.left.y },
+        right: { y: this.right.y },
+        bullets: this.bullets.map(b => ({ x: b.x, y: b.y, vx: b.vx, side: b.side })),
+        score: this.score,
+        flash: this._flash > 0,
+        done: this.state === 'done',
+      });
+    }
+  }
+
+  _moveShip(ship, input, step) {
+    const dir = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+    ship.y = skyClamp(ship.y + dir * SKY_MOVE * step, 18, SKY_H - 18);
+  }
+
+  _tryFire(side, ship, firing, ts) {
+    if (!firing || ts - this._cool[side] < SKY_FIRE_MS) return;
+    this._cool[side] = ts;
+    this.bullets.push({
+      x: side === 'left' ? ship.x + 14 : ship.x - 14,
+      y: ship.y,
+      vx: side === 'left' ? SKY_BULLET : -SKY_BULLET,
+      side,
+    });
+  }
+
+  _onScore(side) {
+    this._flash = 12;
+    this.bullets = [];
+    this.left.y = SKY_H / 2;
+    this.right.y = SKY_H / 2;
+    this._cool.left = 0;
+    this._cool.right = 0;
+    if (this.score.left >= SKY_MAX_SCORE || this.score.right >= SKY_MAX_SCORE) {
+      this.state = 'done';
+      this._stopLoop();
+    }
+    if (this.mySlot === 1) {
+      this.send({
+        gameType: this.gameType,
+        action: 'state',
+        left: { y: this.left.y },
+        right: { y: this.right.y },
+        bullets: [],
+        score: this.score,
+        flash: true,
+        done: this.state === 'done',
+      });
+    }
+    if (this.state === 'done') this._draw();
+  }
+
+  _drawShip(ctx, ship, mine, rightFacing) {
+    ctx.save();
+    ctx.translate(ship.x, ship.y);
+    if (!rightFacing) ctx.scale(-1, 1);
+    const glow = mine ? 'rgba(64,224,208,.55)' : 'rgba(107,255,123,.48)';
+    const fill = mine ? 'rgba(64,224,208,.24)' : 'rgba(107,255,123,.18)';
+    const stroke = mine ? '#40e0d0' : '#6bff7b';
+    ctx.shadowColor = glow;
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-10, -10);
+    ctx.lineTo(-3, 0);
+    ctx.lineTo(-10, 10);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.moveTo(-12, -6);
+    ctx.lineTo(-18, 0);
+    ctx.lineTo(-12, 6);
+    ctx.strokeStyle = `${stroke}88`;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  _drawFrame() {
+    const cv = this._canvas, ctx = this._ctx;
+    if (!cv || !ctx) return;
+    const W = cv.width, H = cv.height;
+    const sx = W / SKY_W, sy = H / SKY_H;
+
+    ctx.fillStyle = '#040a09';
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.scale(sx, sy);
+
+    this._stars.forEach((s, i) => {
+      ctx.beginPath();
+      ctx.arc((s.x + i * 0.3) % SKY_W, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(220,255,250,${s.a})`;
+      ctx.fill();
+    });
+
+    if (this._flash > 0) {
+      ctx.fillStyle = `rgba(64,224,208,${0.03 * this._flash})`;
+      ctx.fillRect(0, 0, SKY_W, SKY_H);
+    }
+
+    const grid = ctx.createLinearGradient(0, 0, SKY_W, SKY_H);
+    grid.addColorStop(0, 'rgba(64,224,208,.03)');
+    grid.addColorStop(1, 'rgba(107,255,123,.02)');
+    ctx.fillStyle = grid;
+    ctx.fillRect(0, 0, SKY_W, SKY_H);
+
+    ctx.strokeStyle = 'rgba(64,224,208,.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 6]);
+    ctx.beginPath();
+    ctx.moveTo(SKY_W / 2, 10);
+    ctx.lineTo(SKY_W / 2, SKY_H - 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    this.bullets.forEach(b => {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 3.4, 0, Math.PI * 2);
+      ctx.fillStyle = b.side === 'left' ? '#40e0d0' : '#6bff7b';
+      ctx.shadowColor = ctx.fillStyle;
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    });
+
+    this._drawShip(ctx, this.left, this.mySlot === 1, true);
+    this._drawShip(ctx, this.right, this.mySlot === 2, false);
+    ctx.restore();
+
+    const scoreEl = this._dom?.querySelector('#sky-score');
+    if (scoreEl) {
+      const myScore = this.mySlot === 1 ? this.score.left : this.score.right;
+      const oppScore = this.mySlot === 1 ? this.score.right : this.score.left;
+      scoreEl.textContent = `${myScore} — ${oppScore}`;
+    }
+  }
+
+  render(container) {
+    this._dom = container;
+    this._draw();
+  }
+
+  _draw() {
+    const c = this._dom; if (!c) return;
+
+    if (this.state === 'waiting' && this._invited) {
+      c.innerHTML = `<div class="tqapp-skyd">
+        <div class="tqapp-hdr"><span>✦ battle galactica</span></div>
+        <div class="ta-invite">
+          <div class="ta-inv-text">space duel challenge</div>
+          <div class="ta-btns">
+            <div class="ta-btn accept" id="sky-acc">tune·in</div>
+            <div class="ta-btn danger" id="sky-dec">pass</div>
+          </div>
+        </div>
+      </div>`;
+      c.querySelector('#sky-acc')?.addEventListener('click', () => this._accept());
+      c.querySelector('#sky-dec')?.addEventListener('click', () => { this.send({gameType:this.gameType, action:'resign'}); this.onClose?.(); });
+      return;
+    }
+
+    if (this.state === 'waiting') {
+      c.innerHTML = `<div class="tqapp-skyd"><div class="tqapp-hdr"><span>✦ battle galactica</span></div><div class="ta-status">waiting for opponent…</div></div>`;
+      return;
+    }
+
+    if (this.state === 'done') {
+      const myScore = this.mySlot === 1 ? this.score.left : this.score.right;
+      const oppScore = this.mySlot === 1 ? this.score.right : this.score.left;
+      const won = myScore > oppScore;
+      c.innerHTML = `<div class="tqapp-skyd">
+        <div class="tqapp-hdr"><span>✦ battle galactica</span><span class="tqapp-sym">${myScore} — ${oppScore}</span></div>
+        <div class="ta-status ${won?'ta-win':'ta-loss'}">${won?'sector secured':'sector lost'}
+          <div class="ta-btns" style="margin-top:5px">
+            <div class="ta-btn danger" id="sky-close">close</div>
+          </div>
+        </div>
+      </div>`;
+      c.querySelector('#sky-close')?.addEventListener('click', () => this.onClose?.());
+      return;
+    }
+
+    if (!this._canvas) {
+      const side = this.mySlot === 1 ? 'left interceptor' : 'right interceptor';
+      c.innerHTML = `<div class="tqapp-skyd">
+        <div class="tqapp-hdr">
+          <span>✦ battle galactica</span>
+          <span class="tqapp-sym" id="sky-score">0 — 0</span>
+        </div>
+        <div class="sky-field"><canvas id="sky-canvas"></canvas></div>
+        <div class="ta-status" style="font-size:9px;color:var(--dim);margin-top:3px">
+          you: ${side} · hold rise / dive · hold fire · first to ${SKY_MAX_SCORE}
+        </div>
+        <div class="sky-controls">
+          <button class="sky-btn" id="sky-up">rise</button>
+          <button class="sky-btn" id="sky-fire">fire</button>
+          <button class="sky-btn" id="sky-down">dive</button>
+        </div>
+        <div class="ta-btns"><div class="ta-btn danger" id="sky-resign">resign</div></div>
+      </div>`;
+      this._canvas = c.querySelector('#sky-canvas');
+      this._ctx = this._canvas.getContext('2d');
+      this._resizeCanvas();
+      this._bindInput();
+      c.querySelector('#sky-resign')?.addEventListener('click', () => this._resign());
+    }
+  }
+
+  _resizeCanvas() {
+    const cv = this._canvas; if (!cv) return;
+    const w = Math.min(cv.parentElement?.clientWidth || 320, 320);
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = w * dpr;
+    cv.height = Math.round(w * (SKY_H / SKY_W) * dpr);
+    cv.style.width = w + 'px';
+    cv.style.height = Math.round(w * (SKY_H / SKY_W)) + 'px';
+  }
+
+  _bindInput() {
+    const root = this._dom; if (!root) return;
+    const setKey = (key, val) => {
+      if (this.state !== 'active') return;
+      if (this._input[key] === val) return;
+      this._input[key] = val;
+      if (key !== 'fire') this._sendInput();
+      this._syncButtons();
+    };
+    const bindPress = (el, key) => {
+      if (!el) return;
+      const down = e => { e.preventDefault(); setKey(key, true); if (key === 'fire') this._sendInput(); };
+      const up   = e => { e.preventDefault(); setKey(key, false); if (key === 'fire') this._sendInput(); };
+      el.addEventListener('pointerdown', down);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointerleave', up);
+      el.addEventListener('pointercancel', up);
+      return () => {
+        el.removeEventListener('pointerdown', down);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointerleave', up);
+        el.removeEventListener('pointercancel', up);
+      };
+    };
+    const upBtn = root.querySelector('#sky-up');
+    const fireBtn = root.querySelector('#sky-fire');
+    const downBtn = root.querySelector('#sky-down');
+    const keyDown = e => {
+      if (e.repeat || /INPUT|TEXTAREA/.test(e.target?.tagName || '')) return;
+      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') setKey('up', true);
+      if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') setKey('down', true);
+      if (e.key === ' ' || e.key === 'Enter') { setKey('fire', true); this._sendInput(); }
+    };
+    const keyUp = e => {
+      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') setKey('up', false);
+      if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') setKey('down', false);
+      if (e.key === ' ' || e.key === 'Enter') { setKey('fire', false); this._sendInput(); }
+    };
+    const resize = () => this._resizeCanvas();
+    const cleanups = [bindPress(upBtn, 'up'), bindPress(fireBtn, 'fire'), bindPress(downBtn, 'down')].filter(Boolean);
+    window.addEventListener('keydown', keyDown);
+    window.addEventListener('keyup', keyUp);
+    window.addEventListener('resize', resize);
+    this._cleanupInput = () => {
+      cleanups.forEach(fn => fn());
+      window.removeEventListener('keydown', keyDown);
+      window.removeEventListener('keyup', keyUp);
+      window.removeEventListener('resize', resize);
+    };
+    this._syncButtons();
+  }
+
+  _syncButtons() {
+    const root = this._dom; if (!root) return;
+    root.querySelector('#sky-up')?.classList.toggle('active', !!this._input.up);
+    root.querySelector('#sky-down')?.classList.toggle('active', !!this._input.down);
+    root.querySelector('#sky-fire')?.classList.toggle('active', !!this._input.fire);
+    root.querySelector('#sky-fire')?.classList.toggle('fire', true);
+  }
+
+  destroy() {
+    this._stopLoop();
+    this._cleanupInput?.();
+    this._cleanupInput = null;
+    this._canvas = null;
+    this._ctx = null;
+    this._dom = null;
   }
 }
 
@@ -1827,5 +2308,5 @@ REGISTRY.find(r => r.id === 'ttt').cls   = TicTacToe;
 REGISTRY.find(r => r.id === 'sps').cls   = StonePaperScissors;
 REGISTRY.find(r => r.id === 'chess').cls = Chess;
 REGISTRY.find(r => r.id === 'airh').cls  = AirHockey;
-REGISTRY.find(r => r.id === 'snake').cls = SnakeDuel;
+REGISTRY.find(r => r.id === 'skyd').cls  = BattleGalactica;
 REGISTRY.find(r => r.id === 'memo').cls  = VoiceMemo;

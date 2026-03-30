@@ -120,6 +120,14 @@ async function boot() {
       return;
     }
 
+    if (window.__tqForceReloadOnVisible) {
+      const reason = String(window.__tqForceReloadReason || 'transfer recovery required');
+      log.warn('main','visible','forced recovery reload on visible', { awayMs: Date.now() - _hiddenAt, reason });
+      window.__tqApp?._status?.(`${reason} — reloading this device to recover transfer`,'warn', 2200);
+      location.reload();
+      return;
+    }
+
     // If screen was only hidden briefly (<4s) skip reload — likely a quick
     // notification shade pull or accidental lock, not a real sleep cycle.
     const awayMs = Date.now() - _hiddenAt;
