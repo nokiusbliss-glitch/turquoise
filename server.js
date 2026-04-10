@@ -46,6 +46,7 @@ const ICE_SERVERS = [
 const RELAY_TYPES = new Set([
   'offer','answer','ice','chat',
   'call-invite','call-accept','call-decline','call-end','call-request',
+  'call-state',
   'offer-reneg','answer-reneg','permission-denied',
   'file-meta','file-ack','file-end','file-complete','file-abort','bin-relay',
   'nick-update','game','folder-manifest',
@@ -87,7 +88,14 @@ const httpServer = http.createServer((req, res) => {
       res.writeHead(404).end(); return;
     }
     const ext = path.extname(fp).toLowerCase();
-    const cc  = /sw\.js$/.test(fp) || ext === '.html' ? 'no-cache' : 'public,max-age=3600';
+    const noCache =
+      /sw\.js$/.test(fp) ||
+      ext === '.html' ||
+      ext === '.js' ||
+      ext === '.mjs' ||
+      ext === '.json' ||
+      ext === '.webmanifest';
+    const cc  = noCache ? 'no-cache, no-store, must-revalidate' : 'public,max-age=3600,immutable';
     res.writeHead(200, {
       'Content-Type':           MIME[ext] || 'application/octet-stream',
       'Cache-Control':          cc,
@@ -164,8 +172,17 @@ wss.on('connection', (ws, req) => {
       slog('CONNECT', {fp:fp.slice(0,8), nick, n:peers.size});
       // Deliver ICE config + existing peer list to newcomer
       send(ws, {type:'ice-config', iceServers:ICE_SERVERS});
+      send(ws, {
+        type:'presence-snapshot',
+        peers:[...peers.entries()]
+          .filter(([efp]) => efp !== fp)
+          .map(([efp]) => ({ fingerprint:efp, nick:nicks.get(efp)||efp.slice(0,8) })),
+      });
       for (const [efp] of peers) {
         if (efp !== fp) send(ws, {type:'peer', fingerprint:efp, nick:nicks.get(efp)||efp.slice(0,8)});
+      }
+      for (const [efp, ews] of peers) {
+        if (efp !== fp) send(ews, {type:'peer-up', fingerprint:fp, nick});
       }
       return;
     }
@@ -192,6 +209,7 @@ wss.on('connection', (ws, req) => {
     if (mfp && peers.get(mfp) === ws) {
       peers.delete(mfp); nicks.delete(mfp);
       slog('DISCONNECT', {fp:mfp.slice(0,8), n:peers.size});
+      for (const [, pws] of peers) send(pws, {type:'peer-down', fingerprint:mfp});
     }
     fpOf.delete(ws);
   });

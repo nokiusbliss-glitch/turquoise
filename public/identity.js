@@ -21,7 +21,7 @@
  *   Either store surviving a wipe is enough to restore identity.
  */
 
-import { TQLog } from './tqlog.js';
+import { TQLog } from './tqlog.js?tqv=20260411c';
 
 const DB_NAME    = 'tq-identity';
 const DB_VERSION = 3;

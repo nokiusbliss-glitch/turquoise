@@ -10,7 +10,7 @@
  *   - Smaller: ~35% reduction via consolidation
  */
 
-import { getToolById } from './tools-registry.js';
+import { getToolById } from './tools-registry.js?tqv=20260411c';
 
 export function createToolRuntime(toolId, ctx) {
   if (toolId === 'tic-tac-toe') return _ttt(ctx);

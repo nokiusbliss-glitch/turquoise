@@ -64,7 +64,7 @@ setTimeout(() => {
 }, 12000);
 
 window.__tqBoot.started = true;
-import('/main.js?tqv=20260411b').catch(err => {
+import('/main.js?tqv=20260411c').catch(err => {
   console.error('[TQ] main import failed:', err);
   window.__tqBoot.failed = true;
   recoverBoot('main import failed');

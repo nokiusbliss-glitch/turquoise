@@ -6,10 +6,10 @@
  * export button in fatal error screens and the beforeunload cleanup.
  */
 
-import { TQLog }            from './tqlog.js';
-import { getIdentity }      from './identity.js';
-import { TurquoiseNetwork } from './webrtc.js';
-import { TurquoiseApp }     from './app.js';
+import { TQLog }            from './tqlog.js?tqv=20260411c';
+import { getIdentity }      from './identity.js?tqv=20260411c';
+import { TurquoiseNetwork } from './webrtc.js?tqv=20260411c';
+import { TurquoiseApp }     from './app.js?tqv=20260411c';
 
 const bootState = window.__tqBoot || (window.__tqBoot = {});
 bootState.started = true;

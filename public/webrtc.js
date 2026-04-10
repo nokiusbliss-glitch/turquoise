@@ -13,7 +13,7 @@
  *   - isReady(fp) public helper.
  */
 
-import { TQLog } from './tqlog.js';
+import { TQLog } from './tqlog.js?tqv=20260411c';
 
 let _ice = [
   { urls: ['stun:stun.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
@@ -141,7 +141,12 @@ export class TurquoiseNetwork {
     }
     const target = obj.to;
     if (!target) return;
+    const direct = this.peers.get(target);
+    if (direct?.ctrl?.readyState === 'open') {
+      try { direct.ctrl.send(JSON.stringify(obj)); return; } catch {}
+    }
     for (const [, ps] of this.peers) {
+      if (ps === direct) continue;
       if (ps.ctrl?.readyState === 'open') {
         try { ps.ctrl.send(JSON.stringify({type:'p2p-relay', target, payload:obj})); return; } catch {}
       }
@@ -158,7 +163,19 @@ export class TurquoiseNetwork {
       return;
     }
 
-    if (type === 'peer') {
+    if (type === 'presence-snapshot' && Array.isArray(msg.peers)) {
+      msg.peers.forEach(peer => {
+        const fp = peer?.fingerprint;
+        if (!fp || fp === this.id.fingerprint) return;
+        const k = this._known.get(fp) || { retry:0, timer:null };
+        k.nick = peer.nick || fp.slice(0,8);
+        this._known.set(fp, k);
+        if (!this.peers.has(fp)) this._initiate(fp, k.nick);
+      });
+      return;
+    }
+
+    if (type === 'peer' || type === 'peer-up') {
       const fp = msg.fingerprint;
       if (!fp || fp === this.id.fingerprint) return;
       const k = this._known.get(fp) || { retry:0, timer:null };
@@ -167,6 +184,8 @@ export class TurquoiseNetwork {
       if (!this.peers.has(fp)) this._initiate(fp, k.nick);
       return;
     }
+
+    if (type === 'peer-down') return;
 
     if (type === 'pong') return;
     if (!from || from === this.id.fingerprint) return;
@@ -487,7 +506,16 @@ export class TurquoiseNetwork {
     if (msg.type === 'hb-pong') { if (ps) { ps.hbMiss=0; clearTimeout(ps.hbTimer); } return; }
 
     if (msg.type === 'p2p-relay') {
-      if (msg.target && msg.payload) this._onSig({...msg.payload});
+      if (!msg.target || !msg.payload) return;
+      if (msg.target === this.id.fingerprint) {
+        this._onSig({...msg.payload});
+        return;
+      }
+      this.sendCtrl(msg.target, {
+        type:'p2p-relay',
+        target:msg.target,
+        payload:msg.payload,
+      });
       return;
     }
 

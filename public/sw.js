@@ -4,7 +4,7 @@
  * stale cached bundles after interface changes.
  */
 
-const CACHE = 'tq-v17';
+const CACHE = 'tq-v18';
 
 const CORE = [
   '/',
@@ -22,6 +22,7 @@ const CORE = [
   '/tools-registry.js',
   '/tools-modules.js',
   '/manifest.json',
+  '/icon.svg',
 ];
 
 const CORE_SET = new Set(CORE);
@@ -30,6 +31,10 @@ function shouldUseNetworkFirst(request, url) {
   if (request.mode === 'navigate') return true;
   if (url.origin !== self.location.origin) return true;
   return CORE_SET.has(url.pathname);
+}
+
+async function matchCached(cache, request, url) {
+  return (await cache.match(request)) || (url.search ? cache.match(url.pathname) : null);
 }
 
 async function putIfOk(cache, request, response) {
@@ -41,11 +46,12 @@ async function putIfOk(cache, request, response) {
 
 async function networkFirst(request) {
   const cache = await caches.open(CACHE);
+  const url = new URL(request.url);
   try {
     const fresh = await fetch(request);
     return await putIfOk(cache, request, fresh);
   } catch {
-    const cached = await cache.match(request);
+    const cached = await matchCached(cache, request, url);
     if (cached) return cached;
     if (request.mode === 'navigate') return (await cache.match('/index.html')) || Response.error();
     return new Response('', { status: 504, statusText: 'Offline' });
@@ -54,7 +60,8 @@ async function networkFirst(request) {
 
 async function cacheFirst(request) {
   const cache = await caches.open(CACHE);
-  const cached = await cache.match(request);
+  const url = new URL(request.url);
+  const cached = await matchCached(cache, request, url);
   if (cached) return cached;
   try {
     const fresh = await fetch(request);
