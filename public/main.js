@@ -55,9 +55,28 @@ function sigUrl() {
 
 async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloadingForUpdate = false;
   try {
-    const reg = await navigator.serviceWorker.register('/sw.js');
-    reg.addEventListener('updatefound', ()=>log.info('main','sw','update found'));
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloadingForUpdate) return;
+      reloadingForUpdate = true;
+      log.info('main','sw','controller changed — reloading to activate latest shell');
+      window.__tqApp?._status?.('updating Turquoise…','info', 1800);
+      setTimeout(() => location.reload(), 120);
+    });
+
+    const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache:'none' });
+    reg.addEventListener('updatefound', ()=>{
+      log.info('main','sw','update found');
+      const next = reg.installing;
+      next?.addEventListener('statechange', () => {
+        if (next.state === 'installed' && navigator.serviceWorker.controller) {
+          log.info('main','sw','new shell installed — waiting for controller swap');
+        }
+      });
+    });
+    reg.update().catch(()=>{});
     log.info('main','sw','registered', {scope:reg.scope});
   } catch(e) { log.warn('main','sw','register failed: '+e.message); }
 }
