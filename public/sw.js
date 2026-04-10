@@ -4,11 +4,12 @@
  * stale cached bundles after interface changes.
  */
 
-const CACHE = 'tq-v16';
+const CACHE = 'tq-v17';
 
 const CORE = [
   '/',
   '/index.html',
+  '/bootstrap.js',
   '/main.js',
   '/app.js',
   '/webrtc.js',

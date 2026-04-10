@@ -1450,23 +1450,6 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 <!-- Voice memo overlay -->
 <div id="memo-panel"></div>
 
-<!-- Inject name-hint hide logic: once nick is set, remove hint -->
-<script type="module" src="/main.js"></script>
-<script>
-  // Hide the name hint once user saves a name (non-default)
-  // This runs after app.js mounts and updates nick-display
-  const _observer = new MutationObserver(() => {
-    const nd = document.getElementById('nick-display');
-    const hint = document.getElementById('name-hint');
-    if (!nd || !hint) return;
-    const v = nd.textContent.trim();
-    const plain = v.replace(/^\([^)]+\)\s*/,'').trim();
-    // '···' is the loading placeholder; a short hex is the auto-id
-    const isDefault = v === '···' || /^\([a-f0-9]{8}\)$/.test(v) || /^[a-f0-9]{8}$/.test(plain || v);
-    hint.classList.toggle('visible', isDefault);
-  });
-  const nd = document.getElementById('nick-display');
-  if (nd) _observer.observe(nd, { childList:true, characterData:true, subtree:true });
-</script>
+<script type="module" src="/bootstrap.js?tqv=20260411b"></script>
 </body>
 </html>

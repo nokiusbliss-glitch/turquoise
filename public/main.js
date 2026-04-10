@@ -11,6 +11,10 @@ import { getIdentity }      from './identity.js';
 import { TurquoiseNetwork } from './webrtc.js';
 import { TurquoiseApp }     from './app.js';
 
+const bootState = window.__tqBoot || (window.__tqBoot = {});
+bootState.started = true;
+bootState.failed = false;
+
 const log = TQLog.get();
 log.info('main', 'boot', 'Turquoise v7 starting', { ua:navigator.userAgent.slice(0,80), protocol:location.protocol });
 
@@ -31,6 +35,7 @@ function missingAPIs() {
 }
 
 function fatal(msg, recoverable=false) {
+  bootState.failed = true;
   log.error('main','fatal',msg);
   const root=document.getElementById('app'); if(!root) return;
   root.innerHTML='';
@@ -101,6 +106,8 @@ async function boot() {
   let app;
   try   { app = new TurquoiseApp(identity, network); await app.mount(); log.info('main','boot','app mounted'); }
   catch (e) { console.error('[TQ] app mount failed:', e); fatal('App error: '+(e?.message||e), true); return; }
+  bootState.mounted = true;
+  bootState.failed = false;
 
   const wsUrl = sigUrl();
   log.info('main','boot','connecting signaling', {url:wsUrl});
@@ -176,6 +183,7 @@ async function boot() {
 }
 
 boot().catch(e => {
+  bootState.failed = true;
   console.error('[TQ] fatal boot error:', e);
   log.error('main','boot.catch','fatal: '+e.message, {stack:e.stack?.slice(0,400)});
   fatal('Fatal: '+(e?.message||e), true);

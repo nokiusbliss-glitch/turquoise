@@ -191,6 +191,22 @@ export class TurquoiseApp {
     if (nd) nd.innerHTML = labelWithCodeHtml(this.id.nickname, this.id.fingerprint, 'ui-code self-code', 'ui-name self-name');
     if (ni) ni.value = this.id.nickname;
     if (fp) fp.textContent = this.id.fingerprint;
+    this._updateNameHint();
+  }
+
+  _updateNameHint() {
+    const nd = $('nick-display');
+    const ni = $('nick-input');
+    const hint = $('name-hint');
+    if (!hint || !nd) return;
+    if (ni?.classList.contains('visible')) {
+      hint.classList.add('visible');
+      return;
+    }
+    const v = nd.textContent?.trim() || '';
+    const plain = v.replace(/^\([^)]+\)\s*/, '').trim();
+    const isDefault = v === '···' || /^\([a-f0-9]{8}\)$/.test(v) || /^[a-f0-9]{8}$/.test(plain || v);
+    hint.classList.toggle('visible', isDefault);
   }
 
   _loadTheme() {
@@ -356,6 +372,7 @@ export class TurquoiseApp {
     const d=$('nick-display'), i=$('nick-input');
     if (!d||!i||i.classList.contains('visible')) return;
     d.classList.add('hidden'); i.classList.add('visible'); i.focus(); i.select();
+    this._updateNameHint();
   }
 
   _suppressVisibleReconnect(ms=60_000) {
