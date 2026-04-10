@@ -28,17 +28,8 @@ class ZipBuilder {
     const crc  = crc32(u8), sz = u8.length;
     const lh   = new DataView(new ArrayBuffer(30 + name.length));
     // Local file header
-    lh.setUint32(0, 0x04034B50, true);
-    lh.setUint16(4, 20, true); // version needed
-    lh.setUint16(6, 0, true);  // general purpose bit flag
-    lh.setUint16(8, 0, true);  // compression method = store
-    lh.setUint16(10, 0, true); // mod time
-    lh.setUint16(12, 0, true); // mod date
-    lh.setUint32(14, crc, true);
-    lh.setUint32(18, sz, true);
-    lh.setUint32(22, sz, true);
+    [[0,0x04034B50],[4,20],[6,0],[8,0],[10,0],[12,0],[16,crc],[20,sz],[24,sz]].forEach(([o,v])=>lh.setUint32(o,v,true));
     lh.setUint16(26, name.length, true);
-    lh.setUint16(28, 0, true); // extra length
     new Uint8Array(lh.buffer, 30).set(name);
     const localOffset = this._offset;
     // Slice the exact byte range — u8.buffer may be a larger backing buffer
@@ -54,35 +45,13 @@ class ZipBuilder {
     const cdParts=[]; let cdSize=0;
     for (const e of this._entries) {
       const cd = new DataView(new ArrayBuffer(46+e.name.length));
-      cd.setUint32(0, 0x02014B50, true);
-      cd.setUint16(4, 20, true);  // version made by
-      cd.setUint16(6, 20, true);  // version needed
-      cd.setUint16(8, 0, true);   // flags
-      cd.setUint16(10, 0, true);  // compression method
-      cd.setUint16(12, 0, true);  // mod time
-      cd.setUint16(14, 0, true);  // mod date
-      cd.setUint32(16, e.crc, true);
-      cd.setUint32(20, e.sz, true);
-      cd.setUint32(24, e.sz, true);
+      [[0,0x02014B50],[4,20],[6,20],[8,0],[10,0],[12,0],[14,0],[16,e.crc],[20,e.sz],[24,e.sz],[42,e.localOffset]].forEach(([o,v])=>cd.setUint32(o,v,true));
       cd.setUint16(28, e.name.length, true);
-      cd.setUint16(30, 0, true);  // extra length
-      cd.setUint16(32, 0, true);  // comment length
-      cd.setUint16(34, 0, true);  // disk start
-      cd.setUint16(36, 0, true);  // internal attrs
-      cd.setUint32(38, 0, true);  // external attrs
-      cd.setUint32(42, e.localOffset, true);
       new Uint8Array(cd.buffer, 46).set(e.name);
       cdParts.push(cd.buffer); cdSize += 46+e.name.length;
     }
     const n=this._entries.length, eocd=new DataView(new ArrayBuffer(22));
-    eocd.setUint32(0, 0x06054B50, true);
-    eocd.setUint16(4, 0, true);  // disk number
-    eocd.setUint16(6, 0, true);  // central dir start disk
-    eocd.setUint16(8, n, true);  // entries on this disk
-    eocd.setUint16(10, n, true); // total entries
-    eocd.setUint32(12, cdSize, true);
-    eocd.setUint32(16, this._offset, true);
-    eocd.setUint16(20, 0, true); // comment length
+    [[0,0x06054B50],[8,n],[10,n],[12,cdSize],[16,this._offset]].forEach(([o,v])=>eocd.setUint32(o,v,true));
     return new Blob([...this._parts,...cdParts,eocd.buffer],{type:'application/zip'});
   }
 }

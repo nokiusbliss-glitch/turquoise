@@ -6,14 +6,10 @@
  * export button in fatal error screens and the beforeunload cleanup.
  */
 
-import { TQLog }            from './tqlog.js?tqv=20260411c';
-import { getIdentity }      from './identity.js?tqv=20260411c';
-import { TurquoiseNetwork } from './webrtc.js?tqv=20260411c';
-import { TurquoiseApp }     from './app.js?tqv=20260411c';
-
-const bootState = window.__tqBoot || (window.__tqBoot = {});
-bootState.started = true;
-bootState.failed = false;
+import { TQLog }            from './tqlog.js';
+import { getIdentity }      from './identity.js';
+import { TurquoiseNetwork } from './webrtc.js';
+import { TurquoiseApp }     from './app.js';
 
 const log = TQLog.get();
 log.info('main', 'boot', 'Turquoise v7 starting', { ua:navigator.userAgent.slice(0,80), protocol:location.protocol });
@@ -35,7 +31,6 @@ function missingAPIs() {
 }
 
 function fatal(msg, recoverable=false) {
-  bootState.failed = true;
   log.error('main','fatal',msg);
   const root=document.getElementById('app'); if(!root) return;
   root.innerHTML='';
@@ -60,28 +55,9 @@ function sigUrl() {
 
 async function registerSW() {
   if (!('serviceWorker' in navigator)) return;
-  const hadController = !!navigator.serviceWorker.controller;
-  let reloadingForUpdate = false;
   try {
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (!hadController || reloadingForUpdate) return;
-      reloadingForUpdate = true;
-      log.info('main','sw','controller changed — reloading to activate latest shell');
-      window.__tqApp?._status?.('updating Turquoise…','info', 1800);
-      setTimeout(() => location.reload(), 120);
-    });
-
-    const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache:'none' });
-    reg.addEventListener('updatefound', ()=>{
-      log.info('main','sw','update found');
-      const next = reg.installing;
-      next?.addEventListener('statechange', () => {
-        if (next.state === 'installed' && navigator.serviceWorker.controller) {
-          log.info('main','sw','new shell installed — waiting for controller swap');
-        }
-      });
-    });
-    reg.update().catch(()=>{});
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    reg.addEventListener('updatefound', ()=>log.info('main','sw','update found'));
     log.info('main','sw','registered', {scope:reg.scope});
   } catch(e) { log.warn('main','sw','register failed: '+e.message); }
 }
@@ -106,8 +82,6 @@ async function boot() {
   let app;
   try   { app = new TurquoiseApp(identity, network); await app.mount(); log.info('main','boot','app mounted'); }
   catch (e) { console.error('[TQ] app mount failed:', e); fatal('App error: '+(e?.message||e), true); return; }
-  bootState.mounted = true;
-  bootState.failed = false;
 
   const wsUrl = sigUrl();
   log.info('main','boot','connecting signaling', {url:wsUrl});
@@ -183,7 +157,6 @@ async function boot() {
 }
 
 boot().catch(e => {
-  bootState.failed = true;
   console.error('[TQ] fatal boot error:', e);
   log.error('main','boot.catch','fatal: '+e.message, {stack:e.stack?.slice(0,400)});
   fatal('Fatal: '+(e?.message||e), true);

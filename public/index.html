@@ -387,19 +387,7 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── Message bubbles ─────────────────────────────────────────────────────── */
 .msg{
-  /* flex-shrink:0 is the primary fix for both "stones shrinking" and "chat not
-     scrollable". #chat-area is a flex column; the default flex-shrink:1 was
-     collapsing message HEIGHT when the container filled up. Stones shrank
-     vertically instead of overflowing → overflow-y:auto never triggered.
-     With flex-shrink:0 messages maintain their natural height and the
-     container scrolls when they overflow. */
-  flex-shrink:0;
-  /* width:fit-content: stone is only as wide as its text content, not
-     stretched to max-width on short messages. align-self per .sent/.recv
-     controls left/right alignment. */
-  width:fit-content;
-  max-width:64%;
-  padding:10px 14px 22px;
+  max-width:64%;padding:10px 14px 22px;
   position:relative;word-break:break-word;line-height:1.45;
   font-size:12px;transition:transform .1s;cursor:default;
   margin:0;
@@ -472,12 +460,6 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── File & folder cards ─────────────────────────────────────────────────── */
 .file-card,.folder-card{
-  /* flex-shrink:0: same reason as .msg — prevents height collapsing in the
-     flex column. align-self:flex-start: without this, received cards (no .sent)
-     stretch to full container width due to default align-items:stretch on
-     #chat-area. Cards should hug their content width. */
-  flex-shrink:0;
-  align-self:flex-start;
   max-width:280px;padding:8px 11px;
   background:
     linear-gradient(150deg,rgba(255,255,255,.026),transparent 38%),
@@ -1083,13 +1065,11 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── Tool embed ──────────────────────────────────────────────────────────── */
 .tool-embed{
-  flex-shrink:0;   /* same fix as .msg — prevent height collapse in flex column */
   width:min(100%,620px);max-width:620px;padding:10px 12px 12px;
   background:var(--bg2);border-left:2px solid var(--tq3);
   align-self:flex-start;
   position:relative;overflow:hidden;isolation:isolate;
-  /* border-radius removed: clip-path is inherited from before pseudo-element;
-     having both caused double-clipping on game embeds */
+  border-radius:26px 18px 22px 16px / 18px 24px 16px 22px;
   box-sizing:border-box;
 }
 .tool-embed.sent{border-left:none;border-right:2px solid var(--tq);align-self:flex-end}
@@ -1450,6 +1430,23 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 <!-- Voice memo overlay -->
 <div id="memo-panel"></div>
 
-<script type="module" src="/bootstrap.js?tqv=20260411c"></script>
+<!-- Inject name-hint hide logic: once nick is set, remove hint -->
+<script type="module" src="/main.js"></script>
+<script>
+  // Hide the name hint once user saves a name (non-default)
+  // This runs after app.js mounts and updates nick-display
+  const _observer = new MutationObserver(() => {
+    const nd = document.getElementById('nick-display');
+    const hint = document.getElementById('name-hint');
+    if (!nd || !hint) return;
+    const v = nd.textContent.trim();
+    const plain = v.replace(/^\([^)]+\)\s*/,'').trim();
+    // '···' is the loading placeholder; a short hex is the auto-id
+    const isDefault = v === '···' || /^\([a-f0-9]{8}\)$/.test(v) || /^[a-f0-9]{8}$/.test(plain || v);
+    hint.classList.toggle('visible', isDefault);
+  });
+  const nd = document.getElementById('nick-display');
+  if (nd) _observer.observe(nd, { childList:true, characterData:true, subtree:true });
+</script>
 </body>
 </html>

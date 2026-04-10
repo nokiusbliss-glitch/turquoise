@@ -35,7 +35,7 @@
  *   - All public functions: never throw — errors are returned or logged.
  */
 
-import { TQLog } from './tqlog.js?tqv=20260411c';
+import { TQLog } from './tqlog.js';
 
 const DB_NAME    = 'tq-messages';
 const DB_VERSION = 2;          // bump: added by-fp peer index
@@ -191,7 +191,7 @@ export async function loadMessages(sessionId) {
   }
 }
 
-export async function loadAllMessages(limit = ALL_LIMIT) {
+export async function loadAllMessages() {
   const t0 = Date.now();
   try {
     const db  = await getDB();
@@ -202,8 +202,7 @@ export async function loadAllMessages(limit = ALL_LIMIT) {
       req.onerror   = () => { if (_db === db) _db = null; rej(req.error); };
     });
     const sorted = all.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    const useLimit = Number.isFinite(limit) ? Math.max(0, limit) : Infinity;
-    const result = useLimit !== Infinity && sorted.length > useLimit ? sorted.slice(-useLimit) : sorted;
+    const result = sorted.length > ALL_LIMIT ? sorted.slice(-ALL_LIMIT) : sorted;
     _log.debug(FILE, 'loadAllMessages', `${result.length} total msgs in ${Date.now()-t0}ms`);
     return result;
   } catch (e) {

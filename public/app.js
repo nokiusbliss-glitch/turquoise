@@ -23,12 +23,12 @@
  */
 
 import { saveMessage, loadMessages, loadAllMessages, clearAllData,
-         savePeer, loadPeers, restoreMessages, restorePeers } from './messages.js?tqv=20260411c';
-import { resetIdentity, importIdentityData } from './identity.js?tqv=20260411c';
-import { TQLog } from './tqlog.js?tqv=20260411c';
-import { FileTransfer }   from './files.js?tqv=20260411c';
-import { FolderTransfer } from './folder.js?tqv=20260411c';
-import { TicTacToe, StonePaperScissors, Chess, AirHockey, BattleGalactica, VoiceMemo } from './tqapps.js?tqv=20260411c';
+         savePeer, loadPeers, restoreMessages, restorePeers } from './messages.js';
+import { resetIdentity, importIdentityData } from './identity.js';
+import { TQLog } from './tqlog.js';
+import { FileTransfer }   from './files.js';
+import { FolderTransfer } from './folder.js';
+import { TicTacToe, StonePaperScissors, Chess, AirHockey, BattleGalactica, VoiceMemo } from './tqapps.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -121,7 +121,6 @@ export class TurquoiseApp {
     this._failureReloadTimer = null;
     this._failureReloadDueAt = 0;
     this._failureReloadForced = false;
-    this._failureReloadPeer = null;
     this._callAlertTimer = null;
     this._lastAlertAt = 0;
 
@@ -166,15 +165,6 @@ export class TurquoiseApp {
   _hasActiveReceiveTransfer() {
     return (this.ft._recv?.size || 0) > 0 || (this.folder._recv?.size || 0) > 0;
   }
-  _hasActiveReceiveTransferForPeer(fp) {
-    if (!fp) return false;
-    const recvState = this.ft._recv?.get(fp);
-    if (recvState && !recvState.done) return true;
-    for (const state of this.folder._recv?.values?.() || []) {
-      if (state?.from === fp) return true;
-    }
-    return false;
-  }
   hasActiveGame() {
     return this.games.size > 0;
   }
@@ -201,22 +191,6 @@ export class TurquoiseApp {
     if (nd) nd.innerHTML = labelWithCodeHtml(this.id.nickname, this.id.fingerprint, 'ui-code self-code', 'ui-name self-name');
     if (ni) ni.value = this.id.nickname;
     if (fp) fp.textContent = this.id.fingerprint;
-    this._updateNameHint();
-  }
-
-  _updateNameHint() {
-    const nd = $('nick-display');
-    const ni = $('nick-input');
-    const hint = $('name-hint');
-    if (!hint || !nd) return;
-    if (ni?.classList.contains('visible')) {
-      hint.classList.add('visible');
-      return;
-    }
-    const v = nd.textContent?.trim() || '';
-    const plain = v.replace(/^\([^)]+\)\s*/, '').trim();
-    const isDefault = v === '···' || /^\([a-f0-9]{8}\)$/.test(v) || /^[a-f0-9]{8}$/.test(plain || v);
-    hint.classList.toggle('visible', isDefault);
   }
 
   _loadTheme() {
@@ -382,7 +356,6 @@ export class TurquoiseApp {
     const d=$('nick-display'), i=$('nick-input');
     if (!d||!i||i.classList.contains('visible')) return;
     d.classList.add('hidden'); i.classList.add('visible'); i.focus(); i.select();
-    this._updateNameHint();
   }
 
   _suppressVisibleReconnect(ms=60_000) {
@@ -523,9 +496,7 @@ export class TurquoiseApp {
     } else this._renderPeers();
     if (this.active===fp || this.active===CIRCLE) this._renderHeader();
     const resuming = this.ft.onPeerConnected(fp);
-    if (!this._failureReloadPeer || this._failureReloadPeer === fp || !this._hasActiveReceiveTransfer()) {
-      this._clearFailureReload();
-    }
+    this._clearFailureReload();
     this._resendActiveFolderManifests(fp);
     this._updateTransferWarn();
     this._status(resuming ? `${name} rejoined — resuming live transfer` : `${name} joined`, resuming ? 'info' : 'ok', 5000);
@@ -539,18 +510,9 @@ export class TurquoiseApp {
     for (const [key] of [...this.games]) {
       if (key.startsWith(fp + ':')) this._closeGameShell(key);
     }
-
-    // Check per-peer receive state BEFORE onPeerDisconnected mutates it.
-    // The old code used _hasActiveReceiveTransfer() — a global check — which
-    // fired the reload whenever ANY receive was active, including stale entries
-    // from other peers or past transfers. From the logs: device was only SENDING
-    // a voice memo yet the reload still fired because the global check returned
-    // true. Now we only reload when we were specifically receiving from THIS peer.
-    const wasReceivingFromPeer = this._hasActiveReceiveTransferForPeer(fp);
-
     const pausedTransfers = this.ft.onPeerDisconnected(fp);
-    if (pausedTransfers && wasReceivingFromPeer) {
-      this._scheduleFailureReload('live receive paused too long', 10_000, false, fp);
+    if (pausedTransfers && this._hasActiveReceiveTransfer()) {
+      this._scheduleFailureReload('live receive paused too long', 10_000);
     }
     this._updateTransferWarn();
     this._renderPeers();
@@ -855,11 +817,11 @@ export class TurquoiseApp {
       this._setFolderCardNote(card, `⚠ ${errMsg}`, 'err');
     }
     this._updateTransferWarn();
-    if (receiverSide && errMsg!=='Cancelled') this._scheduleFailureReload(`folder receive failed: ${errMsg}`, 2200, true, fp);
+    if (receiverSide && errMsg!=='Cancelled') this._scheduleFailureReload(`folder receive failed: ${errMsg}`, 2200, true);
     if (errMsg!=='Cancelled') this._status('folder error: '+errMsg,'err',5000);
   }
 
-  _scheduleFailureReload(reason='connection failed', ms=8000, force=false, fp=null) {
+  _scheduleFailureReload(reason='connection failed', ms=8000, force=false) {
     if (!force && !this._hasActiveReceiveTransfer()) return;
     const dueAt = Date.now() + ms;
     if (this._failureReloadTimer) {
@@ -874,7 +836,6 @@ export class TurquoiseApp {
     }
     this._failureReloadDueAt = dueAt;
     this._failureReloadForced = !!force;
-    this._failureReloadPeer = fp || null;
     if (force) {
       window.__tqForceReloadOnVisible = true;
       window.__tqForceReloadReason = reason;
@@ -886,7 +847,6 @@ export class TurquoiseApp {
       this._failureReloadTimer = null;
       this._failureReloadDueAt = 0;
       this._failureReloadForced = false;
-      this._failureReloadPeer = null;
       window.__tqForceReloadOnVisible = false;
       window.__tqForceReloadReason = '';
       if (!forced && !this._hasActiveReceiveTransfer()) return;
@@ -900,7 +860,6 @@ export class TurquoiseApp {
     this._failureReloadTimer = null;
     this._failureReloadDueAt = 0;
     this._failureReloadForced = false;
-    this._failureReloadPeer = null;
     window.__tqForceReloadOnVisible = false;
     window.__tqForceReloadReason = '';
   }
@@ -1232,7 +1191,7 @@ export class TurquoiseApp {
       card.querySelector('.prog-track')?.remove(); card.querySelector('.file-stats')?.remove(); card.querySelector('.file-cancel')?.remove();
       this._setFileCardNote(card, `⚠ ${errMsg}`, 'err');
     });
-    if (receiverSide && errMsg!=='Cancelled') this._scheduleFailureReload(`file receive failed: ${errMsg}`, 2200, true, fp);
+    if (receiverSide && errMsg!=='Cancelled') this._scheduleFailureReload(`file receive failed: ${errMsg}`, 2200, true);
     if (errMsg!=='Cancelled') this._status('transfer error: '+errMsg,'err',5000);
   }
 
@@ -1463,21 +1422,19 @@ export class TurquoiseApp {
     const key  = fp + ':' + gameType;
     const send = m => this.net.sendCtrl(fp, {type:'game',...m});
     const close = () => this._closeGameShell(key);
-    if (gameType === 'snake') return null;
     if (gameType === 'sps')   return new StonePaperScissors(fp, this.id.fingerprint, send, close);
     if (gameType === 'chess') return new Chess(fp, this.id.fingerprint, send, close);
     if (gameType === 'airh')  return new AirHockey(fp, this.id.fingerprint, send, close);
-    if (gameType === 'skyd')  return new BattleGalactica(fp, this.id.fingerprint, send, close, gameType);
+    if (gameType === 'skyd' || gameType === 'snake') return new BattleGalactica(fp, this.id.fingerprint, send, close, gameType);
     return new TicTacToe(fp, this.id.fingerprint, send, close);
   }
 
   _startGame(fp, gameType) {
-    if (!['ttt','sps','chess','airh','skyd'].includes(gameType)) return;
+    if (!['ttt','sps','chess','airh','skyd','snake'].includes(gameType)) return;
     this._openSession(fp).then(() => {
       const key = fp + ':' + gameType;
       if (this.games.has(key)) this._closeGameShell(key);
       const game = this._makeGame(fp, gameType);
-      if (!game) return;
       if (gameType === 'chess') game.myColor = 'w';
       this.games.set(key, game);
       this._updateTransferWarn();
@@ -1496,10 +1453,6 @@ export class TurquoiseApp {
   _dispatchGame(fp, msg) {
     const { gameType } = msg;
     if (!gameType) return;
-    if (gameType === 'snake') {
-      this._log.warn('app','_dispatchGame','ignoring retired snake game', { from:fp.slice(0,8) });
-      return;
-    }
     const key = fp + ':' + gameType;
     let game = this.games.get(key);
     if (game && this._gameShellMissing(game)) {
@@ -1540,7 +1493,7 @@ export class TurquoiseApp {
         audio: true,
         video: video ? {facingMode: this._facingMode} : false
       });
-    } catch(e) { this._handleMediaError(e, fp, video ? 'camera/mic' : 'microphone'); return; }
+    } catch(e) { this._handleMediaError(e,fp); return; }
     this.call={fp,type:callType,phase:'inviting',localStream:s,remoteStream:null,muted:false,camOff:false,inviteTimer:setTimeout(()=>this._onCallTimeout(fp),45_000)};
     this.net.sendCtrl(fp,{type:'call-invite',callType,nick:this.id.nickname});
     const label = callType==='stream' ? 'eyes·on' : 'signal';
@@ -1587,7 +1540,7 @@ export class TurquoiseApp {
         video: video ? {facingMode: this._facingMode} : false
       });
     }
-    catch(e){ this.call=null; this._handleMediaError(e, fp, video ? 'camera/mic' : 'microphone'); return; }
+    catch(e){ this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this.call=null; this._handleMediaError(e,fp); return; }
     this.call.localStream=s; this.call.phase='connecting';
     this.net.sendCtrl(fp,{type:'call-accept'});
     await this._openSession(fp); this._renderCallPanel();
@@ -1671,7 +1624,7 @@ export class TurquoiseApp {
         audio: true,
         video: video ? {facingMode: this._facingMode} : false
       });
-    } catch(e) { this._handleMediaError(e); return; }
+    } catch(e) { this._handleMediaError(e,null); return; }
 
     // _connecting: peers we've invited but haven't got streams from yet
     this.circleCall={
@@ -1729,7 +1682,7 @@ export class TurquoiseApp {
           video: video ? {facingMode: this._facingMode} : false
         });
       }
-      catch(e) { this._handleMediaError(e, fp, video ? 'camera/mic' : 'microphone'); return; }
+      catch(e) { this.net.sendCtrl(fp,{type:'permission-denied',media:video?'camera/mic':'microphone'}); this._handleMediaError(e,null); return; }
       this.circleCall.localStream=s;
     }
     this.circleCall.phase='active';
@@ -2134,17 +2087,17 @@ export class TurquoiseApp {
     wl?.release?.().catch?.(()=>{});
   }
 
-  _handleMediaError(e, fp=null, media=null) {
+  _handleMediaError(e, fp) {
     const msg=e.name==='NotAllowedError'?'mic/cam permission denied':'no mic/cam found';
     this._status(msg,'err',8000);
-    if (fp && media) this.net.sendCtrl(fp,{type:'permission-denied',media});
+    if (fp) this.net.sendCtrl(fp,{type:'permission-denied',media:msg});
   }
 
   // ── State import/export ────────────────────────────────────────────────────
 
   async _exportState() {
     try {
-      const msgs=await loadAllMessages(Infinity);
+      const msgs=await loadAllMessages();
       const ps=await loadPeers();
       const keys=await this.id.exportKeyData?.();
       const blob=new Blob([JSON.stringify({v:7,msgs,peers:ps,identity:{...keys,nickname:this.id.nickname}})],{type:'application/json'});
@@ -2164,8 +2117,7 @@ export class TurquoiseApp {
         this._status('identity imported — reloading…','ok');
         setTimeout(()=>location.reload(),1500);
       } else {
-        this._status(`imported ${data.msgs?.length||0} messages — reloading…`,'ok',3000);
-        setTimeout(()=>location.reload(),1500);
+        this._status(`imported ${data.msgs?.length||0} messages`,'ok',5000);
       }
     } catch(e){ this._status('import failed: '+e.message,'err',5000); }
   }
