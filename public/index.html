@@ -309,6 +309,7 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
   display:flex;flex-direction:column;
   overflow:hidden;
   position:relative;z-index:3;
+  min-height:0;  /* required: prevents grid item from overflowing its row track */
 }
 #chat-header{
   display:flex;align-items:center;gap:10px;
@@ -387,7 +388,19 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── Message bubbles ─────────────────────────────────────────────────────── */
 .msg{
-  max-width:64%;padding:10px 14px 22px;
+  /* flex-shrink:0 is the primary fix for both "stones shrinking" and "chat not
+     scrollable". #chat-area is a flex column; the default flex-shrink:1 was
+     collapsing message HEIGHT when the container filled up. Stones shrank
+     vertically instead of overflowing → overflow-y:auto never triggered.
+     With flex-shrink:0 messages maintain their natural height and the
+     container scrolls when they overflow. */
+  flex-shrink:0;
+  /* width:fit-content: stone is only as wide as its text content, not
+     stretched to max-width on short messages. align-self per .sent/.recv
+     controls left/right alignment. */
+  width:fit-content;
+  max-width:64%;
+  padding:10px 14px 22px;
   position:relative;word-break:break-word;line-height:1.45;
   font-size:12px;transition:transform .1s;cursor:default;
   margin:0;
@@ -460,6 +473,12 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── File & folder cards ─────────────────────────────────────────────────── */
 .file-card,.folder-card{
+  /* flex-shrink:0: same reason as .msg — prevents height collapsing in the
+     flex column. align-self:flex-start: without this, received cards (no .sent)
+     stretch to full container width due to default align-items:stretch on
+     #chat-area. Cards should hug their content width. */
+  flex-shrink:0;
+  align-self:flex-start;
   max-width:280px;padding:8px 11px;
   background:
     linear-gradient(150deg,rgba(255,255,255,.026),transparent 38%),
@@ -1065,11 +1084,13 @@ button:hover,.pm-item:hover,.ta-btn:hover,.ci-btn:hover,.dl-btn:hover,.sg-chip:h
 
 /* ── Tool embed ──────────────────────────────────────────────────────────── */
 .tool-embed{
+  flex-shrink:0;   /* same fix as .msg — prevent height collapse in flex column */
   width:min(100%,620px);max-width:620px;padding:10px 12px 12px;
   background:var(--bg2);border-left:2px solid var(--tq3);
   align-self:flex-start;
   position:relative;overflow:hidden;isolation:isolate;
-  border-radius:26px 18px 22px 16px / 18px 24px 16px 22px;
+  /* border-radius removed: clip-path is inherited from before pseudo-element;
+     having both caused double-clipping on game embeds */
   box-sizing:border-box;
 }
 .tool-embed.sent{border-left:none;border-right:2px solid var(--tq);align-self:flex-end}

@@ -4,7 +4,7 @@
  * Graceful partial install: a failing asset doesn't abort the install.
  */
 
-const CACHE = 'tq-v14';
+const CACHE = 'tq-v15';  // bumped: forces old tq-v14 cache to be evicted on next visit
 
 const CORE = [
   '/',

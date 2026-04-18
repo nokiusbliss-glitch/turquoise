@@ -513,8 +513,15 @@ export class TurquoiseNetwork {
         if (!ps.ready) continue;
         if (ps.ctrl?.readyState !== 'open') continue;
         if (++ps.hbMiss >= HB_MAX) { this._teardown(fp,'hb-timeout'); continue; }
+        // Arm a per-peer deadline: if pong doesn't arrive within HB_DL, the
+        // NEXT interval tick will increment hbMiss again and eventually tear down.
+        // Previously this timer had a no-op callback so it served no purpose.
         clearTimeout(ps.hbTimer);
-        ps.hbTimer = setTimeout(() => {}, HB_DL);
+        ps.hbTimer = setTimeout(() => {
+          const cur = this.peers.get(fp);
+          if (!cur || !cur.ready) return;
+          if (cur.hbMiss > 0) this._teardown(fp, 'hb-deadline');
+        }, HB_DL);
         try { ps.ctrl.send(JSON.stringify({type:'hb-ping'})); } catch {}
       }
     }, HB_IV);

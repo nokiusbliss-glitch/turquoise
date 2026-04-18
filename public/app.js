@@ -510,8 +510,16 @@ export class TurquoiseApp {
     for (const [key] of [...this.games]) {
       if (key.startsWith(fp + ':')) this._closeGameShell(key);
     }
+
+    // Check per-peer receive state BEFORE onPeerDisconnected mutates it.
+    // ft._recv IS keyed by fp — direct lookup is correct.
+    // folder._recv is keyed by folderId (UUID), NOT by fp — must scan values.
+    const ftRecvState = this.ft._recv?.get(fp);
+    const wasReceivingFromPeer = (ftRecvState && !ftRecvState.done)
+      || [...(this.folder._recv?.values() || [])].some(s => s.from === fp && !s.done);
+
     const pausedTransfers = this.ft.onPeerDisconnected(fp);
-    if (pausedTransfers && this._hasActiveReceiveTransfer()) {
+    if (pausedTransfers && wasReceivingFromPeer) {
       this._scheduleFailureReload('live receive paused too long', 10_000);
     }
     this._updateTransferWarn();
